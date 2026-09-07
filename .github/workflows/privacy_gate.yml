@@ -40,8 +40,14 @@ jobs:
           } catch (err) {
             report = JSON.parse((err.stdout || '').toString());
           }
-          const allowed = new Set(['CHANGELOG_PUBLIC_BASELINE.md', 'package-lock.json', 'ui/package-lock.json', '.github/workflows/privacy_gate.yml']);
-          const bad = (report.findings || []).filter((f) => !((f.category === 'public_snapshot_unmanifested_file' || f.category === 'public_snapshot_file_mismatch') && allowed.has(f.path)));
+          const manifest = JSON.parse(require('node:fs').readFileSync('/tmp/gate-tree/public_snapshot_manifest.json', 'utf8'));
+          const removed = new Set(manifest.files.map((f) => f.path).filter((p) => {
+            const rules = JSON.parse(require('node:fs').readFileSync('/tmp/gate-tree/scripts/privacy/public_export_policy.json', 'utf8')).export_excluded_paths;
+            return rules.some((rule) => (rule.endsWith('/') ? p.startsWith(rule) : p === rule));
+          }));
+          const allowedUnmanifested = new Set(['CHANGELOG_PUBLIC_BASELINE.md', 'CHANGELOG.md', 'package-lock.json', 'ui/package-lock.json']);
+          const allowedMismatch = new Set(['README.md', 'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'DESIGN.md', 'docs/README.md', 'docs/project_structure.md', '.github/workflows/privacy_gate.yml', 'scripts/privacy/public_export_policy.json']);
+          const bad = (report.findings || []).filter((f) => !((f.category === 'public_snapshot_unmanifested_file' && allowedUnmanifested.has(f.path)) || (f.category === 'public_snapshot_file_mismatch' && allowedMismatch.has(f.path)) || (f.category === 'public_snapshot_file_missing' && removed.has(f.path))));
           if (!report.source || report.source.manifest_bound !== true) { console.error('snapshot manifest not bound'); process.exit(1); }
           if (bad.length > 0) { console.error(JSON.stringify(bad, null, 2)); process.exit(1); }
           const suffix = ['users', 'noreply.github.com'].join('.');

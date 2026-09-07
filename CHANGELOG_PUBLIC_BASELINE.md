@@ -24,7 +24,9 @@ and can follow as later public releases.
 8. Route editor persistence, gateway settings, upstream controls
 9. Smoke hardening, state context split, test stabilization
 10. v0.2.0 desktop preview closure
-11. Public baseline notes and snapshot manifest (this commit)
+11. Public baseline notes and snapshot manifest
+12. Privacy-gate repair for manifest-bound checkouts (lockfiles, archive-based gate)
+13. v0.2.0 public release: slimmed tree, relationship notes, release tag
 
 ## Deviations from a literal replay
 
@@ -61,6 +63,31 @@ and can follow as later public releases.
   authoritative scanner but runs it over a `git archive` snapshot, accepts
   only the documented post-export delta, and additionally asserts every
   history identity stays on the public noreply domain.
+
+## Release shaping (v0.2.0 public release)
+
+This repository accepts release versions only. The v0.2.0 release commit
+applies the following reviewed delta on top of the manifest envelope:
+
+- Removed development-only paths: `.claude/`, `.kilo/`,
+  `docs/PHASE-ARCHIVE.md`, `docs/progress/`, the closed history reviews
+  under `docs/reviews/`, and the live development log `PROGRESS.md`.
+  Product reviews that other docs still reference
+  (`mcp_dsh_workspace_validation.md`) are kept. The export policy file
+  travels with the tree so the exclusion rules stay reviewable; the gate
+  derives the removed set from it instead of a hardcoded list.
+- Repaired the single dangling documentation link left by the removals
+  (`README.md` intro no longer points at the development log).
+- Appended a "Public-release model" section to `AGENTS.md`, `CLAUDE.md`,
+  and `GEMINI.md` stating the two-repository relationship: releases flow
+  in as audited snapshots only, and no git objects are ever exchanged
+  between the private and public histories. Older process prose in these
+  files describes the private development workflow.
+- The CI gate allowlist covers exactly this delta: removed paths must
+  match the export policy exclusion rules, and modified files are limited
+  to the reviewed shaping set. Anything else fails the gate loudly.
+- Tagged `v0.2.0`. Future releases arrive the same way: one audited
+  snapshot commit plus tag, produced by the private sync tooling.
 
 ## Verification performed before publication
 

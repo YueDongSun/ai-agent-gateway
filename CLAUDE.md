@@ -182,3 +182,19 @@ imported/skipped/total + auto-seeded route count + skipped no-key count.
 - **Rust**: new tables bump `SCHEMA_VERSION` + add a migration branch in `schema.rs`. New commands must be registered in `lib.rs::invoke_handler`. DAO methods live in `impl Database` blocks.
 - **TypeScript**: strict; ESM. UI imports from `lib/api/*`. No path aliases in `src/` (Node tree); `ui/` uses relative imports.
 - **Docs**: after any feature change, update `PROGRESS.md` log; keep `DESIGN.md`/`CLAUDE.md`/`AGENTS.md` in sync.
+
+## Public-release model
+
+This public repository contains release snapshots only. Day-to-day
+development happens in a separate private repository; nothing is merged,
+pushed, fetched, or pulled between the two histories. Each public commit
+is an audited, history-free export plus the documented release shaping
+below, committed under a single public publisher identity. Do not import
+external git histories, remotes, tags, or reflogs here. The export,
+privacy-audit, and snapshot-manifest procedure is documented in
+[Privacy-safe public snapshot](docs/public_release_privacy.md); every
+release delta beyond the manifest envelope is listed in
+[CHANGELOG_PUBLIC_BASELINE.md](CHANGELOG_PUBLIC_BASELINE.md) and
+[CHANGELOG.md](CHANGELOG.md). Process references in older docs (migration
+loops, phase logs) describe the private development workflow, not this
+release tree.

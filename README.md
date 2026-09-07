@@ -3,8 +3,7 @@
 Unified **Gateway Proxy** + **Config Switcher** for AI Coding Agents
 
 The current desktop distribution is **v0.2.0 Preview**. Start with the
-[release notes](docs/releases/v0_2_0.md), [build and platform guide](docs/desktop_release.md),
-and [current progress](PROGRESS.md). The Windows preview is unsigned; native
+[release notes](docs/releases/v0_2_0.md) and [build and platform guide](docs/desktop_release.md). The Windows preview is unsigned; native
 acceptance on other operating systems and automatic updates are not complete.
 The feature descriptions below also include the retained Node CLI and historical
 migration scope; they are not a platform certification checklist.

@@ -58,7 +58,17 @@
     "docs/reviews/mcp_dsh_workspace_eval.json",
     "docs/reviews/mcp_dsh_workspace_final_eval.json",
     "docs/reviews/mcp_dsh_workspace_final_receipt.json",
-    "docs/reviews/mcp_dsh_workspace_receipt.json"
+    "docs/reviews/mcp_dsh_workspace_receipt.json",
+    ".claude/",
+    ".kilo/",
+    "docs/PHASE-ARCHIVE.md",
+    "docs/progress/",
+    "docs/reviews/phase_23_review.md",
+    "docs/reviews/frontend_product_polish.md",
+    "docs/reviews/dsh_runtime_refactor_review.md",
+    "docs/reviews/README.md",
+    "PROGRESS.md",
+    "scripts/public_sync.mjs"
   ],
   "release_asset_extensions": [
     ".7z",
