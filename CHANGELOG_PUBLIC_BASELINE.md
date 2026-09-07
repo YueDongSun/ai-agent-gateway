@@ -50,8 +50,17 @@ and can follow as later public releases.
   the privacy exporter for the sanitized source tree: policy hash,
   export-tree digest, per-file hashes, redacted gate summary, link check,
   and npm package-surface check. It references no private commit or
-  timestamp. This notes file is the only tracked addition beyond the
-  manifest envelope.
+  timestamp.
+- Files added after the export are tracked openly and covered by the CI
+  gate instead of the envelope: this notes file, root and UI npm lockfiles
+  (the documented setup runs `npm ci`, which requires them), and the
+  `privacy_gate` workflow repair below.
+- The exported `privacy_gate` workflow could not pass as shipped: it
+  assumed lockfiles that postdate this baseline, and its bare tree-audit
+  step rejects any git checkout by design. The repaired gate keeps the
+  authoritative scanner but runs it over a `git archive` snapshot, accepts
+  only the documented post-export delta, and additionally asserts every
+  history identity stays on the public noreply domain.
 
 ## Verification performed before publication
 

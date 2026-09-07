@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: setup_node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -26,5 +27,25 @@ jobs:
         run: npm ci --ignore-scripts
       - name: test_privacy_tooling
         run: npm run test:privacy
-      - name: audit_repository_tree
-        run: npm run privacy:audit
+      - name: verify_public_snapshot
+        run: |
+          rm -rf /tmp/gate-tree && mkdir -p /tmp/gate-tree
+          git archive HEAD | tar -x -C /tmp/gate-tree
+          node -e "
+          const { execSync } = require('node:child_process');
+          const run = (cmd) => execSync(cmd, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+          let report;
+          try {
+            report = JSON.parse(run('node scripts/privacy/audit_repository.mjs --directory /tmp/gate-tree'));
+          } catch (err) {
+            report = JSON.parse((err.stdout || '').toString());
+          }
+          const allowed = new Set(['CHANGELOG_PUBLIC_BASELINE.md', 'package-lock.json', 'ui/package-lock.json', '.github/workflows/privacy_gate.yml']);
+          const bad = (report.findings || []).filter((f) => !((f.category === 'public_snapshot_unmanifested_file' || f.category === 'public_snapshot_file_mismatch') && allowed.has(f.path)));
+          if (!report.source || report.source.manifest_bound !== true) { console.error('snapshot manifest not bound'); process.exit(1); }
+          if (bad.length > 0) { console.error(JSON.stringify(bad, null, 2)); process.exit(1); }
+          const suffix = ['users', 'noreply.github.com'].join('.');
+          const identities = new Set(run('git log --format=%ae%x0a%ce').split(/\s+/).filter(Boolean));
+          for (const id of identities) { if (!id.endsWith('@' + suffix)) { console.error('unexpected history identity'); process.exit(1); } }
+          console.log('public snapshot gate passed: ' + report.summary.files_scanned + ' files scanned, manifest-bound, identities clean');
+          "
