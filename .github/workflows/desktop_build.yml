@@ -1,0 +1,62 @@
+name: desktop_build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows_x64
+            runner: windows-latest
+            target: ''
+          - name: macos_x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - name: macos_arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: ubuntu_x64
+            runner: ubuntu-22.04
+            target: ''
+    steps:
+      - uses: actions/checkout@v7
+      - name: install_linux_dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - name: setup_node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: install_rust_stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: restore_rust_cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - name: install_root_dependencies
+        run: npm install --no-package-lock
+      - name: install_ui_dependencies
+        run: npm install --prefix ui --no-package-lock
+      - name: verify_node_and_ui
+        run: npm run typecheck && npm test && npm run test:desktop_runner && npm --prefix ui run typecheck && npm run ui:build
+      - name: verify_release_inputs
+        run: npm run release:verify
+      - name: build_desktop
+        run: npm run desktop:build -- ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      - name: upload_desktop_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai_agent_gateway_${{ matrix.name }}
+          path: src-tauri/target/**/bundle/**
+          if-no-files-found: error

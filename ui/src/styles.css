@@ -1,0 +1,1640 @@
+/* AAG - cc-switch-style theme.
+ *
+ * Design language (matching cc-switch):
+ * - 64px sticky top header with AppSwitcher segmented control.
+ * - Apple systemBlue #0A84FF (dark) / #2563eb (light) primary.
+ * - emerald-500 for running/active-proxy state.
+ * - Cards: rounded-xl (12px) border + elevated background.
+ */
+
+:root {
+  /* bg layers */
+  --bg: #0f1115;
+  --bg-elevated: #171a21;
+  --bg-elevated-2: #1e222b;
+  --bg-input: #22262f;
+  --bg-overlay: rgba(0, 0, 0, 0.55);
+
+  /* fg */
+  --fg: #e6e9ef;
+  --fg-muted: #8b93a3;
+  --fg-code: #9ecbff;
+
+  /* accent (Apple systemBlue) */
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --accent-bg: rgba(10, 132, 255, 0.12);
+  --accent-text: #6cb2ff;
+
+  /* success (emerald-500) */
+  --success: #10b981;
+  --success-bg: rgba(16, 185, 129, 0.12);
+  --success-text: #34d399;
+
+  /* danger */
+  --danger: #ef4444;
+  --danger-bg: rgba(239, 68, 68, 0.1);
+
+  /* lines */
+  --border: #2a2f3a;
+  --border-strong: #3a4150;
+
+  /* misc */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --page-max: 1080px;
+  --line-height: 1.55;
+
+  /* pills */
+  --pill-on-bg: rgba(16, 185, 129, 0.15);
+  --pill-on-fg: #34d399;
+  --pill-off-bg: rgba(139, 147, 163, 0.12);
+  --pill-off-fg: #8b93a3;
+
+  /* Round 1 additions: status pill + gateway panel + icon buttons */
+  --warn: #f59e0b;
+  --warn-bg: rgba(245, 158, 11, 0.12);
+  --warn-text: #fbbf24;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #f6f7f9;
+  --bg-elevated: #ffffff;
+  --bg-elevated-2: #f0f2f5;
+  --bg-input: #ffffff;
+  --bg-overlay: rgba(15, 17, 21, 0.4);
+
+  --fg: #16181d;
+  --fg-muted: #6b7280;
+  --fg-code: #1d4ed8;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-bg: rgba(37, 99, 235, 0.08);
+  --accent-text: #2563eb;
+
+  --success: #059669;
+  --success-bg: rgba(5, 150, 105, 0.08);
+  --success-text: #059669;
+
+  --danger: #dc2626;
+  --danger-bg: rgba(220, 38, 38, 0.06);
+
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  --pill-on-bg: rgba(5, 150, 105, 0.1);
+  --pill-on-fg: #059669;
+  --pill-off-bg: rgba(107, 114, 128, 0.1);
+  --pill-off-fg: #6b7280;
+
+  /* Round 1 additions: status pill + gateway panel + icon buttons */
+  --warn: #d97706;
+  --warn-bg: rgba(217, 119, 6, 0.08);
+  --warn-text: #b45309;
+  --shadow-card: 0 1px 2px rgba(15, 17, 21, 0.06);
+  --shadow-pop: 0 6px 24px rgba(15, 17, 21, 0.12);
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 14px;
+  line-height: var(--line-height);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+code,
+pre {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+/* ----- Header (64px sticky, cc-switch style) ----- */
+
+.aag-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 max(24px, calc((100vw - var(--page-max)) / 2));
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.aag-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.aag-brand h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.aag-brand .aag-sub {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* AppSwitcher segmented control */
+.app-switcher {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.aag-logo img {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.release_badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.release_version {
+  color: var(--fg-muted);
+}
+
+.release_channel {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated-2);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.release_channel[data-channel="demo"] {
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.release_channel[data-channel="development"] {
+  color: var(--warn);
+}
+
+.release_channel[data-channel="release"] {
+  color: var(--success);
+}
+
+.app-switcher button {
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-weight: 550;
+  font-family: inherit;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+}
+.app-switcher button svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+.app-switcher button:hover {
+  color: var(--fg);
+  svg { opacity: 1; }
+}
+
+.app-switcher button.active {
+  background: var(--accent);
+  color: #fff;
+  svg { opacity: 1; }
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.theme-btn,
+.lang-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg-muted);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.theme-btn:hover,
+.lang-btn:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+/* ----- Gateway status pill (header) -----
+ * Round 1: a single source of truth for "is the local proxy alive?". Three
+ * states — running (green), degraded (amber — at least one breaker open),
+ * stopped (gray). The dot is the only colored element; the label is muted
+ * by default and inherits the state colour. */
+.gw-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg-muted);
+  user-select: none;
+  white-space: nowrap;
+}
+.gw-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.gw-status.running {
+  color: var(--success-text);
+  border-color: var(--success);
+  background: var(--success-bg);
+}
+.gw-status.running .gw-status-dot {
+  box-shadow: 0 0 6px var(--success);
+}
+.gw-status.degraded {
+  color: var(--warn-text);
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+.gw-status.degraded .gw-status-dot {
+  box-shadow: 0 0 6px var(--warn);
+}
+.gw-status.unknown {
+  color: var(--warn-text);
+  border-color: var(--border-strong);
+  background: var(--warn-bg);
+}
+.gw-status.stopped {
+  color: var(--fg-muted);
+}
+.gw-status.stopped .gw-status-dot {
+  opacity: 0.5;
+}
+
+/* Round 1: AAG logomark next to the brand text. Centered vertically with
+ * the title row. */
+.aag-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.aag-logo {
+  flex-shrink: 0;
+  color: var(--accent);
+  display: flex;
+  width: 22px;
+  height: 22px;
+}
+
+/* Round 1: error fallback wrapper — give the bare `.aag-error` some layout
+ * instead of leaving it as a default-block pre. */
+.aag-error-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+/* ----- Main / page scaffold ----- */
+
+.aag-main {
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 24px 24px 48px;
+}
+
+.page-loading {
+  color: var(--fg-muted);
+  padding: 48px 0;
+  text-align: center;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.page-header h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.muted {
+  color: var(--fg-muted);
+  margin: 0;
+}
+
+.small {
+  font-size: 12.5px;
+}
+
+/* ----- Cards (rounded-xl, cc-switch style) ----- */
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  /* Round 1: subtle depth so cards separate from the page background. */
+  box-shadow: var(--shadow-card);
+}
+
+/* Round 1: gateway card wears a subtle accent gradient + accent border so it
+ * reads as the primary "control surface" vs the surrounding data cards.
+ * Doesn't change layout — just colors + a slightly tighter head. */
+.gateway-panel {
+  border-color: var(--accent);
+  background:
+    linear-gradient(135deg, var(--accent-bg) 0%, transparent 55%),
+    var(--bg-elevated);
+  position: relative;
+  overflow: hidden;
+}
+.gateway-panel .card-head {
+  margin-bottom: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.card-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 620;
+}
+
+/* ----- Buttons ----- */
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 550;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-input);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn.danger {
+  color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+
+.btn.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Round 1: icon-only button — used for copy, test, and other compact
+ * actions where a label eats too much visual weight. Sized so the icon
+ * reads ~14px. Optionally carries a `data-tooltip` for the CSS-only hover
+ * label (the native `title` attr is also kept as a fallback for
+ * keyboard / screen-reader users). */
+.btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 7px;
+  min-width: 26px;
+  position: relative;
+  font-size: 14px;
+}
+.btn.icon-btn svg { display: block; }
+.btn.icon-btn[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  box-shadow: var(--shadow-pop);
+  z-index: 20;
+  pointer-events: none;
+}
+.btn.icon-btn[data-tooltip]:hover::before {
+  /* tiny arrow under the tooltip */
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: var(--border-strong);
+  pointer-events: none;
+  z-index: 20;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ----- Pills / tags ----- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.pill.on {
+  background: var(--pill-on-bg);
+  color: var(--pill-on-fg);
+}
+
+.pill.off {
+  background: var(--pill-off-bg);
+  color: var(--pill-off-fg);
+}
+
+.tag {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 5px;
+  padding: 1px 7px;
+  margin-left: 8px;
+  vertical-align: 1px;
+}
+
+.tag-current {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+/* ----- Endpoint / gateway card ----- */
+
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  margin-top: 8px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  flex-wrap: wrap;
+}
+
+.endpoint-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  min-width: 72px;
+  flex-shrink: 0;
+}
+
+.endpoint-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--fg-code);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secret_value {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.secret_value .endpoint-value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.secret_toggle {
+  flex-shrink: 0;
+}
+
+/* ----- Failover chain editor (Claude page) -----
+ * Round 1 cleanup: `.chain-grid` / `.chain-pane` / `.pane-head` were the
+ * two-pane "Providers | Routes" layout that was replaced by the unified
+ * route editor in Phase 18. No JSX sets these classes anymore. */
+
+.pool-list,
+.route-list,
+.provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pool-row,
+.provider-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s;
+}
+
+.pool-row:hover,
+.provider-row:hover {
+  border-color: var(--border-strong);
+}
+
+.provider-row.current {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.provider-row.drag-over {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent-bg);
+}
+
+/* Disabled upstream: dimmed but still interactive (toggle re-enables). */
+.provider-row.disabled {
+  opacity: 0.55;
+  text-decoration-color: var(--fg-muted);
+}
+.provider-row.disabled .provider-name,
+.provider-row.disabled .provider-url {
+  text-decoration: line-through;
+}
+
+.drag-handle {
+  color: var(--fg-muted);
+  cursor: grab;
+  padding: 0 6px 0 2px;
+  user-select: none;
+  font-size: 14px;
+  letter-spacing: -1px;
+  flex-shrink: 0;
+  justify-self: start;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.tag-paused {
+  background: var(--pill-off-bg);
+  color: var(--pill-off-fg);
+}
+
+.tag-pinned {
+  background: rgba(255, 149, 0, 0.15);
+  color: #ff9500;
+  font-weight: 700;
+}
+
+.provider-row.pinned {
+  border-color: #ff9500;
+  background: rgba(255, 149, 0, 0.05);
+}
+
+/* Circuit breaker status dots */
+.breaker-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  margin-left: 8px;
+  vertical-align: 1px;
+  flex-shrink: 0;
+}
+
+.breaker-closed {
+  background: var(--success);
+  box-shadow: 0 0 4px var(--success);
+}
+
+.breaker-open {
+  background: var(--danger);
+  box-shadow: 0 0 4px var(--danger);
+}
+
+.breaker-half {
+  background: #ff9500;
+  box-shadow: 0 0 4px #ff9500;
+}
+
+/* Force-pin toggle switch (on/off) */
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+  background: var(--fg-muted);
+  border-radius: 999px;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(16px);
+  background: #fff;
+}
+
+/* Failover flow visualization */
+.failover-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 12px;
+}
+
+.flow-node {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+  flex-wrap: wrap;
+}
+
+.flow-node.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.flow-node.pinned {
+  border-color: #ff9500;
+  background: rgba(255, 149, 0, 0.05);
+}
+
+.flow-node.broken {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  opacity: 0.7;
+}
+
+/* Disabled upstream in the flow: dimmed + dashed so it's visibly part
+ * of the chain but clearly out of rotation. */
+.flow-node.disabled {
+  border-style: dashed;
+  opacity: 0.5;
+}
+
+.flow-arrow {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.flow-node-id {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 120px;
+}
+
+.flow-node-url {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-node-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+/* Test result display */
+.test-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-top: 4px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.test-result.ok {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border: 1px solid var(--success);
+}
+
+.test-result.fail {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.btn.test-ok {
+  border-color: var(--success);
+  color: var(--success-text);
+}
+
+.btn.test-fail {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.pool-info,
+.provider-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+}
+
+.pool-name,
+.provider-name {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.pool-url,
+.provider-url {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Model mapping tags shown on provider cards */
+.provider-mappings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.mapping-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.pool-actions,
+.provider-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  justify-self: end;
+}
+/* (route-card now defined once in the Failover Routes section below) */
+
+.route-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.route-alias {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-code);
+}
+
+.hop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: grab;
+}
+
+.hop-row.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.hop-row:active {
+  cursor: grabbing;
+}
+
+.hop-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  flex-shrink: 0;
+}
+
+.hop-provider {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hop-model {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.hop-remove {
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.hop-remove:hover {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.new-route {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.new-route .input {
+  width: 180px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+/* ----- Launchers (Codex page) ----- */
+
+.launcher-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.launcher {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.launcher-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.launcher-text strong {
+  font-size: 13.5px;
+  font-weight: 620;
+}
+
+/* ----- Forms / modal ----- */
+
+.input {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.input:focus {
+  outline: 2px solid transparent;
+  border-color: var(--accent);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.modal {
+  width: 100%;
+  max-width: 460px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.modal h3 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  margin-bottom: 12px;
+}
+
+.modal .checkbox-row {
+  flex-direction: row;
+  align-items: center;
+}
+
+/* Round 1 cleanup: `.model-catalog-section/header/row` were the Codex
+ * model-catalog editor in the proxy-provider edit modal. Phase 18 moved
+ * model mapping into the route editor, so the catalog UI was retired.
+ * No JSX consumer — safe to delete. */
+
+/* Round 1: data-tooltip is now used by `.btn.icon-btn[data-tooltip]`
+ * (see the Buttons section). The only `data-tooltip` rule left in the
+ * stylesheet is the hover label there. */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* ----- Banners ----- */
+
+.error-banner {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: 12.5px;
+  padding: 9px 14px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+
+.notice-banner {
+  background: var(--success-bg);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  color: var(--success-text);
+  font-size: 12.5px;
+  padding: 9px 14px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+
+/* Restart-hint banner — centered, accent-bordered, sits below the
+ * route editor (and any future mutation surface) to remind the user
+ * that the change requires a proxy restart to take effect. The leading
+ * "↻" is rendered via ::before so we don't have to remember it in JSX.
+ */
+.restart-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  /* Round 1: soften. Was accent-bg / accent-text / accent border — felt
+   * like a primary CTA at the bottom of the page. Make it a subtle muted
+   * hint instead: dashed muted border, transparent fill, fg-muted text. */
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  margin: 14px auto 6px;
+  max-width: 720px;
+  font-size: 12px;
+  font-weight: 400;
+}
+.restart-hint::before {
+  content: '↻';
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+/* ----- Route editor (Failover Routes card) -----
+ *
+ * Top-level card (full page width). Previously nested inside the
+ * upstream pool card, losing ~80px to double padding — the hop model
+ * input was unusable. The toolbar is sticky inside the card so the
+ * user can save/discard without scrolling. Each route is a
+ * `.route-card`; hops live in a real <table> with explicit <colgroup>
+ * so columns line up. Drag is wired from the small `.hop-drag-handle`
+ * column only — children <select>/<input> are not drag targets.
+ */
+.route-editor {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+.route-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  position: sticky;
+  top: 64px; /* sit just below the 64px app header */
+  z-index: 4;
+  background: var(--bg-elevated);
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+.route-toolbar-title {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  flex: 1 1 auto;
+  text-align: left;
+}
+.route-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.route-dirty {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.route-desc {
+  margin-bottom: 12px;
+}
+.route-empty {
+  margin: 0 0 12px;
+}
+.route-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.route-card {
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+.route-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-bg);
+}
+.route-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.route-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.route-select input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.route-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.route-card-title strong {
+  font-size: 14px;
+}
+.route-hop-count {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.route-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.route-card-desc {
+  margin: 0 0 8px;
+}
+.route-no-hops {
+  margin: 0;
+}
+.btn.icon {
+  min-width: 26px;
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Hop table */
+/* Hop table — `table-layout: auto` so provider/model columns split the
+ * available space by content. NOTE: `min-width` on <col> is IGNORED by
+ * browsers under auto layout — the floor must live on the <td> (and on
+ * the input itself) for the column to actually keep its width. */
+.hop-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-size: 12.5px;
+}
+.hop_table_wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.hop-table col.hop-col-idx { width: 40px; }
+.hop-table col.hop-col-drag { width: 40px; }
+.hop-table col.hop-col-provider { width: 42%; }
+.hop-table col.hop-col-model { width: auto; }
+.hop-table col.hop-col-remove { width: 44px; }
+.hop-table .hop-row {
+  display: table-row;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: inherit;
+  cursor: default;
+}
+.hop-table thead th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  padding: 6px 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.hop-table thead th:nth-child(1) { /* # */
+  text-align: center;
+}
+.hop-table thead th:nth-child(2),
+.hop-table thead th:nth-child(5) {
+  /* drag handle / remove — body cells are centered */
+  text-align: center;
+}
+.hop-table tbody td {
+  padding: 4px 6px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+.hop-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.hop-idx {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: center;
+}
+.hop-drag-cell {
+  text-align: center;
+}
+.hop-drag-handle {
+  display: inline-block;
+  cursor: grab;
+  color: var(--fg-muted);
+  font-size: 14px;
+  letter-spacing: -1px;
+  padding: 2px 4px;
+  user-select: none;
+  border-radius: 4px;
+  line-height: 1;
+}
+.hop-drag-handle:hover {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+.hop-drag-handle:active {
+  cursor: grabbing;
+}
+.hop-table tr.dragging {
+  opacity: 0.5;
+}
+.hop-table tr.drag-over td {
+  background: var(--accent-bg);
+  box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent);
+}
+.hop-provider-cell .input,
+.hop-model-cell .input {
+  font-size: 12px;
+  padding: 5px 8px;
+  width: 100%;
+  min-width: 0;
+}
+.hop-remove-cell {
+  text-align: center;
+}
+
+/* ModelSuggest — type-ahead dropdown for the hop model cell. The
+ * native <datalist> rendered inconsistently inside <td> elements in
+ * Tauri WebView2 (dropdown wouldn't always propagate the chosen
+ * value). This widget renders a real absolutely-positioned <ul> so
+ * clicks always fire the React handler. */
+/* ModelSuggest wrapper — input + toggle buttons in a flex row.
+ * The input grows; the buttons sit flush right at the end. */
+.model-suggest {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+}
+.model-suggest .input {
+  font-size: 12px;
+  padding: 5px 6px 5px 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.model-suggest-toggle {
+  flex-shrink: 0;
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-left: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 11px;
+  /* last button gets the right radius */
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.model-suggest-toggle + .model-suggest-toggle {
+  border-radius: 0; /* middle buttons when two exist */
+}
+.model-suggest-toggle:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.model-suggest-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.model-suggest-toggle:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+/* ModelSuggest menu — rendered via createPortal(document.body) with
+ * position:fixed (coords set in JS from input getBoundingClientRect).
+ * The CSS position/top/left are deliberately absent here — the
+ * component applies them inline so the menu always matches the
+ * current input rect (handles scroll, resize, table clipping).
+ */
+.model-suggest-menu {
+  z-index: 9999;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+.model-suggest-item {
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--fg);
+  cursor: pointer;
+  user-select: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.model-suggest-item:hover {
+  background: var(--bg-elevated-2);
+}
+.model-suggest-item.active {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+/* ----- Footer ----- */
+
+.aag-footer {
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  padding: 18px 24px 26px;
+}
+
+.aag-error {
+  padding: 24px;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1100px) {
+  .aag-header {
+    padding: 10px 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .aag-brand {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .aag-brand .aag-sub {
+    display: none;
+  }
+
+  .release_version {
+    display: none;
+  }
+
+  .app-switcher {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .app-switcher button {
+    flex: 0 0 auto;
+  }
+
+  .route-toolbar {
+    position: static;
+  }
+
+  .route-card-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .route-card-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 520px) {
+  .aag-main {
+    padding: 16px 16px 36px;
+  }
+
+  .aag-header {
+    gap: 8px;
+  }
+
+  .header-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .route-toolbar-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .route-card {
+    padding: 10px;
+  }
+}
+
+/* ----- About (fallback view) ----- */
+
+.about-update {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.about-update-endpoint {
+  flex: 1;
+  max-width: 380px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+
+.about-update-msg {
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}

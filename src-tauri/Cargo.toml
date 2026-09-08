@@ -1,0 +1,69 @@
+[package]
+name = "ai-agent-gateway"
+version = "0.2.0"
+description = "Unified local gateway and configuration switcher for AI coding agents"
+authors = ["Yuedong Sun"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.0"
+
+[lib]
+name = "ai_agent_gateway_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Tauri main app binary. Declared explicitly so `cargo run` (invoked by
+# `tauri dev`) doesn't see the aag-setup helper sitting next to it.
+[[bin]]
+name = "ai-agent-gateway"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+log = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+indexmap = { version = "2", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+dirs = "5"
+# Proxy (Phase 2)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"] }
+futures = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+bytes = "1"
+# Cloud sync (Phase 8) — AWS SigV4 signing + SHA-256
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+# Deep-link parser (Phase 9 Step 4) — URL parsing for aag:// scheme
+url = "2"
+# Desktop integration (Phase 9) — single-instance + deep link
+tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
+# Auto-update (Phase 9 Step 3) — optional; falls back gracefully when no
+# endpoint is configured (returns Ok(None) from .check()).
+tauri-plugin-updater = "2"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

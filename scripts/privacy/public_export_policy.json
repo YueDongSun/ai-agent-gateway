@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "source_mode": "tracked_current_tree",
+  "history_policy": "history_free",
+  "package_surface": "private",
+  "maximum_text_file_bytes": 33554432,
+  "maximum_history_bytes": 268435456,
+  "generated_asset_limits": {
+    "shared/dsh_market_catalog.json": 9437184
+  },
+  "required_ignored_paths": [
+    ".env",
+    ".env.production",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    ".aws/credentials",
+    ".docker/config.json",
+    "private.json",
+    "config/private.json",
+    "credentials.json",
+    "config/credentials.json",
+    "secrets.json",
+    "service_account.json",
+    ".claude.json",
+    ".claude/settings.local.json",
+    ".codex/config.toml",
+    "id_ed25519",
+    "client.pem",
+    "client.key",
+    "client.p12",
+    "client.kdbx",
+    "terraform.tfstate",
+    "runtime.db",
+    "runtime.sqlite",
+    "runtime.db-wal",
+    "runtime.db-shm",
+    "runtime.backup"
+  ],
+  "required_public_examples": [
+    ".env.example"
+  ],
+  "public_example_probes": [
+    "private.example.json",
+    "config/private.example.json",
+    "credentials.example.json",
+    "config/credentials.example.json",
+    ".npmrc.example"
+  ],
+  "npm_allowed_paths": [
+    "package.json",
+    "README.md",
+    "LICENSE",
+    "dist/"
+  ],
+  "export_excluded_paths": [
+    "docs/reviews/mcp_dsh_workspace_eval.json",
+    "docs/reviews/mcp_dsh_workspace_final_eval.json",
+    "docs/reviews/mcp_dsh_workspace_final_receipt.json",
+    "docs/reviews/mcp_dsh_workspace_receipt.json"
+  ],
+  "release_asset_extensions": [
+    ".7z",
+    ".appimage",
+    ".deb",
+    ".dmg",
+    ".exe",
+    ".msi",
+    ".pdb",
+    ".pkg",
+    ".rpm",
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".zip"
+  ]
+}

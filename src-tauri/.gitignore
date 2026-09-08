@@ -1,0 +1,9 @@
+# Build outputs
+target/
+
+# Tauri-generated
+gen/schemas/
+
+# OS
+.DS_Store
+Thumbs.db
