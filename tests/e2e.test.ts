@@ -80,6 +80,80 @@ describe('OpenAI compatible endpoints', () => {
   });
 });
 
+describe('OpenAI streaming SSE format (integration)', () => {
+  it('SSE chunks parse as valid OAI shapes with [DONE] sentinel', async () => {
+    const res = await req('/v1/chat/completions', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        model: 'claude-sonnet-4',
+        messages: [{ role: 'user', content: 'sse test' }],
+        stream: true,
+        temperature: 0,
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/event-stream/);
+    const text = await res.text();
+
+    // Parse SSE lines: each "data: <json>" line, terminated by "[DONE]"
+    const dataLines: unknown[] = [];
+    for (const raw of text.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue; // handled separately
+      dataLines.push(JSON.parse(payload));
+    }
+    expect(dataLines.length).toBeGreaterThanOrEqual(3);
+
+    // First chunk: role delta, no finish_reason
+    const first = dataLines[0] as { choices: Array<{ delta: { role?: string }; finish_reason: string | null }> };
+    expect(first.choices[0].delta.role).toBe('assistant');
+    expect(first.choices[0].finish_reason).toBeNull();
+
+    // Middle chunks: content deltas, no finish_reason
+    for (const chunk of dataLines.slice(1, -1) as Array<{ choices: Array<{ delta: { content?: string }; finish_reason: string | null }> }>) {
+      expect(chunk.choices[0].delta.content).toBeDefined();
+      expect(chunk.choices[0].finish_reason).toBeNull();
+    }
+
+    // Last chunk: finish_reason set, no content
+    const last = dataLines[dataLines.length - 1] as { choices: Array<{ delta: { content?: string }; finish_reason: string | null }> };
+    expect(last.choices[0].finish_reason).toBe('stop');
+
+    // [DONE] sentinel must appear at the end of the stream
+    expect(text.trimEnd().endsWith('data: [DONE]')).toBe(true);
+
+    // All chunks share the same id and model
+    for (const chunk of dataLines as Array<{ id: string; model: string; object: string }>) {
+      expect(chunk.id).toBe(first['id'] ?? first);  // id consistency below
+    }
+    const ids = new Set((dataLines as Array<{ id: string }>).map((c) => c.id));
+    expect(ids.size).toBe(1);
+    const models = new Set((dataLines as Array<{ model: string }>).map((c) => c.model));
+    expect(models.size).toBe(1);
+    expect(models.has('claude-sonnet-4')).toBe(true);
+  });
+
+  it('streaming mock-fail fails over to mock-fallback', async () => {
+    const res = await req('/v1/chat/completions', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        model: 'mock-fail',
+        messages: [{ role: 'user', content: 'stream failover' }],
+        stream: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The fallback provider succeeds; we should see "mock-fallback" in the response
+    expect(text).toContain('mock-fallback');
+    expect(text).toContain('[DONE]');
+  });
+});
+
 describe('Anthropic compatible endpoints', () => {
   it('non-stream /v1/messages', async () => {
     const res = await req('/v1/messages', {

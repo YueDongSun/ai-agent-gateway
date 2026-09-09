@@ -1,6 +1,11 @@
 /// Shared API types. Mirror Rust types from `src-tauri/src/provider.rs`.
 
-export type AppType = 'claude_code' | 'codex' | 'copilot' | 'pi' | 'antigravity';
+export type AppType = 'claude_code' | 'codex';
+
+export const APP_TYPES: { value: AppType; label: string }[] = [
+  { value: 'claude_code', label: 'Claude Code' },
+  { value: 'codex', label: 'Codex' },
+];
 
 export interface Provider {
   id: string;
@@ -13,9 +18,18 @@ export interface Provider {
   notes?: string | null;
   icon?: string | null;
   iconColor?: string | null;
-  meta?: Record<string, unknown> | null;
+  meta?: ProviderMeta | null;
   inFailoverQueue?: boolean;
-  syncLocked?: boolean;
+}
+
+export interface ProviderMeta {
+  custom_endpoints?: Record<string, CustomEndpoint>;
+}
+
+export interface CustomEndpoint {
+  url: string;
+  added_at: number;
+  last_used?: number | null;
 }
 
 export interface LiveWriteResult {
@@ -23,34 +37,4 @@ export interface LiveWriteResult {
   provider_id: string;
   written: string[];
   backup: string | null;
-}
-
-/// One row of feedback from `import_cc_switch_providers`.
-export interface ImportedProvider {
-  id: string;
-  appType: string;
-  name: string;
-}
-
-/// One failover route auto-built from an imported provider's
-/// `ANTHROPIC_DEFAULT_*_MODEL` env keys. Surfaced by the importer so
-/// the UI toast can report how many routes were created alongside the
-/// provider count.
-export interface ImportedRoute {
-  alias: string;
-  provider: string;
-  model: string;
-}
-
-/// Structured report returned by `import_cc_switch_providers`.
-export interface ImportReport {
-  sourceDb: string;
-  imported: ImportedProvider[];
-  skippedExisting: ImportedProvider[];
-  /** Providers filtered out because they carry no API key (e.g. Codex
-   *  ChatGPT-login / `default`). */
-  skippedNoKey: ImportedProvider[];
-  totalInSource: number;
-  /** Routes auto-built from imported Claude providers' tier mappings. */
-  importedRoutes: ImportedRoute[];
 }

@@ -10,8 +10,6 @@ pub mod proxy_config;
 pub mod proxy_providers;
 pub mod routes;
 pub mod sessions;
-pub mod settings;
 pub mod skills;
 pub mod sync_config;
 pub mod usage;
-pub mod vendors;

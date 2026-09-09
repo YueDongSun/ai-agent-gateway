@@ -1,15 +1,5 @@
 # AI Agent Gateway (AAG) — Project Context
 
-> **Status note (2026-08-03):** This file describes the legacy Node `src/` tree,
-> which remains runnable standalone (`npm run gateway`) for headless use. The
-> **primary deliverable is now the Tauri 2 desktop app** (`src-tauri/` + `ui/`),
-> feature-complete through Phase 10 — see `DESIGN.md` (architecture) and
-> `PROGRESS.md` (loop state) for the current source of truth. The desktop app
-> adds: SQLite SSOT, provider switching for Claude Code/Codex (incl. isolated
-> Codex CLI CODEX_HOME), local proxy with streaming SSE + circuit breaker,
-> backup/MCP/Skills/Sessions/Usage/S3+WebDAV sync, deep links, tray,
-> auto-update.
-
 ## Project Overview
 
 **AI Agent Gateway (AAG)** is a unified **Gateway Proxy** + **Config Switcher** for AI coding agents. It provides a local OpenAI & Anthropic-compatible proxy server with **circuit-breaker auto-failover**, plus the ability to dynamically rewrite configuration files for multiple AI coding agents (Cursor, Copilot, Kilo, Zcode, MiniMax, Kimi) to point them either at the gateway or at a direct upstream provider.

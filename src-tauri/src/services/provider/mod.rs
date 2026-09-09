@@ -8,9 +8,6 @@
 
 pub mod claude_code;
 pub mod codex;
-pub mod copilot;
-pub mod pi;
-pub mod antigravity;
 
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -24,9 +21,6 @@ pub enum AppType {
     ClaudeCode,
     ClaudeDesktop,
     Codex,
-    Copilot,
-    Pi,
-    Antigravity,
     Gemini,
     OpenCode,
     OpenClaw,
@@ -41,9 +35,6 @@ impl AppType {
             "claude_code" => Ok(Self::ClaudeCode),
             "claude_desktop" => Ok(Self::ClaudeDesktop),
             "codex" => Ok(Self::Codex),
-            "copilot" => Ok(Self::Copilot),
-            "pi" => Ok(Self::Pi),
-            "antigravity" => Ok(Self::Antigravity),
             "gemini" => Ok(Self::Gemini),
             "opencode" => Ok(Self::OpenCode),
             "openclaw" => Ok(Self::OpenClaw),
@@ -62,9 +53,6 @@ impl AppType {
             Self::ClaudeCode => "claude_code",
             Self::ClaudeDesktop => "claude_desktop",
             Self::Codex => "codex",
-            Self::Copilot => "copilot",
-            Self::Pi => "pi",
-            Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::OpenClaw => "openclaw",
@@ -79,9 +67,6 @@ impl AppType {
             Self::ClaudeCode => "Claude Code",
             Self::ClaudeDesktop => "Claude Desktop",
             Self::Codex => "Codex",
-            Self::Copilot => "Copilot CLI",
-            Self::Pi => "Pi (MS Coding Agent)",
-            Self::Antigravity => "Antigravity",
             Self::Gemini => "Gemini CLI",
             Self::OpenCode => "OpenCode",
             Self::OpenClaw => "OpenClaw",
@@ -105,21 +90,13 @@ pub struct LiveWriteResult {
 /// Write a provider's `settings_config` to the live config file(s) for `app_type`.
 /// Creates a backup of the existing file(s) first. Mirrors cc-switch's
 /// `write_live_snapshot` (`services/provider/live.rs:998`).
-///
-/// `codex_cli_home` optionally overrides the Codex config directory (isolated
-/// CODEX_HOME); only used for `AppType::Codex`. `None` = default `~/.codex`.
-#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live_snapshot(
     app_type: AppType,
     provider: &Provider,
-    codex_cli_home: Option<&str>,
 ) -> Result<LiveWriteResult, AppError> {
     match app_type {
         AppType::ClaudeCode => claude_code::write_live(provider),
-        AppType::Codex => codex::write_live(provider, codex_cli_home),
-        AppType::Copilot => copilot::write_live(provider),
-        AppType::Pi => pi::write_live(provider),
-        AppType::Antigravity => antigravity::write_live(provider),
+        AppType::Codex => codex::write_live(provider),
         AppType::ClaudeDesktop
         | AppType::Gemini
         | AppType::OpenCode
@@ -138,43 +115,6 @@ pub fn detect_app(app_type: AppType) -> bool {
     match app_type {
         AppType::ClaudeCode => claude_code::detect(),
         AppType::Codex => codex::detect(),
-        AppType::Copilot => copilot::detect(),
-        AppType::Pi => pi::detect(),
-        AppType::Antigravity => antigravity::detect(),
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_type_roundtrip_all_known_values() {
-        for (s, expected) in [
-            ("claude_code", AppType::ClaudeCode),
-            ("claude_desktop", AppType::ClaudeDesktop),
-            ("codex", AppType::Codex),
-            ("copilot", AppType::Copilot),
-            ("pi", AppType::Pi),
-            ("antigravity", AppType::Antigravity),
-            ("gemini", AppType::Gemini),
-            ("opencode", AppType::OpenCode),
-            ("openclaw", AppType::OpenClaw),
-            ("hermes", AppType::Hermes),
-            ("grok_build", AppType::GrokBuild),
-        ] {
-            assert_eq!(AppType::from_db_str(s).unwrap(), expected, "{s}");
-            assert_eq!(expected.to_db_str(), s, "roundtrip for {s}");
-        }
-        assert!(AppType::from_db_str("bogus").is_err());
-    }
-
-    #[test]
-    fn antigravity_dispatch_returns_disabled() {
-        let p = crate::provider::Provider::new("x".into(), "X".into(), serde_json::json!({}));
-        let err = write_live_snapshot(AppType::Antigravity, &p, None)
-            .expect_err("Antigravity switching disabled");
-        assert!(err.to_string().contains("not supported yet"));
     }
 }

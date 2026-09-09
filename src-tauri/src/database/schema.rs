@@ -34,8 +34,7 @@ impl Database {
                 icon_color TEXT,
                 meta TEXT NOT NULL DEFAULT '{}',
                 is_current BOOLEAN NOT NULL DEFAULT 0,
-                in_failover_queue BOOLEAN NOT NULL DEFAULT 1,
-                sync_locked BOOLEAN NOT NULL DEFAULT 0,
+                in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, app_type)
             )",
             [],
@@ -77,7 +76,6 @@ impl Database {
                 timeout_ms INTEGER NOT NULL DEFAULT 60000,
                 weight INTEGER NOT NULL DEFAULT 1,
                 circuit_breaker TEXT NOT NULL DEFAULT '{}',
-                model_mapping TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER
             )",
             [],
@@ -100,7 +98,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS proxy_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 host TEXT NOT NULL DEFAULT '127.0.0.1',
-                port INTEGER NOT NULL DEFAULT 8989,
+                port INTEGER NOT NULL DEFAULT 8787,
                 auth_token TEXT NOT NULL DEFAULT '',
                 enabled BOOLEAN NOT NULL DEFAULT 0
             )",
@@ -231,34 +229,6 @@ impl Database {
             [],
         )?;
 
-        // 12. App meta - simple key/value settings store (device-level
-        //    preferences such as the Codex CLI isolated CODEX_HOME).
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )",
-            [],
-        )?;
-
-        // 13. Vendors - unified upstream API supplier management. One vendor
-        //     may serve multiple protocols (anthropic, openai-chat,
-        //     openai-responses) sharing a single API key. `endpoints` is a
-        //     JSON object { protocol -> url } overriding `base_url` per
-        //     protocol; `protocols` is a JSON array of enabled protocol ids.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS vendors (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                base_url TEXT NOT NULL DEFAULT '',
-                api_key TEXT NOT NULL DEFAULT '',
-                protocols TEXT NOT NULL DEFAULT '[]',
-                endpoints TEXT NOT NULL DEFAULT '{}',
-                created_at INTEGER
-            )",
-            [],
-        )?;
-
         Ok(())
     }
 
@@ -334,172 +304,8 @@ impl Database {
             version = 8;
         }
 
-        // v8 -> v9: app_meta key/value settings table. Already created above
-        // via IF NOT EXISTS, so for existing v8 DBs we just stamp the version.
-        if version < 9 {
-            conn.execute_batch("PRAGMA user_version = 9;")?;
-            version = 9;
-        }
-
-        // v9 -> v10: vendors table (unified upstream supplier management).
-        // Already created above via IF NOT EXISTS, so for existing v9 DBs we
-        // just stamp the version.
-        if version < 10 {
-            conn.execute_batch("PRAGMA user_version = 10;")?;
-            version = 10;
-        }
-
-        // v10 -> v11: cc-switch coexistence detection.
-        //
-        // No new tables — the detector stores its state in `app_meta`
-        // under the well-known keys `ccswitch_override_enabled` (string
-        // "0"/"1") and `ccswitch_last_status_json` (JSON-serialized
-        // CcSwitchStatus). For fresh DBs these rows are inserted on
-        // demand by the detector; for existing DBs the migration only
-        // needs to stamp the version.
-        if version < 11 {
-            conn.execute_batch("PRAGMA user_version = 11;")?;
-            version = 11;
-        }
-
-        // v11 -> v12: default proxy port 8787 -> 8989.
-        //
-        // For users already on v11 the singleton `proxy_config` row
-        // holds the old default; rewrite it so existing installs pick
-        // up the new port on next proxy_start. Users who explicitly
-        // configured a custom port (anything other than 8787) are
-        // untouched.
-        if version < 12 {
-            conn.execute(
-                "UPDATE proxy_config SET port = 8989 WHERE id = 1 AND port = 8787",
-                [],
-            )?;
-            conn.execute_batch("PRAGMA user_version = 12;")?;
-            version = 12;
-        }
-
-        // v12 -> v13: sweep the whole legacy fallback range.
-        //
-        // The old port-fallback persisted whatever port it landed on
-        // (8787+1..+5), and v12 only rewrote the exact old default
-        // (8787) — DBs that had drifted to 8788..8792 kept the legacy
-        // port and could get stuck when that range is held. Rewrite
-        // the entire legacy range to the new default.
-        if version < 13 {
-            conn.execute(
-                "UPDATE proxy_config SET port = 8989 WHERE id = 1 AND port BETWEEN 8787 AND 8792",
-                [],
-            )?;
-            conn.execute_batch("PRAGMA user_version = 13;")?;
-            version = 13;
-        }
-
-        // v13 -> v14: add providers.sync_locked column for "do not
-        // auto-overwrite this row when syncing from cc-switch". Existing
-        // rows default to 0 (sync-friendly). SQLite has no IF NOT EXISTS
-        // for ALTER TABLE ADD COLUMN, so we guard with a pragma check.
-        if version < 14 {
-            let has_sync_locked: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name = 'sync_locked'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            if has_sync_locked == 0 {
-                conn.execute(
-                    "ALTER TABLE providers ADD COLUMN sync_locked BOOLEAN NOT NULL DEFAULT 0",
-                    [],
-                )?;
-            }
-            conn.execute_batch("PRAGMA user_version = 14;")?;
-            version = 14;
-        }
-
-        // v14 -> v15: the per-app failover chain becomes universal (Phase 17,
-        // cc-switch style). Every provider row defaults to being IN its app's
-        // failover chain; the user opts rows out per card. Existing rows were
-        // created before the toggle existed, so sweep them to 1 — the chain
-        // they were already part of (claude_code) or never had (other apps)
-        // both behave correctly with the bit on.
-        if version < 15 {
-            conn.execute(
-                "UPDATE providers SET in_failover_queue = 1 WHERE in_failover_queue = 0",
-                [],
-            )?;
-            conn.execute_batch("PRAGMA user_version = 15;")?;
-            version = 15;
-        }
-
-
-        // v15 -> v16: add proxy_providers.model_mapping column for per-provider
-        // model mapping (display model -> upstream model). Stored as a JSON
-        // object `{ "claude-sonnet-5": "deepseek-v4-pro", ... }`. Used by the
-        // proxy to auto-create routes from upstream pool mappings.
-        if version < 16 {
-            let has_mm: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('proxy_providers') WHERE name = 'model_mapping'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            if has_mm == 0 {
-                conn.execute(
-                    "ALTER TABLE proxy_providers ADD COLUMN model_mapping TEXT NOT NULL DEFAULT '{}'",
-                    [],
-                )?;
-            }
-            conn.execute_batch("PRAGMA user_version = 16;")?;
-            version = 16;
-        }
-
-
-        // v16 -> v17: backfill proxy_providers from existing claude_code providers.
-        // Users who imported from cc-switch before the proxy_provider auto-creation
-        // was added have providers in the `providers` table but NOT in `proxy_providers`.
-        // This migration reads all claude_code providers with ANTHROPIC_BASE_URL and
-        // creates corresponding proxy_providers (id prefixed with 'ccs-') so they
-        // appear in the upstream pool on the Claude page.
-        if version < 17 {
-            // Use SQLite json_extract to parse settings_config without serde_json.
-            let mut stmt = conn.prepare(
-                "SELECT id, name, json_extract(settings_config, '$.env.ANTHROPIC_BASE_URL'),                  json_extract(settings_config, '$.env.ANTHROPIC_AUTH_TOKEN')                  FROM providers WHERE app_type = 'claude_code'"
-            )?;
-            let rows: Vec<(String, String, Option<String>, Option<String>)> =
-                stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?.filter_map(|r| r.ok()).collect();
-            for (id, name, base_url, api_key) in rows {
-                let pp_id = format!("ccs-{}", id);
-                let exists: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM proxy_providers WHERE id = ?1",
-                    [&pp_id],
-                    |r| r.get(0),
-                ).unwrap_or(0);
-                if exists > 0 { continue; }
-                let base_url = match base_url.as_deref() {
-                    Some(u) if !u.is_empty() => u,
-                    _ => continue,
-                };
-                let api_key = api_key.unwrap_or_default();
-                conn.execute(
-                    "INSERT INTO proxy_providers (id, name, type, api_key, base_url, models, enabled, timeout_ms, weight, circuit_breaker, model_mapping)
-                     VALUES (?1, ?2, 'anthropic', ?3, ?4, '[]', 1, 60000, 1, '{}', '{}')",
-                    rusqlite::params![pp_id, name, api_key, base_url],
-                )?;
-            }
-            conn.execute_batch("PRAGMA user_version = 17;")?;
-            version = 17;
-        }
-
-        // v17 -> v18: no-op schema change. Codex model routes are seeded
-        // in `seed_proxy_if_empty` alongside the Claude routes.
-        if version < 18 {
-            conn.execute_batch("PRAGMA user_version = 18;")?;
-            version = 18;
-        }
-
+        // Future migrations:
+        // if version < 9 { /* ALTER TABLE ... */ ; conn.execute_batch("PRAGMA user_version = 9;")?; version = 9; }
 
         if version != SCHEMA_VERSION {
             return Err(AppError::Database(format!(

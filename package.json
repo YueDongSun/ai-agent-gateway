@@ -13,7 +13,12 @@
     "gateway": "tsx src/index.ts gateway",
     "switch": "tsx src/index.ts switch",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ui:dev": "npm run dev --prefix ui",
+    "ui:build": "npm run build --prefix ui",
+    "ui:install": "npm install --prefix ui",
+    "tauri:dev": "npm run ui:install && npx tauri dev --config src-tauri/tauri.conf.json",
+    "tauri:build": "npm run ui:build && npx tauri build --config src-tauri/tauri.conf.json"
   },
   "engines": {
     "node": ">=20"
@@ -29,6 +34,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^22.10.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

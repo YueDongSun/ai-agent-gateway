@@ -14,7 +14,7 @@
 //!     └── providers.rs - provider CRUD
 //! ```
 
-pub mod dao;
+pub(crate) mod dao;
 pub(crate) mod seed;
 mod schema;
 
@@ -22,11 +22,11 @@ use crate::config::get_db_path;
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Current schema version. Increment on every schema change and add a migration
 /// branch in `schema.rs::apply_schema_migrations`.
-pub(crate) const SCHEMA_VERSION: i32 = 18;
+pub(crate) const SCHEMA_VERSION: i32 = 8;
 
 /// Serialize a value to a JSON string, mapping errors to AppError.
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -44,11 +44,8 @@ macro_rules! lock_conn {
 pub(crate) use lock_conn;
 
 /// Database connection wrapper. Share via `tauri::State<'_, Database>`.
-/// Cheaply cloneable (the underlying `Mutex<Connection>` is wrapped in
-/// `Arc` so every clone shares the same connection).
-#[derive(Clone)]
 pub struct Database {
-    pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -71,7 +68,7 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Mutex::new(conn),
         };
         db.create_tables()?;
         db.apply_schema_migrations()?;
@@ -85,7 +82,7 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Mutex::new(conn),
         };
         db.create_tables()?;
         db.apply_schema_migrations()?;

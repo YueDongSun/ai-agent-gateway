@@ -2,7 +2,9 @@
 
 Unified **Gateway Proxy** + **Config Switcher** for AI Coding Agents
 
-A comprehensive solution extending `cc-switch` capabilities with broader agent support and enhanced proxy infrastructure. Supports Copilot, Kilo, Cursor, Zcode, MiniMax, Kimi agents while providing a local OpenAI & Anthropic compatible proxy with **circuit-breaker auto-failover** mechanism.
+A comprehensive solution inspired by `cc-switch` capabilities, with broader agent support and enhanced proxy infrastructure. Supports Copilot, Kilo, Cursor, Zcode, MiniMax, Kimi agents while providing a local OpenAI & Anthropic compatible proxy with **circuit-breaker auto-failover** mechanism.
+
+> **Note on `cc-switch/`:** This repository no longer carries the upstream `cc-switch` source as a git submodule. The `cc-switch/` directory is a placeholder you can populate yourself (e.g. `git clone <cc-switch-url> cc-switch/`) if you want to compare or vendor its behavior. `src/agents/switcher.ts` already implements an equivalent config-rewriting flow for every supported agent.
 
 ## Features
 

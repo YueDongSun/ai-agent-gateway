@@ -28,23 +28,6 @@ pub enum AppError {
     #[error("lock acquisition failed: {0}")]
     Lock(String),
 
-    /// cc-switch coexistence conflict: AAG would write `target_url`
-    /// (an AAG proxy URL) into a live agent config, but cc-switch's own
-    /// proxy is reachable at `cc_switch_port` — the two would overwrite
-    /// each other's `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
-    ///
-    /// Frontend matches on the literal "conflict with cc-switch" prefix to
-    /// surface a structured dialog (see `ui/src/components/common/CcSwitchDialog.tsx`).
-    #[error(
-        "conflict with cc-switch (running at 127.0.0.1:{cc_switch_port}); \
-         AAG would write {target_url} but cc-switch is already proxying — \
-         please disable cc-switch's proxy or enable 'ignore cc-switch conflict' in settings"
-    )]
-    ConflictWithCcSwitch {
-        cc_switch_port: u16,
-        target_url: String,
-    },
-
     #[error("{0}")]
     Message(String),
 }

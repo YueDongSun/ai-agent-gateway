@@ -19,23 +19,24 @@ provider fallback chains with per-provider **circuit breakers**, and can rewrite
 the config files of multiple AI coding CLIs to point them at the gateway or at a
 direct upstream provider.
 
-The repo is **migrated**: the Tauri 2 desktop app (Rust backend + React
-frontend) is the primary deliverable and is **feature-complete through
-Phase 10** (see `PROGRESS.md`). **Two source trees coexist:**
+The repo is **mid-migration** from a Node/TypeScript CLI+TUI to a Tauri 2 desktop
+app (Rust backend + React frontend) aiming for feature parity with
+[cc-switch](https://github.com/farion1231/cc-switch). **Three source trees
+coexist:**
 
 | Tree | Language | Status | Role |
 |------|----------|--------|------|
-| `src/` | Node/TypeScript | ✅ Legacy, runnable | Original proxy + CLI/TUI. Still works standalone (`npm run gateway`) for headless use. ~19 files, ~1.7 kLOC. |
-| `src-tauri/` + `ui/` | Rust (Tauri 2) + React | ✅ Feature-complete (Phase 0-10) | Desktop app: SQLite SSOT, provider CRUD + live config switching (Claude Code + Codex), local proxy (streaming SSE, OpenAI/Anthropic conversion, circuit breaker), backup/MCP/Skills/Sessions/Usage/S3+WebDAV sync/deep links/tray/auto-update, plus Codex CLI isolated CODEX_HOME. 59 Rust tests + 10 Node tests green. |
+| `src/` | Node/TypeScript | ✅ Working proxy + CLI/TUI | The only fully functional gateway today. ~19 files, ~1.7 kLOC. |
+| `src-tauri/` | Rust (Tauri 2) | 🚧 Phase 2 in progress | Desktop backend: SQLite SSOT, provider CRUD, live config switching (Claude Code + Codex), local proxy (mock-only, non-streaming). |
+| `ui/` | React 18 + Vite | 🚧 Phase 1 | Desktop frontend: Providers page + About. |
 
-**The Node `src/` proxy stays runnable for headless use; the desktop app is the
-primary surface.** Do not delete `src/` without a migration plan for its
-headless CLI users.
+**The Node `src/` proxy stays runnable until the Rust proxy reaches feature
+parity (Phase 2).** Do not delete or break `src/` to advance `src-tauri/`.
 
 The migration is driven by a **cron loop** that reads `PROGRESS.md`, does one
 bounded sub-task per iteration, runs verification, and updates `PROGRESS.md`.
-Respect this discipline: one sub-task per change, always verify, always update
-the log.
+See the `aag-phase-loop` skill. Respect this discipline: one sub-task per
+change, always verify, always update the log.
 
 ---
 
@@ -87,21 +88,19 @@ HTTP edge ──► Router ──► Provider (owns CircuitBreaker)
 
 A direct port of the Node gateway, built on **axum** (not Hono):
 
-- **`server.rs`** — axum router: `GET /health`, `GET /v1/models`,
-  `POST /v1/chat/completions` (streaming + non-streaming, OpenAI-spec
-  `[DONE]` sentinel), `POST /v1/messages` (Anthropic format, converted via
-  `converter.rs`). Graceful shutdown via a `oneshot` channel.
+- **`server.rs`** — axum router. Currently: `GET /health`, `GET /v1/models`,
+  `POST /v1/chat/completions` (**non-streaming only**). `POST /v1/messages` and
+  streaming are **not yet implemented** (Phase 2 Step 5). Graceful shutdown via a
+  `oneshot` channel.
 - **`router.rs`** — `Router` struct. Same alias→hops→failover semantics as
   Node. Immutable after construction (providers + routes are a DB snapshot taken
   at `proxy_start`).
 - **`circuit_breaker.rs`** — thread-safe (`std::sync::Mutex<Inner>`) port of the
   Node breaker. Same states, same lazy transition.
 - **`canonical.rs`** — struct port of `canonical.ts`.
-- **`converter.rs`** — bidirectional OpenAI ↔ Anthropic request/response + SSE
-  stream conversion (stop<->end_turn, length<->max_tokens mapping).
 - **`providers/`** — `Provider` trait (`async_trait`) + `build_provider()`
-  factory. Implemented: `mock.rs`, `openai.rs` (reqwest, SSE parsing),
-  `anthropic.rs` (converter-based).
+  factory. Only `mock.rs` is implemented; `openai`/`anthropic` return
+  "not yet implemented" (Phase 2 Step 6).
 
 ### 1.4 Config layer
 
@@ -113,11 +112,9 @@ A direct port of the Node gateway, built on **axum** (not Hono):
 - **Rust** (`src-tauri/src/database/`): SQLite SSOT at `~/.aag/aag.db`.
   `Database` wraps `Mutex<rusqlite::Connection>` (rusqlite `Connection` is not
   `Sync`). Schema + versioned migrations in `schema.rs` (`PRAGMA user_version`,
-  `SCHEMA_VERSION` = 9). DAOs are `impl Database` blocks in `dao/`
-  (`providers`, `proxy_providers`, `proxy_config`, `routes`, `backups`,
-  `mcp_servers`, `skills`, `sessions`, `usage_records`, `sync_config`,
-  `settings`/`app_meta`). First-run seeding in `seed.rs` mirrors `seedConfig()`.
-  Override via `AAG_CONFIG_DIR`.
+  `SCHEMA_VERSION`). DAOs are `impl Database` blocks in `dao/`
+  (`providers`, `proxy_providers`, `proxy_config`, `routes`). First-run seeding
+  in `seed.rs` mirrors `seedConfig()`. Override via `AAG_CONFIG_DIR`.
 
 ### 1.5 Agent integration (config switcher)
 
@@ -129,10 +126,9 @@ A direct port of the Node gateway, built on **axum** (not Hono):
   `SwitchResult` with a `previous` field for restore.
 - **Rust** (`src-tauri/src/services/provider/`): `AppType` enum (8 tools:
   ClaudeCode, ClaudeDesktop, Codex, Gemini, OpenCode, OpenClaw, Hermes,
-  GrokBuild). `write_live_snapshot(app_type, provider, codex_cli_home)`
-  dispatches to per-app modules. Implemented: `claude_code.rs` and `codex.rs`
-  (Codex supports isolated CODEX_HOME via the `codex_cli_home` setting); the
-  rest return "not yet implemented".
+  GrokBuild). `write_live_snapshot(app, provider)` dispatches to per-app
+  modules. Only `claude_code.rs` and `codex.rs` are implemented; the rest
+  return "not yet implemented".
 
 ### 1.6 CLI / TUI / Frontend
 
@@ -141,16 +137,11 @@ A direct port of the Node gateway, built on **axum** (not Hono):
   subcommand → `interactiveMenu()` (`menu.ts`, Inquirer). `commands.ts` holds
   subcommand handlers.
 - **Rust Tauri commands** (`src-tauri/src/lib.rs`): `app_info`,
-  `app_check_update`, `deeplink_parse`, `provider_{list,current,get,save,delete,switch}`,
-  `settings_{get,set}`, `codex_cli_status`, `codex_open_cli_terminal`,
-  `proxy_{status,start,stop}`, `backup_{create,list,delete}`,
-  `mcp_{list,save,delete,toggle_app}`, `skill_{list,save,delete}`,
-  `session_{list,get,delete}`, `usage_{record,summary,by_model,by_provider}`,
-  `sync_{list,save,delete,record_result,check,upload,download}`.
+  `provider_{list,current,get,save,delete,switch}`, `proxy_{status,start,stop}`.
   Registered in `invoke_handler!`. State: `Database` + `Mutex<Option<RunningProxy>>`.
-- **React UI** (`ui/src/`): `App.tsx` (nav), `components/<feature>/` pages
-  (Providers, Proxy, Backup, MCP, Skills, Sessions, Usage, Sync, Deep links,
-  Codex CLI), `lib/api/` (typed `invoke` wrappers mirroring Rust types).
+- **React UI** (`ui/src/`): `App.tsx` (nav), `components/providers/ProvidersPage.tsx`
+  (list/add/switch/delete), `lib/api/` (typed `invoke` wrappers mirroring Rust
+  types). Uses plain React state (no TanStack Query yet — DESIGN.md plans it).
 
 ---
 

@@ -40,8 +40,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_stack_e2e() {
-        let _env_guard = crate::config::test_env_lock().lock().await;
-
         // ── 1. Isolate from the real user environment ──
         let tmp = std::env::temp_dir().join("aag-e2e-test");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -62,25 +60,14 @@ mod tests {
         let proxy_providers = db.get_all_proxy_providers().expect("get_all_proxy_providers");
         assert_eq!(proxy_providers.len(), 2, "seed should create 2 mock providers");
         let routes = db.get_all_routes().expect("get_all_routes");
-        let aliases: Vec<&str> = routes.iter().map(|r| r.alias.as_str()).collect();
-        // 3 demo routes + one per official Claude model + one per default Codex model
-        // (see proxy::models::OFFICIAL_MODELS and CODEX_MODELS — seeded so clients
-        // can request official ids and flow through the failover chain).
-        assert_eq!(
-            routes.len(),
-            3 + crate::proxy::models::OFFICIAL_MODELS.len() + crate::proxy::models::CODEX_MODELS.len(),
-            "seed should create demo + official-model + codex-model routes, got: {aliases:?}"
-        );
-        assert!(aliases.contains(&"claude-sonnet-4"), "demo route missing: {aliases:?}");
-        assert!(aliases.contains(&"claude-fable-5"), "official model route missing: {aliases:?}");
-        assert!(aliases.contains(&"codex-5-6-sol"), "codex model route missing: {aliases:?}");
+        assert_eq!(routes.len(), 3, "seed should create 3 routes");
 
         // ── 3. Provider flow: save → current → live write ──
         let provider = Provider::new(
             "e2e-claude".into(),
             "E2E Claude Provider".into(),
             json!({
-                "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8989" },
+                "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787" },
                 "apiKey": "e2e-test-key"
             }),
         );
@@ -95,7 +82,7 @@ mod tests {
             "current provider should be e2e-claude"
         );
 
-        let live = write_live_snapshot(AppType::ClaudeCode, &provider, None)
+        let live = write_live_snapshot(AppType::ClaudeCode, &provider)
             .expect("write_live_snapshot should succeed for ClaudeCode");
         assert!(!live.written.is_empty(), "should write at least one file");
         let actual_written = &live.written[0];
@@ -151,8 +138,6 @@ mod tests {
                 let state_for_try = ProxyAppState {
                     router: Arc::clone(&router),
                     auth_token: String::new(),
-                    pinned_provider: Arc::new(std::sync::Mutex::new(None)),
-                    db: None, // e2e doesn't exercise failover-winner persistence
                 };
                 let handle = tokio::spawn(async move {
                     if let Err(e) = serve(addr, state_for_try, rx).await {
@@ -218,62 +203,6 @@ mod tests {
             models_text.contains("claude-sonnet-4"),
             "/v1/models should list claude-sonnet-4, got: {models_text}"
         );
-        assert!(
-            models_text.contains("claude-fable-5"),
-            "/v1/models should list the official claude-fable-5, got: {models_text}"
-        );
-        let models_json: Value =
-            serde_json::from_str(&models_text).expect("/v1/models should be valid JSON");
-        let fable = models_json["data"]
-            .as_array()
-            .expect("models.data array")
-            .iter()
-            .find(|m| m["id"] == "claude-fable-5")
-            .expect("claude-fable-5 entry");
-        assert_eq!(
-            fable["type"], "model",
-            "Anthropic-shaped entry should carry type=model"
-        );
-        assert_eq!(
-            fable["display_name"], "Claude Fable 5",
-            "official models should expose their display name"
-        );
-
-        // ── 4a2. Official model name via /v1/messages routes through the
-        // failover chain and the response echoes the requested model back.
-        // This is the Claude Desktop-style integration path.
-        let ant_body = json!({
-            "model": "claude-fable-5",
-            "max_tokens": 256,
-            "messages": [{ "role": "user", "content": "official model roundtrip" }]
-        });
-        let ant_resp = client
-            .post(format!("{base}/v1/messages"))
-            .json(&ant_body)
-            .send()
-            .await
-            .expect("POST /v1/messages");
-        assert!(
-            ant_resp.status().is_success(),
-            "/v1/messages with claude-fable-5 should 200, body: {:?}",
-            ant_resp.text().await
-        );
-        let ant_json: Value = ant_resp.json().await.expect("/v1/messages JSON");
-        assert_eq!(
-            ant_json["model"].as_str(),
-            Some("claude-fable-5"),
-            "response must echo the requested official model, got: {ant_json}"
-        );
-        assert_eq!(ant_json["type"].as_str(), Some("message"));
-        let content_nonempty = ant_json["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.is_empty()))
-            })
-            .unwrap_or(false);
-        assert!(content_nonempty, "content blocks non-empty, got: {ant_json}");
 
         // ── 4b. Non-streaming completion via the seeded route ──
         let body = json!({
@@ -354,116 +283,6 @@ mod tests {
             first_chunk["choices"][0]["delta"]["role"].as_str(),
             Some("assistant"),
             "first SSE chunk should set role=assistant, got: {first_chunk}"
-        );
-
-        // ── 4e. OpenAI Responses API (Codex surface): codex-5-6-sol route ──
-        // This is the Codex CLI/Desktop native protocol. The seeded
-        // codex-5-6-sol route (mock-primary -> mock-fallback) must serve it,
-        // and the response must echo the requested model back.
-        let resp_body = json!({
-            "model": "codex-5-6-sol",
-            "input": "hello from responses e2e",
-            "max_output_tokens": 256,
-            "stream": false
-        });
-        let resp_resp = client
-            .post(format!("{base}/v1/responses"))
-            .json(&resp_body)
-            .send()
-            .await
-            .expect("POST /v1/responses");
-        assert!(
-            resp_resp.status().is_success(),
-            "/v1/responses with codex-5-6-sol should 200, body: {:?}",
-            resp_resp.text().await
-        );
-        let resp_json: Value = resp_resp.json().await.expect("/v1/responses JSON");
-        assert_eq!(
-            resp_json["object"].as_str(),
-            Some("response"),
-            "Responses envelope object=response, got: {resp_json}"
-        );
-        assert_eq!(
-            resp_json["model"].as_str(),
-            Some("codex-5-6-sol"),
-            "response must echo requested codex-5-6-sol, got: {resp_json}"
-        );
-        let output_text = resp_json["output"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|item| item.get("content"))
-            .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .and_then(|block| block.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        assert!(
-            !output_text.is_empty(),
-            "responses output_text should be non-empty, got: {resp_json}"
-        );
-        assert!(
-            output_text.contains("codex-5-6-sol"),
-            "mock reply should echo the upstream model name, got: {output_text}"
-        );
-
-        // ── 4e2. Responses streaming: named SSE events + [DONE] ──
-        let stream_resp_body = json!({
-            "model": "codex-5-6-luna",
-            "input": "stream responses",
-            "stream": true
-        });
-        let stream_resp_resp = client
-            .post(format!("{base}/v1/responses"))
-            .json(&stream_resp_body)
-            .send()
-            .await
-            .expect("POST /v1/responses stream");
-        assert!(stream_resp_resp.status().is_success(), "responses stream should 200");
-        let sse_text = stream_resp_resp.text().await.expect("responses sse body");
-        for expected_event in ["response.created", "response.output_item.added", "response.output_text.delta", "response.output_item.done", "response.completed"] {
-            assert!(
-                sse_text.contains(expected_event),
-                "responses stream should emit {expected_event}, got:\n{sse_text}"
-            );
-        }
-        assert!(
-            sse_text.contains("[DONE]"),
-            "responses stream must end with [DONE], got:\n{sse_text}"
-        );
-
-        // ── 4e3. Codex surface failover: mock-fail route via /v1/responses ──
-        // The mock-fail route forces the primary (mock-primary) to 503;
-        // failover should fall through to mock-fallback and still 200.
-        let fail_resp_body = json!({
-            "model": "mock-fail",
-            "input": "force codex failover",
-            "stream": false
-        });
-        let fail_resp_resp = client
-            .post(format!("{base}/v1/responses"))
-            .json(&fail_resp_body)
-            .send()
-            .await
-            .expect("POST /v1/responses mock-fail");
-        assert!(
-            fail_resp_resp.status().is_success(),
-            "codex failover should still 200 via mock-fallback, body: {:?}",
-            fail_resp_resp.text().await
-        );
-        let fail_json: Value = fail_resp_resp.json().await.expect("codex failover JSON");
-        assert_eq!(fail_json["object"].as_str(), Some("response"));
-        let fail_text = fail_json["output"]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|i| i.get("content"))
-            .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .and_then(|b| b.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        assert!(
-            fail_text.contains("mock-fallback"),
-            "failover should land on mock-fallback, got: {fail_text}"
         );
 
         // ── 5. Graceful shutdown ──

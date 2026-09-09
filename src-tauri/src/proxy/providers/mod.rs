@@ -25,14 +25,10 @@ pub trait Provider: Send + Sync {
     async fn complete(&self, req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError>;
 
     /// Streaming completion as an async stream of canonical OAI chunks.
-    ///
-    /// Async so the provider can open the upstream connection and check the
-    /// HTTP status eagerly: an upstream 4xx/5xx surfaces as `Err` here
-    /// (carrying the status) BEFORE any streaming begins, letting the router
-    /// fail over cleanly instead of swallowing the error into an empty
-    /// stream. Once Ok is returned, mid-stream errors surface to the client
-    /// (no transparent failover).
-    async fn stream(
+    /// First-byte failover: the Router probes the first chunk before committing.
+    /// Returns Err for pre-stream failures (e.g. mock-fail, network error before
+    /// any bytes) so the router can failover cleanly.
+    fn stream(
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError>;

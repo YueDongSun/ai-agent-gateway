@@ -4,181 +4,102 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repo shape (read this first)
 
-This repo is a Tauri 2 desktop app (**AI Agent Gateway / AAG**) migrated from a Node/TypeScript CLI/TUI proxy, aiming for feature parity with **cc-switch** (<https://github.com/farion1231/cc-switch>, MIT, 121k stars). The migration plan, data model, and phasing live in **`DESIGN.md`**; the per-iteration loop state lives in **`PROGRESS.md`** (read both before doing anything in `src-tauri/` or `ui/`).
+This repo is mid-migration from a Node/TypeScript CLI/TUI proxy to a Tauri desktop app aiming for feature parity with **cc-switch** (<https://github.com/farion1231/cc-switch>, MIT, 121k stars). The full plan, data model, and phasing live in **`DESIGN.md`** - read it before doing anything in `src-tauri/` or `ui/`.
 
-Two source trees coexist today:
+Three source trees coexist today:
 
-- **`src/`** - the original Node/TypeScript proxy + CLI/TUI. **Still runnable standalone** (`npm run gateway`) for headless use, but the desktop app is the primary deliverable. ~19 files, ~1.7 kLOC.
-- **`src-tauri/` + `ui/`** - the Tauri 2 Rust backend + React 18 frontend. **Feature-complete through Phase 10**: SQLite SSOT, provider CRUD + live config switching (Claude Code + Codex), local proxy (streaming SSE + OpenAI/Anthropic conversion + circuit breaker), backup/restore, MCP, Skills, Sessions, Usage, S3/WebDAV sync, deep links, tray, auto-update.
+- **`src/`** - the original Node/TypeScript proxy + CLI/TUI. **Still the only functional proxy.** All commands below in "Build / Run / Test (Node `src/` tree)" refer to this tree unless noted.
+- **`src-tauri/`** - NEW Tauri 2 Rust backend. Phase 0 skeleton only: boots a window, exposes one `app_info` command. `cargo check` passes. Not yet feature-complete - see `DESIGN.md` phasing.
+- **`ui/`** - NEW React 18 + Vite frontend for the Tauri shell. Phase 0 skeleton only: single `App.tsx` that calls `app_info` and renders the result.
 
 The reference cc-switch source is available read-only at `~/Documents/Codex/2026-07-05/ben/work/cc-switch-src/` - consult it when porting features.
 
-## Build / Run / Test (Node `src/` tree - legacy)
+## Build / Run / Test (Node `src/` tree)
 
 ```
 npm install
-npm run typecheck        # tsc --noEmit
-npm test                 # vitest run (10 tests, incl. SSE streaming e2e)
+npm run typecheck        # tsc --noEmit (CURRENTLY FAILS — see Known Issues)
+npm test                 # vitest run, single e2e file (CURRENTLY FAILS — see Known Issues)
 npm run dev              # tsx src/index.ts — launches interactive TUI (no args)
 npm run gateway          # tsx src/index.ts gateway        (--host, --port flags)
+npm run switch           # tsx src/index.ts switch [agent] (--to gateway|direct|profile)
+npm run build            # tsc -p tsconfig.json → dist/
+npm start                # node dist/index.js (run the built artifact)
 ```
 
-## Build / Run / Test (Tauri `src-tauri/` + `ui/` trees - primary)
+There is no `vitest.config`; tests boot the Hono app in-process via `app.request(path, init, BASE)` — no socket, no real network. To run a single test by name: `npx vitest run -t "failover"`. Test files live under `tests/`. **The only existing test today is `tests/e2e.test.ts`.**
+
+Single-node, no CI workflow files, no lint config, no formatter config.
+
+## Build / Run (Tauri `src-tauri/` + `ui/` trees - Phase 0)
 
 ```
 cd ui && npm install                 # install React deps (also done by tauri:dev)
-cd src-tauri && cargo check          # Rust typecheck
-cd src-tauri && cargo test --lib     # Rust unit tests (59 incl. full-stack e2e)
-cd ui && npx tsc --noEmit            # UI typecheck
+cd src-tauri && cargo check          # Rust typecheck - passes today
+cd ui && npx tsc --noEmit            # UI typecheck - passes today
 cd ui && npx vite build              # produce ui/dist/ that Tauri expects at build time
 npm run tauri:dev                    # from repo root: boots Tauri window pointed at ui dev server
 npm run tauri:build                  # from repo root: production bundle (.msi/.dmg/etc.)
 ```
 
-`tauri.conf.json` references `../ui/dist` as `frontendDist` - **`ui/dist/` must exist before `cargo check` / `cargo build` will succeed** (the `generate_context!` proc macro panics otherwise). `beforeDevCommand`/`beforeBuildCommand` use root-relative paths (`npm run dev --prefix ui`).
+`tauri.conf.json` references `../ui/dist` as `frontendDist` - **`ui/dist/` must exist before `cargo check` / `cargo build` will succeed** (the `generate_context!` proc macro panics otherwise). Running `npx vite build` in `ui/` once is enough. `npm run tauri:dev` does not need `dist/` because it points at the dev server, but `cargo check` is invoked as part of `tauri dev` and still wants `frontendDist` to resolve - so build `ui/dist/` at least once before first `tauri:dev`.
 
-**Browser-only demo mode (no Tauri):** `cd ui && npm run dev` and open http://localhost:1420. The frontend's `invoke` calls go through `window.__TAURI_INTERNALS__`, which only exists in the Tauri webview; in a plain browser `ui/src/lib/mock/backend.ts` installs a mock IPC backend (`@tauri-apps/api/mocks`) covering every command + intercepting the direct proxy `fetch`es, so both pages are usable with realistic seed data. Debug hook in the console: `window.__aagDemoSetError(cmd|null)` (force a command to reject). The mock is a no-op inside the Tauri webview (real Rust backend wins), so production is unaffected.
+Icon files under `src-tauri/icons/` are placeholders copied from the cc-switch reference checkout. Replace with AAG-branded icons before any release.
 
-Icons under `src-tauri/icons/` are AAG-branded (dark navy + cyan "A"), generated by `src-tauri/generate_icons.py`.
+## Architecture (what the code actually is, not what README.md claims)
 
-## Architecture (Tauri app - what the code actually is)
+The runtime is small (~19 TS files, ~1.7 kLOC) and is best understood as three layers wired through one shared `AppConfig`.
 
-**Backend** (`src-tauri/src/`):
-- `lib.rs` - all `#[tauri::command]` functions + `invoke_handler` registration. Command args auto-convert camelCase (JS) ↔ snake_case (Rust).
-- `database/` - SQLite SSOT at `~/.aag/aag.db` (`AAG_CONFIG_DIR` override). `schema.rs` = CREATE TABLE + versioned migrations (`SCHEMA_VERSION`, `PRAGMA user_version`). DAOs are `impl Database` blocks in `database/dao/` (providers, proxy_providers, routes, proxy_config, backups, mcp_servers, skills, sessions, usage_records, sync_config, **app_meta**).
-- `config.rs` - path + file I/O helpers. `get_home_dir()` honors `AAG_HOME_DIR` override (portable installs / tests). `get_codex_config_dir_with_override()` resolves the isolated CODEX_HOME when set.
-- `services/provider/` - per-app adapters (`claude_code.rs`, `codex.rs`) with `write_live_snapshot(app_type, provider, codex_cli_home)`.
-- `proxy/` - axum HTTP server (127.0.0.1, port from `proxy_config`), circuit breaker, router (alias→hops failover), providers (openai/anthropic/mock), OpenAI↔Anthropic converter.
-- `services/sync/` - S3 (SigV4) + WebDAV transports with auto-stamp of last sync result.
-- `deeplink.rs` + `deeplink_parser.rs` - `aag://` URL scheme handling.
-- `tray.rs` - system tray (Show/Hide/Quit).
+**Entry / CLI** (`src/index.ts`, `src/cli/`)
+- `commander` parses: `gateway`, `switch [agent]`, `status`, `models`, `test [model]`, `config-path`.
+- No subcommand → `interactiveMenu()` from `src/cli/menu.ts` (Inquirer prompts).
+- `npm run dev` is the only way to launch the TUI; everything else is scriptable.
 
-**Frontend** (`ui/src/`):
-- `App.tsx` - nav + view switching + deep-link dispatch.
-- `components/` - one page per feature: Providers, Proxy, Backup, MCP, Skills, Sessions, Usage, Sync, Deep links, **CodexCli**.
-- `lib/api/` - typed `invoke` wrappers mirroring Rust types (one file per feature).
+**Config layer** (`src/config/`)
+- `schema.ts` defines Zod-validated `AppConfig` (version, gateway, providers[], routes[], profiles[], agents[]).
+- `store.ts` loads `~/.ai-agent-gateway/config.json` (overridable via `AAG_CONFIG_DIR`). **First run auto-seeds** a working config with two mock providers (`mock-primary` w/ failure threshold 3, `mock-fallback`) and three routes (`claude-sonnet-4`, `gpt-4o`, `mock-fail`).
+- `manager.ts` provides immutable mutation helpers (add/update/remove for providers, routes, profiles, agents). Save with `saveConfig(cfg)` — writes atomically via `.tmp` + rename.
+- Persists to disk on every `switch` / `status` invocation.
 
-## Agent isolated switching
+**Gateway** (`src/gateway/`)
+- `server.ts` — Hono app. Routes: `POST /v1/chat/completions` (OpenAI), `POST /v1/messages` (Anthropic), `GET /v1/models`, `GET /health`. Optional Bearer/`x-api-key` auth gated on `cfg.gateway.authToken`. SSE streaming via `ReadableStream` wrapping an async generator.
+- `router.ts` — `Router` class. Resolves a model alias → `RouteConfig` of ordered `hops = [{provider, model}]`. Falls through hops on retriable failure or open circuit. Falls back to single-hop auto-route if any enabled provider directly serves the model.
+- `canonical.ts` — internal OpenAI-shaped types (`OAIChatResponse`, `OAIStreamChunk`, `ProviderError`, `makeError`).
+- `converter.ts` — bidirectional OpenAI ↔ Anthropic request/response + SSE chunk conversion. The Anthropic endpoint internally converts to OAI, calls `router.complete`/`router.stream`, then converts back.
+- `circuit_breaker.ts` — `CircuitBreaker` class with closed/open/half-open state machine + `CircuitBreakerSnapshot` type. Each `BaseProvider` owns one. Note the **underscore** filename — see Known Issues.
+- `providers/` — `base.ts` (abstract `BaseProvider` wrapping `CircuitBreaker`), `openai.ts`, `anthropic.ts`, `mock.ts`, `index.ts` (factory by `provider.type`).
 
-AAG manages per-agent config to point each CLI at a provider or the local proxy:
+**Agents / switcher** (`src/agents/`)
+- `adapters.ts` — `AgentAdapter` interface + `JsonAgentAdapter` abstract base. Six concrete subclasses: `CopilotAdapter`, `KiloAdapter`, `CursorAdapter`, `ZcodeAdapter`, `MinimaxAdapter`, `KimiAdapter`. Each owns the JSON shape its agent's config file expects (`CopilotAdapter` writes `{provider, baseURL, apiKey, model, models}`; `CursorAdapter` writes `{openai: {...}}`; etc.). **The actual on-disk paths differ from README.md** — see Known Issues.
+- `switcher.ts` — `Switcher` class wrapping `AppConfig`. Three operations: `pointToGateway(agent, model)`, `pointToProvider(agent, baseURL, apiKey, model)`, `pointToProfile(agent, profileId, model)`. Each returns a `SwitchResult`. `pointAllToGateway` iterates all agents.
+- Detection = "is any candidate path on disk?". `detectInstalledAgents()` filters `defaultAgentTargets()` by `existsSync`.
 
-- **Claude Code***  AAG never writes `~/.claude/settings.json` (Phase 16): cc-switch owns
-  that file and chains through AAG as its Anthropic upstream. `provider_switch` for
-  `claude_code` only flips the DB current marker (used for chain-head highlighting).
-- **Codex CLI***  `provider_switch` writes `config.toml` + `auth.json` into the **mirror**
-  CODEX_HOME (`config::get_codex_mirror_dir`: `codex_cli_home` from `app_meta`, default
-  `~/.codex-cli` - NEVER the native `~/.codex`), so the Codex desktop app's config is
-  untouched. `codex_open_cli_terminal` launches a terminal with `CODEX_HOME` +
-  `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` (+ `NO_PROXY`) injected; `codex_open_desktop_window`
-  launches a NEW Codex Desktop process with `CODEX_HOME=<mirror>` (mirror install - both
-  instances can run side by side).
-- **Copilot CLI** — writes `~/.copilot/settings.json` (JSONC, merged, `model` + `env` block);
-  custom providers are injected at launch via `copilot_open_cli_terminal`
-  (`COPILOT_PROVIDER_BASE_URL`/`API_KEY`/`TYPE` + `COPILOT_MODEL`).
-- **pi (MS coding agent)** — writes `~/.pi/agent/models.json` (`providers` map) +
-  `~/.pi/agent/settings.json` (default model). **Disabled in the UI** (page
-  hidden from the AppSwitcher via `enabled:false` in `appPages.ts`) — cc-switch
-  now supports pi; the adapter code is retained for when it's re-enabled.
-- **Antigravity (desktop)** — detect-only this version; switching disabled (no public
-  on-disk config schema). See `services/provider/antigravity.rs`.
+**Util** (`src/util/log.ts`) — minimal logger writing timestamped lines to stdout (info/debug) or stderr (warn/error). `setLogLevel()` mutates module-global state; called by `createGatewayApp()` at boot. `aag switch` does not pass through `createGatewayApp`, so log level is whatever the previous process left it at.
 
-**Failover** (`proxy/`): the local proxy builds a Router from `proxy_providers` +
-`routes` at `proxy_start`. The Claude page's failover editor exposes CRUD for both
-(`proxy_provider_*` / `route_*` / `route_reorder_hops` commands) so users can build
-real failover chains (alias -> hops), drag-reorder the hops, and restart the proxy
-to apply them.
+## Quirks / Non-Obvious Behavior
 
-**OpenAI Responses API** (Phase 16): the proxy serves `POST /v1/responses`
-(`proxy/responses.rs` wire types + `converter.rs` <-> Chat Completions conversion)
-for both streaming (named SSE events `response.created` / `output_item.added` /
-`response.output_text.delta` / `response.output_item.done` / `response.completed`
-+ `data: [DONE]`) and non-streaming. The Codex CLI / Codex Desktop speak this
-natively; requests funnel through the same Router failover as everything else.
-
-**Official-model gateway surface** (Phase 14): the proxy advertises the official
-Claude model list (`proxy/models.rs::OFFICIAL_MODELS` — fable-5, opus-4-8/4-7/4-6,
-sonnet-5, sonnet-4-6, haiku-4-5) on `/v1/models` (entries carry both Anthropic and
-OpenAI fields) and seeds one failover route per official id (`database/seed.rs`).
-Anthropic-native clients point `ANTHROPIC_BASE_URL` at the proxy, see the official
-model names, and their requests flow through the hop chains — the response echoes
-the requested official id back. UI mirror: `ui/src/lib/models.ts`.
-
-**Phase 16 UI (two pages, cc-switch style)**: an AppSwitcher segmented control in the 64px sticky
-header switches between the **Claude** page (endpoint copy-card for cc-switch + upstream provider
-pool with flow visualization + **failover route editor** with drag-reorderable hops + one-click
-"Import from cc-switch") and the **Codex** page (gateway status card + **failover route editor**
-for Codex models (5.6Sol/5.6Luna/5.6Terra/5.5) + provider list + launchers:
-`codex_open_desktop_window` mirror install / `codex_open_cli_terminal` / `copilot_open_cli_terminal`).
-Phase 18 unified model mapping into the route editor: each route = client-facing model name →
-ordered hops (provider + upstream model), with drag-reorder, per-hop removal, and per-hop model
-editing. Design: systemBlue `#0A84FF` (dark) / `#2563EB` (light), emerald-500 running pill, rounded-xl cards.
-
-**Vendors (unified supplier management)**: a vendor = one upstream supplier that may serve
-multiple protocols (`anthropic` / `openai-chat` / `openai-responses`) sharing a single API key,
-with optional per-protocol endpoint overrides (`endpoints[protocol]` wins over `base_url`).
-Stored in the `vendors` table (`database/dao/vendors.rs`, schema v10; commands `vendor_list/save/delete`).
-The provider smart form (`ui/src/lib/providerForm.ts` + ProvidersPage) has a vendor picker:
-picking a vendor auto-fills endpoint + key and auto-selects the protocol the target app
-speaks (`APP_PROTOCOL`: claude_code→anthropic, codex/copilot/pi→openai-chat). Provider
-rows keep a baked-in `settings_config` snapshot, so deleting a vendor never cascades.
-
-**cc-switch coexistence detection** (Phase 15.5 + follow-up): when both
-AAG and [cc-switch](https://github.com/farion1231/cc-switch) are running,
-both write `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` /
-`COPILOT_PROVIDER_BASE_URL` into the same live agent config files;
-whichever wrote last wins, silently routing requests through the wrong
-proxy. **Default deployment shape**: AAG acts as an Anthropic
-upstream — cc-switch chains through it (`cc-switch → AAG → upstream`),
-and only the Codex CLI isolated CODEX_HOME window treats AAG as its
-primary endpoint. So the detector runs and shows a banner, but **the
-hard block is opt-in** (`KEY_CCSWITCH_BLOCK_ENABLED`, default off in
-`app_meta`). Detector
-(`src-tauri/src/services/detect/cc_switch.rs`) combines four signals (TCP
-probe `127.0.0.1:15721` + `~/.cc-switch/cc-switch.db` exists + live-config
-residue in `~/.claude/settings.json` / `~/.codex/config.toml`). State lives
-in `app_meta` under `ccswitch_override_enabled` + `ccswitch_last_status_json`
-+ `ccswitch_block_enabled` (schema v11 is a no-op stamp — no new tables).
-Commands: `detect_cc_switch() -> CcSwitchStatus`,
-`set_cc_switch_override(enabled)`, `get_cc_switch_blocking()`,
-`set_cc_switch_blocking(enabled)`. When blocking is on, the guards reject
-`codex` / `copilot` writes whose settings point at AAG's own proxy while
-cc-switch is detected; `claude_code` is **never** blocked (Claude CLI's
-`ANTHROPIC_BASE_URL` is meant to point at AAG's upstream — that's the
-supported cc-switch → AAG chain). **UI surface is silent by default**
-(Phase 15.7): no banner, no dialogs, no polling — the only control is a
-single Settings toggle, "Overwrite cc-switch config on conflict"
-(ON = write freely; OFF = backend hard-block; maps to
-`ccswitch_block_enabled`). Default proxy port is **8989**
-(`DEFAULT_PROXY_PORT`; schema v13 sweeps the legacy 8787–8792 range),
-and `proxy_start`'s bind-ready timeout is 2s.
-
-**cc-switch provider import** (Phase 15.6 + Phase 22): `import_cc_switch_providers`
-(`services/import_cc_switch/`) reads `~/.cc-switch/cc-switch.db`
-read-only, maps cc-switch's hyphenated app_type ids onto AAG's
-snake_case (`claude`→`claude_code`, `claude-desktop`→`claude_desktop`,
-`grokbuild`→`grok_build`), skips already-present `(id, app_type)` pairs
-(idempotent). Since Phase 22 the importer also: fills every provider
-field (category/sort_index/notes/icon/icon_color/website_url), keeps
-cc-switch's `is_current` bit as AAG's CURRENT marker and its
-`in_failover_queue` flag, and auto-builds failover routes for every
-official Claude model from each imported provider's
-`ANTHROPIC_DEFAULT_*_MODEL` env keys. Tier fallback: a missing tier's
-mapping falls back to ANY other tier's model (fable→opus→sonnet→haiku→
-default), so every official model gets a hop even for partial mappings.
-The `[1M]` context suffix is preserved verbatim (it is part of the
-upstream model id). Only queue members (`in_failover_queue=1`)
-contribute hops; route hop order follows cc-switch's queue (current
-first, then sort_index). Codex providers without an API key
-(ChatGPT-login `codex-official` / `default`) are skipped
-(`ImportReport.skippedNoKey`); each imported codex provider's
-`modelCatalog.models[].model` list is evenly distributed across the 4
-default codex client models (`client[i] → upstream[i*N/4]`: 1 model →
-all four use it, 2 models → two-per-group, N≥3 spread wide). Claude page has
-an "Import from cc-switch" button; the report toast shows
-imported/skipped/total + auto-seeded route count + skipped no-key count.
+- **Streaming failover is one-shot.** `Router.stream` awaits the **first chunk** before committing (`src/gateway/router.ts:~102`). Once a provider yields a chunk, mid-stream errors surface to the client — there is no silent failover halfway through a stream. Don't promise transparent streaming failover in user-facing copy.
+- **`Switcher.status(id).path` is unreliable.** `src/agents/switcher.ts:92-97` wraps `existsSync` in a `try { return true } catch { return false }` that always returns `true`, so `.path` is always the first config path regardless of existence. Treat it as "first candidate path", not "on-disk path".
+- **`--menu` flag is a no-op.** `src/index.ts:12` declares it for `--help`, but the launch decision only checks `process.argv.slice(2).length === 0` (`src/index.ts:55`). The flag has no effect.
+- **`AgentTarget.format` is unused.** All adapters write OpenAI-shaped JSON regardless of `'openai' | 'anthropic'`. The field is informational only.
+- **`ProviderType` includes `'gemini'` but no Gemini class exists.** `createProvider` falls through to `OpenAIProvider` for `'gemini'` and the default (`src/gateway/providers/index.ts:14-15`). Gemini is assumed OpenAI-compatible.
+- **`ConfigManager.ensureAgents()` is broken at runtime.** `src/config/manager.ts:81` uses `require()` inside an ESM module. The method has no call sites today, so it's latent — but if you wire it up, replace with a static or dynamic `import()`.
+- **No clean shutdown.** `startGatewayCmd` and `interactiveMenu`'s gateway branch both `await new Promise(() => {})` after `start()`. SIGINT hard-kills the process; there are no signal handlers.
+- **`oaiReqToAnthropicReq` and `anthropicReqToOAIReq` are not symmetric callers.** The first is used by `AnthropicProvider` (provider side); the second by the gateway edge (`server.ts:92`). They are paired functions but used in opposite directions — keep this straight when editing the converter.
+- **Converter only handles text content.** `textOf` and the request builders silently flatten any non-string content (tool calls, images, function blocks) to its `.text` field or a user-role text message. Multi-modal or tool-use content is dropped on the floor.
+- **Anthropic SSE emitter is synthesized, not parsed.** `oaiChunksToAnthropicStream` emits well-formed Anthropic events from OAI chunks; `anthropicStreamToOAIChunks` only listens for `message_start` / `content_block_delta` / `message_delta` / `message_stop`, ignoring `content_block_start`/`stop`/`ping`.
+- **First `loadConfig()` writes `~/.ai-agent-gateway/config.json` to disk** (`src/config/store.ts:100-103`). Tests that delete the file re-create it on the next call.
+- **`APPDATA` env var is trusted on Windows** (`src/agents/adapters.ts:11`). On Linux/macOS this falls back to `~/AppData/Roaming`, which is wrong — but agent paths are Windows-oriented anyway.
 
 ## Conventions
 
-- **Rust**: new tables bump `SCHEMA_VERSION` + add a migration branch in `schema.rs`. New commands must be registered in `lib.rs::invoke_handler`. DAO methods live in `impl Database` blocks.
-- **TypeScript**: strict; ESM. UI imports from `lib/api/*`. No path aliases in `src/` (Node tree); `ui/` uses relative imports.
-- **Docs**: after any feature change, update `PROGRESS.md` log; keep `DESIGN.md`/`CLAUDE.md`/`AGENTS.md` in sync.
+- TypeScript strict, ESM (`"type": "module"`, `module: "NodeNext"`). All relative imports **must include the `.js` extension** even though sources are `.ts` (e.g. `import { Router } from './router.js'`). Do not "fix" this.
+- No path aliases. Import from `../config/schema.js`, `../gateway/...`, etc.
+- `noUnusedLocals` and `noUnusedParameters` are both **off** in `tsconfig.json`. Don't worry about unused private helpers.
+
+## Known Issues (must be resolved before `typecheck` / `test` can pass)
+
+1. **Filename typo blocks all compilation.** `src/gateway/providers/base.ts:2` imports `'../circuit-breaker.js'`, but the file on disk is `src/gateway/circuit_breaker.ts` (underscore). `tsc --noEmit` fails with `TS2307: Cannot find module '../circuit-breaker.js'`. Every other reference (README, package.json, router.ts, mock.ts, store.ts, e2e.test.ts prose) uses the hyphenated form. Fix: rename the file to `circuit-breaker.ts` (the rename preserves the export name `CircuitBreaker`, which is unaffected).
+2. **ESM/CJS interop bug.** `src/config/manager.ts:81` uses `require('../agents/adapters.js')` inside an ESM module. This works in `tsx` (dev) but is fragile in `node` and bundlers. Replace with a top-level `import` or lazy dynamic `import()`.
+3. **README.md is significantly out of sync with the code.** It documents files that don't exist (`src/agents/detectors.ts`, `src/agents/types.ts`, `src/gateway/handlers/`, `src/gateway/types.ts`, `src/types/`, `src/utils/{error,crypto,http}.ts`, `tests/{unit,integration,fixtures,utils.ts}`, `docs/`), test scripts that aren't in `package.json` (`test:unit`, `test:integration`, `test:e2e`, `test:performance`), and config-path tables that disagree with the actual adapter defaults (Cursor = `cursor-mcp.json` / `~/.cursor/config.json`, NOT `settings.json`; Copilot adapter writes JSON, not YAML). When in doubt, trust the code over the README.
+4. **Root-level scripts are dead weight.** `check_codex.py`, `check_db.py`, `check-db.cjs` are unreferenced, machine-specific (`C:\Users\15063\.cc-switch\`), and not part of the build. Safe to delete.

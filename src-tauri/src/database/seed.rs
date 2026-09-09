@@ -8,7 +8,6 @@ use crate::database::{lock_conn, Database};
 use crate::database::dao::proxy_providers::{CircuitBreakerConfig, ProxyProvider};
 use crate::database::dao::routes::{Route, RouteHop};
 use crate::error::AppError;
-use rusqlite::params;
 
 const MOCK_PRIMARY: &str = "mock-primary";
 const MOCK_FALLBACK: &str = "mock-fallback";
@@ -22,7 +21,7 @@ impl Database {
             let conn = lock_conn!(self.conn);
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (id, host, port, auth_token, enabled)
-                 VALUES (1, '127.0.0.1', 8989, '', 0)",
+                 VALUES (1, '127.0.0.1', 8787, '', 0)",
                 [],
             )?;
         }
@@ -53,7 +52,6 @@ impl Database {
                     half_open_retries: 1,
                     success_threshold: 2,
                 },
-                model_mapping: Default::default(),
             })?;
             self.save_proxy_provider(&ProxyProvider {
                 id: MOCK_FALLBACK.into(),
@@ -71,7 +69,6 @@ impl Database {
                     half_open_retries: 1,
                     success_threshold: 2,
                 },
-                model_mapping: Default::default(),
             })?;
         }
 
@@ -105,62 +102,6 @@ impl Database {
                     RouteHop { provider: MOCK_FALLBACK.into(), model: "mock-fast".into() },
                 ],
             })?;
-        }
-
-        // Official Claude model routes (idempotent per alias): each official
-        // id gets a failover chain, so Anthropic-native clients that request
-        // e.g. "claude-fable-5" are transparently served by the hop chain and
-        // see the official name echoed back. Runs even when the demo routes
-        // above already exist, so existing installs gain the aliases on
-        // upgrade. Users then edit the hops on the Proxy page to point at
-        // their real providers.
-        for m in crate::proxy::models::OFFICIAL_MODELS {
-            let exists = {
-                let conn = lock_conn!(self.conn);
-                conn.query_row(
-                    "SELECT COUNT(*) FROM routes WHERE alias = ?1",
-                    params![m.id],
-                    |row| row.get::<_, i64>(0),
-                )? > 0
-            };
-            if !exists {
-                self.save_route(&Route {
-                    alias: m.id.into(),
-                    description: format!(
-                        "{} via failover chain (edit hops on the route editor)",
-                        m.display_name
-                    ),
-                    hops: vec![
-                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
-                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
-                    ],
-                })?;
-            }
-        }
-
-        // Seed default Codex model routes (same pattern as Claude routes).
-        for m in crate::proxy::models::CODEX_MODELS {
-            let exists = {
-                let conn = lock_conn!(self.conn);
-                conn.query_row(
-                    "SELECT COUNT(*) FROM routes WHERE alias = ?1",
-                    params![m.id],
-                    |row| row.get::<_, i64>(0),
-                )? > 0
-            };
-            if !exists {
-                self.save_route(&Route {
-                    alias: m.id.into(),
-                    description: format!(
-                        "{} — configure upstream models in the route editor",
-                        m.display_name
-                    ),
-                    hops: vec![
-                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
-                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
-                    ],
-                })?;
-            }
         }
 
         Ok(())

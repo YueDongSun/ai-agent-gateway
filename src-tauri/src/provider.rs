@@ -34,11 +34,6 @@ pub struct Provider {
     /// Whether this provider is in the failover queue for its app.
     #[serde(default, rename = "inFailoverQueue")]
     pub in_failover_queue: bool,
-    /// When true, the auto-sync path (cc-switch -> AAG) skips this row
-    /// instead of overwriting it. Lets users keep manual edits while
-    /// still auto-pulling new upstream entries.
-    #[serde(default, rename = "syncLocked")]
-    pub sync_locked: bool,
 }
 
 impl Provider {
@@ -56,8 +51,7 @@ impl Provider {
             icon: None,
             icon_color: None,
             meta: None,
-            in_failover_queue: true,
-            sync_locked: false,
+            in_failover_queue: false,
         }
     }
 }

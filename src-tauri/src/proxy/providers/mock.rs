@@ -75,8 +75,6 @@ impl Provider for MockProvider {
                 message: OAIMessage {
                     role: "assistant".into(),
                     content: Some(reply.clone()),
-                    tool_calls: None,
-                    refusal: None,
                     extra: Default::default(),
                 },
                 finish_reason: Some("stop".into()),
@@ -89,7 +87,7 @@ impl Provider for MockProvider {
         })
     }
 
-    async fn stream(
+    fn stream(
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
@@ -140,20 +138,20 @@ impl Provider for MockProvider {
             // leading role chunk
             yield crate::proxy::converter::make_stream_chunk(
                 &id, &model,
-                StreamDelta { role: Some("assistant".into()), content: None, tool_calls: None, reasoning: None },
+                StreamDelta { role: Some("assistant".into()), content: None },
                 None,
             );
             for tok in tokens {
                 if slow { tokio::time::sleep(std::time::Duration::from_millis(120)).await; }
                 yield crate::proxy::converter::make_stream_chunk(
                     &id, &model,
-                    StreamDelta { role: None, content: Some(tok), tool_calls: None, reasoning: None },
+                    StreamDelta { role: None, content: Some(tok) },
                     None,
                 );
             }
             yield crate::proxy::converter::make_stream_chunk(
                 &id, &model,
-                StreamDelta { role: None, content: None, tool_calls: None, reasoning: None },
+                StreamDelta { role: None, content: None },
                 Some("stop".into()),
             );
         }

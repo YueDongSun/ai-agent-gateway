@@ -1,10 +1,8 @@
 # DESIGN.md — Migrating `ai-agent-gateway` to cc-switch feature parity
 
-> Status: **feature-complete**. Phases 0-10 are done (see `PROGRESS.md` for the
-> verification log). The Tauri desktop shell (`src-tauri/`, `ui/`) is the
-> primary deliverable; the Node `src/` proxy remains runnable standalone for
-> headless use. This document remains the architectural reference — read it
-> alongside `PROGRESS.md` before modifying `src-tauri/` or `ui/`.
+> Status: design phase. The current `src/` (Node/TypeScript proxy + CLI/TUI) remains
+> the working proxy. The Tauri desktop shell (`src-tauri/`, `ui/`) is being added
+> alongside and will eventually subsume the CLI/TUI.
 
 ## Reference implementation
 
@@ -261,25 +259,6 @@ Port `src/gateway/` semantics to Rust:
 
 The existing Node proxy stays as a fallback path until the Rust one is feature-complete.
 
-#### Official-model gateway surface (Phase 14)
-
-For Anthropic-native clients (Claude Desktop-style integrations, the Anthropic
-SDKs) the proxy presents itself as the official API:
-
-- `proxy/models.rs` — `OFFICIAL_MODELS` catalog (claude-fable-5, opus-4-8/4-7/4-6,
-  sonnet-5, sonnet-4-6, haiku-4-5) with display names.
-- `GET /v1/models` returns entries carrying **both** wire shapes — Anthropic
-  Models API fields (`type: "model"`, `display_name`, `created_at`,
-  `has_more`/`first_id`/`last_id` envelope) and OpenAI fields (`object`,
-  `created`, `owned_by`) — so either SDK family parses the list; unknown
-  fields are ignored.
-- `POST /v1/messages` accepts official model ids and routes them through the
-  failover hop chain (each official id is seeded as a route in
-  `database/seed.rs`, idempotent per alias so upgrades gain the aliases); the
-  response echoes the requested model id back to the client.
-- The mirror constant in `ui/src/lib/models.ts` keeps the frontend (Proxy page
-  badges + demo mock seeds) in sync with the Rust catalog.
-
 ### Adapter pattern for AI coding CLIs
 
 Mirrors `src/agents/adapters.ts` but per app:
@@ -299,18 +278,10 @@ Each adapter exposes `detect()`, `read()`, `write(provider)`, `restore_backup()`
 
 ## Phasing
 
-**Phase 0 — Tauri skeleton** ✅ done
+**Phase 0 — Tauri skeleton (this iteration)** ✅ in progress
 - `src-tauri/Cargo.toml` + `tauri.conf.json` + minimal `main.rs`/`lib.rs`.
 - `ui/` with Vite + React + Tailwind + shadcn/ui baseline, an empty `App.tsx` that opens a window saying "AAG".
 - No functional parity yet. Tauri `dev` boots, window appears.
-
-**Post-Phase-10 addition — Codex CLI isolated CODEX_HOME** ✅ done (2026-08-03)
-- `app_meta` key/value table (schema v9) + `settings` DAO
-  (`KEY_CODEX_CLI_HOME`, `KEY_OUTBOUND_PROXY`).
-- `provider_switch` writes Codex live config to an isolated CODEX_HOME when set,
-  leaving the Codex desktop app's `~/.codex` untouched.
-- `codex_open_cli_terminal` launches a terminal with `CODEX_HOME` + outbound
-  proxy env injected. UI: `CodexCli` page.
 
 **Phase 1 — Provider CRUD + active switching**
 - Implement `providers` + `active_providers` tables + DAOs.

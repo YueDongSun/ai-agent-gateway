@@ -1,53 +1,33 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { appCheckUpdate } from './lib/api/app';
-import { I18nCtx, useCtx } from './lib/ctx';
-import { useI18n } from './i18n/index';
-import { useTheme } from './lib/theme';
-import { APP_PAGE_ORDER, APP_PAGES } from './lib/appPages';
-import { use_gateway_status } from './hooks/use_gateway_status.js';
-import { app_version, build_channel } from './lib/build_info.js';
-import { isDemo } from './lib/mock/backend.js';
-import { Release_badge } from './components/release_badge.js';
-import { BrandLogo, ClaudeIcon, CodexIcon, CopilotIcon, SunIcon, MoonIcon } from './components/Icons';
-import type { AppType } from './lib/api/types';
+import { switchProvider } from './lib/api/providers';
+import type { DeeplinkAction } from './lib/api/deeplink';
+import { ProvidersPage } from './components/providers/ProvidersPage';
+import { ProxyPage } from './components/proxy/ProxyPage';
+import { BackupPage } from './components/backup/BackupPage';
+import { McpPage } from './components/mcp/McpPage';
+import { SkillsPage } from './components/skills/SkillsPage';
+import { SessionsPage } from './components/sessions/SessionsPage';
+import { UsagePage } from './components/usage/UsagePage';
+import { SyncPage } from './components/sync/SyncPage';
+import { DeepLinkPage } from './components/deeplink/DeepLinkPage';
 
 interface AppInfo {
   name: string;
   version: string;
   phase: string;
-  platform?: string;
-  architecture?: string;
 }
 
-/** App-level icon picker for the AppSwitcher. Hidden apps (e.g. `pi`) get
- * no icon — the AppSwitcher already filters them out via APP_PAGE_ORDER. */
-const APP_ICONS: Record<string, () => JSX.Element> = {
-  claude_code: ClaudeIcon,
-  codex: CodexIcon,
-  copilot: CopilotIcon,
-};
+type View = 'app' | 'providers' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink';
 
-const AppPage = lazy(() =>
-  import('./components/app/AppPage').then((m) => ({ default: m.AppPage })),
-);
-
-/* Sun/Moon icons used to live here as inline SVG. Round 1 moved them to
- * ./components/Icons.tsx alongside the new ClaudeIcon/CodexIcon/CopilotIcon
- * so all UI icons share one home. */
-
-function AppInner() {
-  const ctx = useCtx();
-  const { t, locale, setLocale, theme, setThemeOverride } = ctx;
-
+export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<AppType>('claude_code');
+  const [view, setView] = useState<View>('providers');
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateEndpoint, setUpdateEndpoint] = useState('');
-  const { gateway_status, refresh_gateway_status } = use_gateway_status();
-  const release_channel = isDemo ? 'demo' : build_channel === 'demo' ? 'development' : build_channel;
 
   useEffect(() => {
     invoke<AppInfo>('app_info')
@@ -63,162 +43,185 @@ function AppInner() {
         endpoint: updateEndpoint.trim() || null,
       });
       if (latest) {
-        setUpdateMsg(t('app.update.available', { version: latest }));
+        setUpdateMsg(`Update available: v${latest}`);
       } else {
-        setUpdateMsg(t('app.update.none'));
+        setUpdateMsg('No update available.');
       }
     } catch (e) {
-      setUpdateMsg(t('app.update.failed', { message: String(e) }));
+      setUpdateMsg(`Update check failed: ${String(e)}`);
     } finally {
       setCheckingUpdate(false);
     }
   };
 
-  const toggleTheme = () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    setThemeOverride(next);
-  };
-
-  const nextLang = () => {
-    setLocale(locale === 'en' ? 'zh' : 'en');
+  /// Dispatch a parsed deep-link action. Returns a human-readable result
+  /// string for the DeepLinkPage to render. Errors are caught here so the
+  /// page can show them without crashing.
+  const handleExecuteDeeplink = async (
+    action: DeeplinkAction,
+  ): Promise<string> => {
+    switch (action.kind) {
+      case 'switchProvider': {
+        const r = await switchProvider(action.providerId, action.appType);
+        return `Switched to ${action.providerId} (wrote ${r.written.length} file(s))`;
+      }
+      case 'focusProvider':
+        setView('providers');
+        return `Opened Providers page (focus: ${action.providerId})`;
+      case 'focusMcp':
+        setView('mcp');
+        return `Opened MCP page (focus: ${action.serverId})`;
+      case 'focusSkill':
+        setView('skills');
+        return `Opened Skills page (focus: ${action.skillId})`;
+      case 'showDeeplinks':
+        setView('deeplink');
+        return 'Opened Deep links page';
+      case 'unknown':
+        return `Unknown action: ${action.reason}`;
+    }
   };
 
   if (error) {
     return (
-      <div className="aag-root aag-error-wrap">
-        <pre className="aag-error">{t('app.error', { message: error })}</pre>
+      <div className="aag-root">
+        <pre className="aag-error">Error: {error}</pre>
       </div>
     );
   }
 
-  const gwLabel =
-    gateway_status === 'running'  ? t('header.gateway_running') :
-    gateway_status === 'degraded' ? t('header.gateway_degraded') :
-    gateway_status === 'stopped'  ? t('header.gateway_stopped') :
-                                    t('header.gateway_unknown');
-  const gwTitle =
-    gateway_status === 'running'  ? t('header.gateway_running_description') :
-    gateway_status === 'degraded' ? t('header.gateway_degraded_description') :
-    gateway_status === 'stopped'  ? t('header.gateway_stopped_description') :
-                                    t('header.gateway_unknown_description');
-
   return (
     <div className="aag-root">
       <header className="aag-header">
-        <div className="aag-brand">
-          <span className="aag-logo" aria-hidden>
-            <BrandLogo />
-          </span>
-          <h1>{info?.name ?? t('app.brand')}</h1>
-          <Release_badge
-            version={app_version}
-            channel={release_channel}
-            label={t(`release.channel_${release_channel}`)}
-            description={t(`release.description_${release_channel}`)}
-            platform={info?.platform}
-            architecture={info?.architecture}
-          />
+        <div className="aag-header-row">
+          <h1>{info?.name ?? 'AI Agent Gateway'}</h1>
+          <nav className="aag-nav">
+            <button
+              className={view === 'providers' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('providers')}
+            >
+              Providers
+            </button>
+            <button
+              className={view === 'proxy' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('proxy')}
+            >
+              Proxy
+            </button>
+            <button
+              className={view === 'backup' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('backup')}
+            >
+              Backup
+            </button>
+            <button
+              className={view === 'mcp' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('mcp')}
+            >
+              MCP
+            </button>
+            <button
+              className={view === 'skills' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('skills')}
+            >
+              Skills
+            </button>
+            <button
+              className={view === 'sessions' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('sessions')}
+            >
+              Sessions
+            </button>
+            <button
+              className={view === 'usage' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('usage')}
+            >
+              Usage
+            </button>
+            <button
+              className={view === 'sync' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('sync')}
+            >
+              Sync
+            </button>
+            <button
+              className={view === 'deeplink' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('deeplink')}
+            >
+              Deep links
+            </button>
+            <button
+              className={view === 'app' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('app')}
+            >
+              About
+            </button>
+          </nav>
         </div>
-        <nav className="app-switcher" aria-label="App switcher">
-          {APP_PAGE_ORDER.map((at) => {
-            const Icon = APP_ICONS[at];
-            return (
-              <button
-                key={at}
-                className={view === at ? 'active' : ''}
-                onClick={() => setView(at)}
-              >
-                {Icon ? <Icon /> : null}
-                <span>{APP_PAGES[at].label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="header-controls">
-          <span
-            className={`gw-status ${gateway_status}`}
-            title={gwTitle}
-            role="status"
-            aria-live="polite"
-            data-testid="gateway_status"
-          >
-            <span className="gw-status-dot" />
-            {gwLabel}
-          </span>
-          <button
-            className="theme-btn"
-            onClick={toggleTheme}
-            title={t('header.theme.toggle')}
-            aria-label={t('header.theme.toggle')}
-          >
-            {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-            <span>{theme === 'dark' ? t('header.theme.light') : t('header.theme.dark')}</span>
-          </button>
-          <button
-            className="lang-btn"
-            onClick={nextLang}
-            title={t('header.lang.toggle')}
-            aria-label={t('header.lang.toggle')}
-          >
-            {locale === 'en' ? '中' : 'EN'}
-          </button>
-        </div>
+        {info && (
+          <p className="aag-sub">
+            v{info.version} · Phase {info.phase}
+          </p>
+        )}
       </header>
       <main className="aag-main">
-        <Suspense fallback={<section className="page-loading" aria-live="polite">{t('common.loading')}</section>}>
-          {APP_PAGE_ORDER.includes(view) ? (
-            <AppPage appType={view} on_gateway_status_refresh={refresh_gateway_status} />
-          ) : (
-            <section>
-              <h2>{info?.name ?? t('app.brand')}</h2>
-              <p>
-                AAG is a local gateway for AI coding agents. Claude chains
-                through it via cc-switch; Codex runs against it natively
-                (Responses API) in an isolated mirror CODEX_HOME.
-              </p>
-              <div className="about-update">
-                <input
-                  type="text"
-                  className="about-update-endpoint"
-                  value={updateEndpoint}
-                  onChange={(e) => setUpdateEndpoint(e.target.value)}
-                  placeholder={t('app.update.placeholder')}
-                  disabled={checkingUpdate}
-                />
-                <button
-                  className="btn"
-                  onClick={handleCheckUpdate}
-                  disabled={checkingUpdate}
-                >
-                  {checkingUpdate ? t('app.update.checking') : t('app.update.check')}
-                </button>
-                {updateMsg && (
-                  <span className="about-update-msg">{updateMsg}</span>
-                )}
-              </div>
-            </section>
-          )}
-        </Suspense>
+        {view === 'providers' ? (
+          <ProvidersPage />
+        ) : view === 'proxy' ? (
+          <ProxyPage />
+        ) : view === 'backup' ? (
+          <BackupPage />
+        ) : view === 'mcp' ? (
+          <McpPage />
+        ) : view === 'skills' ? (
+          <SkillsPage />
+        ) : view === 'sessions' ? (
+          <SessionsPage />
+        ) : view === 'usage' ? (
+          <UsagePage />
+        ) : view === 'sync' ? (
+          <SyncPage />
+        ) : view === 'deeplink' ? (
+          <DeepLinkPage onExecute={handleExecuteDeeplink} />
+        ) : (
+          <section>
+            <h2>About</h2>
+            <p>
+              AAG (AI Agent Gateway) is a Tauri desktop app for managing provider
+              configuration across multiple AI coding CLIs (Claude Code, Codex,
+              Gemini CLI, OpenCode, OpenClaw, Hermes, Grok Build, Claude Desktop).
+            </p>
+            <p>
+              See <code>DESIGN.md</code> for the migration plan and{' '}
+              <code>PROGRESS.md</code> for current status.
+            </p>
+            <div className="about-update">
+              <input
+                type="text"
+                className="about-update-endpoint"
+                value={updateEndpoint}
+                onChange={(e) => setUpdateEndpoint(e.target.value)}
+                placeholder="https://releases.example.com/aag/latest.json (optional)"
+                disabled={checkingUpdate}
+              />
+              <button
+                className="btn"
+                onClick={handleCheckUpdate}
+                disabled={checkingUpdate}
+              >
+                {checkingUpdate ? 'Checking…' : 'Check for update'}
+              </button>
+              {updateMsg && (
+                <span className="about-update-msg">{updateMsg}</span>
+              )}
+            </div>
+          </section>
+        )}
       </main>
-      <footer className="aag-footer">{t('app.footer')}</footer>
+      <footer className="aag-footer">
+        Phase 2: local proxy with circuit breaker + failover for mock providers.
+        Real OpenAI/Anthropic providers + streaming land in later phases.
+      </footer>
     </div>
-  );
-}
-
-export function App() {
-  const i18n = useI18n();
-  const { resolved, override, setOverride } = useTheme();
-
-  const ctx = {
-    ...i18n,
-    theme: resolved,
-    themeOverride: override,
-    setThemeOverride: setOverride,
-  };
-
-  return (
-    <I18nCtx.Provider value={ctx}>
-      <AppInner />
-    </I18nCtx.Provider>
   );
 }
