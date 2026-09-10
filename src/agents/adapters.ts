@@ -17,8 +17,29 @@ export function defaultAgentTargets(): AgentTarget[] {
       name: 'GitHub Copilot CLI',
       format: 'openai',
       configPaths: [
-        join(HOME, '.config', 'gh', 'hosts.yml'),
-        join(APPDATA, 'GitHub CLI', 'hosts.yml'),
+        join(HOME, '.copilot', 'settings.json'),
+      ],
+      pointedAtGateway: false,
+      activeProfileId: '',
+    },
+    {
+      id: 'pi',
+      name: 'Pi (MS Coding Agent)',
+      format: 'openai',
+      configPaths: [
+        join(HOME, '.pi', 'agent', 'models.json'),
+        join(HOME, '.pi', 'agent', 'settings.json'),
+      ],
+      pointedAtGateway: false,
+      activeProfileId: '',
+    },
+    {
+      id: 'antigravity',
+      name: 'Antigravity (desktop)',
+      format: 'openai',
+      configPaths: [
+        join(APPDATA, 'Antigravity', 'Preferences'),
+        join(HOME, '.config', 'Antigravity', 'Preferences'),
       ],
       pointedAtGateway: false,
       activeProfileId: '',
@@ -172,15 +193,54 @@ export abstract class JsonAgentAdapter implements AgentAdapter {
 export class CopilotAdapter extends JsonAgentAdapter {
   buildJson(gw: string, tok: string, model: string) {
     return {
-      provider: 'openai-compat',
-      baseURL: `${gw}/v1`,
-      apiKey: tok || 'gateway',
       model,
-      models: [model],
+      env: {
+        COPILOT_PROVIDER_BASE_URL: `${gw}/v1`,
+        COPILOT_PROVIDER_API_KEY: tok || 'gateway',
+        COPILOT_PROVIDER_TYPE: 'openai',
+      },
     };
   }
   buildDirectJson(baseURL: string, apiKey: string, model: string) {
-    return { provider: 'openai-compat', baseURL, apiKey, model, models: [model] };
+    return {
+      model,
+      env: {
+        COPILOT_PROVIDER_BASE_URL: baseURL,
+        COPILOT_PROVIDER_API_KEY: apiKey,
+        COPILOT_PROVIDER_TYPE: 'openai',
+      },
+    };
+  }
+  /** Copilot settings.json is JSONC — strip comments before JSON.parse. */
+  read(): string | undefined {
+    const p = this.target.configPaths.find((x) => existsSync(x));
+    if (!p) return undefined;
+    const raw = readFileSync(p, 'utf8');
+    return raw.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+  /** Merge the new config into the existing settings so user keys survive. */
+  write(content: string): void {
+    const p = this.resolveConfigPath();
+    if (!p) throw new Error(`no config path for agent ${this.target.id}`);
+    const dir = dirname(p);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+    let merged: Record<string, unknown> = {};
+    if (existsSync(p)) {
+      try {
+        const existing = JSON.parse(this.read() ?? '{}');
+        if (existing && typeof existing === 'object') merged = existing;
+      } catch {
+        merged = {};
+      }
+    }
+    const patch = JSON.parse(content) as Record<string, unknown>;
+    merged = { ...merged, ...patch };
+    // merge env sub-object instead of replacing wholesale
+    if (patch.env && typeof patch.env === 'object' && merged.env && typeof merged.env === 'object') {
+      merged.env = { ...(merged.env as Record<string, unknown>), ...(patch.env as Record<string, unknown>) };
+    }
+    writeFileSync(p, JSON.stringify(merged, null, 2) + '\n', 'utf8');
   }
 }
 
@@ -258,6 +318,57 @@ export class KimiAdapter extends JsonAgentAdapter {
   }
 }
 
+export class PiAdapter extends JsonAgentAdapter {
+  buildJson(gw: string, tok: string, model: string) {
+    return {
+      providers: {
+        aag: {
+          baseUrl: `${gw}/v1`,
+          api: 'openai-completions',
+          apiKey: tok || 'gateway',
+          models: [{ id: model }],
+        },
+      },
+    };
+  }
+  buildDirectJson(baseURL: string, apiKey: string, model: string) {
+    return {
+      providers: {
+        aag: {
+          baseUrl: baseURL,
+          api: 'openai-completions',
+          apiKey,
+          models: [{ id: model }],
+        },
+      },
+    };
+  }
+  detectCurrentBaseURL(): string | undefined {
+    const raw = this.read();
+    if (!raw) return undefined;
+    try {
+      const obj = JSON.parse(raw);
+      return obj.providers?.aag?.baseUrl;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+export class AntigravityAdapter extends JsonAgentAdapter {
+  /** Antigravity switching is disabled — only detection is supported. */
+  buildJson(_gw: string, _tok: string, _model: string): Record<string, unknown> {
+    throw new Error(
+      'Antigravity desktop switching is not supported yet (no public on-disk config schema). Configure the model in Antigravity itself.',
+    );
+  }
+  buildDirectJson(_baseURL: string, _apiKey: string, _model: string): Record<string, unknown> {
+    throw new Error(
+      'Antigravity desktop switching is not supported yet (no public on-disk config schema). Configure the model in Antigravity itself.',
+    );
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Registry                                                          */
 /* ------------------------------------------------------------------ */
@@ -269,6 +380,8 @@ const ADAPTERS = {
   zcode: ZcodeAdapter,
   minimax: MinimaxAdapter,
   kimi: KimiAdapter,
+  pi: PiAdapter,
+  antigravity: AntigravityAdapter,
 } as const;
 
 export function createAdapter(target: AgentTarget): AgentAdapter {

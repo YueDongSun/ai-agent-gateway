@@ -4,10 +4,14 @@
 //! (JSON). The provider's `settings_config` is a JSON object with shape:
 //! `{ "auth": <auth.json content>, "config": "<TOML string>" }`.
 //! Mirrors cc-switch `services/provider/live.rs:1012`.
+//!
+//! When the `codex_cli_home` setting is configured (independent CODEX_HOME),
+//! writes go to that directory instead of the default `~/.codex`, isolating
+//! the Codex CLI from the Codex desktop app's shared config.
 
 use crate::config::{
-    backup_file, get_backups_dir, get_codex_auth_path, get_codex_config_path, read_json_file,
-    read_text_file, write_json_file, write_text_file,
+    backup_file, get_backups_dir, get_codex_auth_path, get_codex_config_dir_with_override,
+    get_codex_config_path, read_json_file, read_text_file, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -40,7 +44,13 @@ pub fn read_live() -> Result<Option<Value>, AppError> {
 /// Write `provider.settings_config` to Codex's `config.toml` + `auth.json`,
 /// backing up existing files first. `settings_config` must be an object with
 /// `auth` (any JSON) and `config` (TOML string) fields.
-pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
+///
+/// `codex_cli_home` optionally overrides the Codex config directory (isolated
+/// CODEX_HOME for the CLI); `None` uses the default `~/.codex`.
+pub fn write_live(
+    provider: &Provider,
+    codex_cli_home: Option<&str>,
+) -> Result<LiveWriteResult, AppError> {
     let obj = provider.settings_config.as_object().ok_or_else(|| {
         AppError::Config("Codex provider settings_config must be a JSON object".into())
     })?;
@@ -52,8 +62,8 @@ pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::Config("Codex settings_config missing 'config' string field".into()))?;
 
-    let config_path = get_codex_config_path();
-    let auth_path = get_codex_auth_path();
+    let config_path = get_codex_config_dir_with_override(codex_cli_home).join("config.toml");
+    let auth_path = get_codex_config_dir_with_override(codex_cli_home).join("auth.json");
     let ts = chrono::Utc::now().timestamp();
     let backup_dir = get_backups_dir()?;
 

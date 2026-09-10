@@ -229,6 +229,16 @@ impl Database {
             [],
         )?;
 
+        // 12. App meta - simple key/value settings store (device-level
+        //    preferences such as the Codex CLI isolated CODEX_HOME).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -304,8 +314,12 @@ impl Database {
             version = 8;
         }
 
-        // Future migrations:
-        // if version < 9 { /* ALTER TABLE ... */ ; conn.execute_batch("PRAGMA user_version = 9;")?; version = 9; }
+        // v8 -> v9: app_meta key/value settings table. Already created above
+        // via IF NOT EXISTS, so for existing v8 DBs we just stamp the version.
+        if version < 9 {
+            conn.execute_batch("PRAGMA user_version = 9;")?;
+            version = 9;
+        }
 
         if version != SCHEMA_VERSION {
             return Err(AppError::Database(format!(

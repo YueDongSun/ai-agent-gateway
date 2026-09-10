@@ -1,10 +1,18 @@
 /// Shared API types. Mirror Rust types from `src-tauri/src/provider.rs`.
 
-export type AppType = 'claude_code' | 'codex';
+export type AppType =
+  | 'claude_code'
+  | 'codex'
+  | 'copilot'
+  | 'pi'
+  | 'antigravity';
 
 export const APP_TYPES: { value: AppType; label: string }[] = [
   { value: 'claude_code', label: 'Claude Code' },
   { value: 'codex', label: 'Codex' },
+  { value: 'copilot', label: 'Copilot CLI' },
+  { value: 'pi', label: 'Pi (MS Coding Agent)' },
+  { value: 'antigravity', label: 'Antigravity' },
 ];
 
 export interface Provider {

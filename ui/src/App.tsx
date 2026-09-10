@@ -12,6 +12,7 @@ import { SessionsPage } from './components/sessions/SessionsPage';
 import { UsagePage } from './components/usage/UsagePage';
 import { SyncPage } from './components/sync/SyncPage';
 import { DeepLinkPage } from './components/deeplink/DeepLinkPage';
+import { CodexCliPage } from './components/codexcli/CodexCliPage';
 
 interface AppInfo {
   name: string;
@@ -19,7 +20,7 @@ interface AppInfo {
   phase: string;
 }
 
-type View = 'app' | 'providers' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink';
+type View = 'app' | 'providers' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli';
 
 export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -151,6 +152,12 @@ export function App() {
               Deep links
             </button>
             <button
+              className={view === 'codexcli' ? 'nav-item active' : 'nav-item'}
+              onClick={() => setView('codexcli')}
+            >
+              Codex CLI
+            </button>
+            <button
               className={view === 'app' ? 'nav-item active' : 'nav-item'}
               onClick={() => setView('app')}
             >
@@ -183,6 +190,8 @@ export function App() {
           <SyncPage />
         ) : view === 'deeplink' ? (
           <DeepLinkPage onExecute={handleExecuteDeeplink} />
+        ) : view === 'codexcli' ? (
+          <CodexCliPage />
         ) : (
           <section>
             <h2>About</h2>
@@ -219,8 +228,9 @@ export function App() {
         )}
       </main>
       <footer className="aag-footer">
-        Phase 2: local proxy with circuit breaker + failover for mock providers.
-        Real OpenAI/Anthropic providers + streaming land in later phases.
+        Local proxy with circuit breaker + failover (streaming SSE, OpenAI &
+        Anthropic compatible) · SQLite SSOT · backup · MCP · skills · sessions ·
+        usage · S3/WebDAV sync · deep links · tray.
       </footer>
     </div>
   );

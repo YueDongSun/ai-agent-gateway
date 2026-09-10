@@ -10,3 +10,5 @@ export * from './sessions';
 export * from './usage';
 export * from './sync';
 export * from './deeplink';
+export * from './codexCli';
+export * from './copilot';

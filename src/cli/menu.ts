@@ -25,7 +25,7 @@ export async function interactiveMenu(): Promise<void> {
         { name: '⚙  Edit gateway settings', value: 'settings' },
         { name: '🧪 Run mock test', value: 'test' },
         { name: '📂 Open config file', value: 'config' },
-        { name: '退出', value: 'exit' },
+        { name: 'Exit', value: 'exit' },
       ],
     });
 

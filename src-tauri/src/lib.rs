@@ -169,7 +169,493 @@ fn provider_switch(
         .map_err(String::from)?
         .ok_or_else(|| format!("provider \"{id}\" not found for app \"{app_type}\""))?;
     db.set_current_provider(&id, &app_type).map_err(String::from)?;
-    services::provider::write_live_snapshot(app, &provider).map_err(String::from)
+    // Codex CLI isolated CODEX_HOME: if an isolated directory is set, write
+    // live config there instead of the default ~/.codex; desktop app config
+    // is left untouched.
+    let codex_cli_home = db
+        .get_setting(database::dao::settings::KEY_CODEX_CLI_HOME)
+        .map_err(String::from)?;
+    services::provider::write_live_snapshot(app, &provider, codex_cli_home.as_deref())
+        .map_err(String::from)
+}
+
+// ----- App settings (Codex CLI isolation etc.) -----
+
+/// Read a device-level setting (app_meta table).
+#[tauri::command]
+fn settings_get(
+    db: tauri::State<'_, Database>,
+    key: String,
+) -> Result<Option<String>, String> {
+    db.get_setting(&key).map_err(String::from)
+}
+
+/// Write a device-level setting. An empty value deletes the key.
+#[tauri::command]
+fn settings_set(
+    db: tauri::State<'_, Database>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    db.set_setting(&key, &value).map_err(String::from)
+}
+
+// ----- Codex CLI isolation -----
+
+/// Codex CLI isolation status (for the frontend to render).
+#[derive(Serialize)]
+struct CodexCliStatusDto {
+    /// Whether an isolated CODEX_HOME is set (isolation enabled).
+    isolation_enabled: bool,
+    /// The Codex config directory in effect (isolated dir or default ~/.codex).
+    config_dir: String,
+    /// Whether that directory is initialized (config.toml or auth.json exists).
+    initialized: bool,
+    /// The isolated dir setting value (raw string, None = not set).
+    codex_cli_home: Option<String>,
+    /// The global outbound proxy setting value.
+    outbound_proxy: Option<String>,
+    /// Path to the found codex CLI binary.
+    codex_binary: Option<String>,
+    /// The currently selected Codex provider (from the DB, may be None).
+    current_provider_id: Option<String>,
+    /// Display name of the currently selected provider.
+    current_provider_name: Option<String>,
+}
+
+/// Read Codex CLI isolation-related status.
+#[tauri::command]
+fn codex_cli_status(db: tauri::State<'_, Database>) -> Result<CodexCliStatusDto, String> {
+    let codex_cli_home = db
+        .get_setting(database::dao::settings::KEY_CODEX_CLI_HOME)
+        .map_err(String::from)?;
+    let outbound_proxy = db
+        .get_setting(database::dao::settings::KEY_OUTBOUND_PROXY)
+        .map_err(String::from)?;
+    let config_dir = crate::config::get_codex_config_dir_with_override(
+        codex_cli_home.as_deref(),
+    );
+    let initialized = config_dir.join("config.toml").exists()
+        || config_dir.join("auth.json").exists();
+
+    // The currently selected Codex provider (the is_current row for app_type='codex' in the DB).
+    let current_provider_id = db.get_current_provider("codex").map_err(String::from)?;
+    let current_provider_name = current_provider_id
+        .as_deref()
+        .and_then(|id| db.get_provider_by_id(id, "codex").ok().flatten())
+        .map(|p| p.name);
+
+    Ok(CodexCliStatusDto {
+        isolation_enabled: codex_cli_home.is_some(),
+        config_dir: config_dir.to_string_lossy().into_owned(),
+        initialized,
+        codex_cli_home,
+        outbound_proxy,
+        codex_binary: find_codex_cli_binary().map(|p| p.to_string_lossy().into_owned()),
+        current_provider_id,
+        current_provider_name,
+    })
+}
+
+/// Find the codex CLI binary (PATH + common install locations, including the
+/// CLI bundled with the OpenAI desktop app).
+fn find_codex_cli_binary() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(found) = find_on_windows_path("codex.exe") {
+            return Some(found);
+        }
+        if let Some(found) = find_on_windows_path("codex.cmd") {
+            return Some(found);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(found) = find_on_unix_path("codex") {
+            return Some(found);
+        }
+    }
+    for c in [
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        "/home/linuxbrew/.linuxbrew/bin/codex",
+    ] {
+        let p = std::path::PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let codex_bin =
+                std::path::PathBuf::from(local_app_data).join("OpenAI").join("Codex").join("bin");
+            let direct = codex_bin.join("codex.exe");
+            if direct.exists() {
+                return Some(direct);
+            }
+            if let Ok(entries) = std::fs::read_dir(&codex_bin) {
+                let mut found: Vec<_> = entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.path().join("codex.exe"))
+                    .filter(|p| p.exists())
+                    .collect();
+                found.sort();
+                if let Some(latest) = found.last() {
+                    return Some(latest.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_on_windows_path(exe_name: &str) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("where")
+        .arg(exe_name)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_on_unix_path(exe_name: &str) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {exe_name}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = std::path::PathBuf::from(trimmed);
+    p.exists().then_some(p)
+}
+
+/// Launch the Codex CLI in an isolated terminal (injecting CODEX_HOME +
+/// outbound proxy environment variables).
+#[tauri::command]
+fn codex_open_cli_terminal(
+    db: tauri::State<'_, Database>,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let codex_bin = find_codex_cli_binary()
+        .ok_or_else(|| "codex CLI not found; make sure it is installed and on PATH".to_string())?;
+    let codex_bin = codex_bin.to_string_lossy().to_string();
+
+    let codex_cli_home = db
+        .get_setting(database::dao::settings::KEY_CODEX_CLI_HOME)
+        .map_err(String::from)?;
+    let outbound_proxy = db
+        .get_setting(database::dao::settings::KEY_OUTBOUND_PROXY)
+        .map_err(String::from)?;
+
+    let config_dir = crate::config::get_codex_config_dir_with_override(codex_cli_home.as_deref());
+    std::fs::create_dir_all(&config_dir).map_err(|e| format!("failed to create CODEX_HOME: {e}"))?;
+    let codex_home = config_dir.to_string_lossy().to_string();
+
+    let mut env: Vec<(String, String)> = vec![("CODEX_HOME".to_string(), codex_home.clone())];
+    if let Some(proxy) = &outbound_proxy {
+        env.push(("HTTP_PROXY".to_string(), proxy.clone()));
+        env.push(("HTTPS_PROXY".to_string(), proxy.clone()));
+        env.push(("ALL_PROXY".to_string(), proxy.clone()));
+    }
+    env.push((
+        "NO_PROXY".to_string(),
+        "localhost,127.0.0.1,::1".to_string(),
+    ));
+
+    #[cfg(target_os = "windows")]
+    let command_line = {
+        let mut lines = Vec::new();
+        if let Some(dir) = cwd.as_deref().filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("cd /d \"{}\" || exit /b 1", escape_batch(dir)));
+        }
+        for (k, v) in &env {
+            lines.push(format!("set \"{k}={}\"", escape_batch(v)));
+        }
+        lines.push(format!("\"{}\"", escape_batch(&codex_bin)));
+        lines.join("\r\n")
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let command_line = {
+        let mut lines = Vec::new();
+        if let Some(dir) = cwd.as_deref().filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("cd {}", shell_quote(dir)));
+        }
+        for (k, v) in &env {
+            lines.push(format!("export {k}={}", shell_quote(v)));
+        }
+        lines.push(shell_quote(&codex_bin));
+        lines.join("\n")
+    };
+
+    launch_agent_terminal(&command_line, "codex_cli")?;
+
+    Ok(serde_json::json!({
+        "codexHome": codex_home,
+        "codexBinary": codex_bin,
+        "env": env,
+    }))
+}
+
+/// Launch the Copilot CLI in an isolated terminal (injecting
+/// COPILOT_PROVIDER_* + outbound proxy environment variables). The Copilot
+/// CLI's custom provider can only be injected via environment variables at
+/// launch (there is no persisted provider config), so AAG reads
+/// baseUrl/apiKey/model from the currently selected Copilot provider's
+/// settings_config and opens a terminal with `COPILOT_PROVIDER_BASE_URL`
+/// and friends set.
+#[tauri::command]
+fn copilot_open_cli_terminal(
+    db: tauri::State<'_, Database>,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let outbound_proxy = db
+        .get_setting(database::dao::settings::KEY_OUTBOUND_PROXY)
+        .map_err(String::from)?;
+
+    // The currently selected Copilot provider (the is_current row for app_type='copilot' in the DB).
+    let provider_id = db
+        .get_current_provider("copilot")
+        .map_err(String::from)?;
+    let provider = provider_id
+        .as_deref()
+        .and_then(|id| db.get_provider_by_id(id, "copilot").ok().flatten())
+        .ok_or_else(|| {
+            "no Copilot provider configured: add and switch to a Copilot provider on the Providers page (with baseUrl/apiKey/model)".to_string()
+        })?;
+    let cfg_obj = provider
+        .settings_config
+        .as_object()
+        .ok_or_else(|| "Copilot provider settings_config must be a JSON object".to_string())?;
+    let base_url = cfg_obj
+        .get("env")
+        .and_then(|e| e.get("COPILOT_PROVIDER_BASE_URL"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "settings_config.env.COPILOT_PROVIDER_BASE_URL is missing".to_string())?;
+    let api_key = cfg_obj
+        .get("env")
+        .and_then(|e| e.get("COPILOT_PROVIDER_API_KEY"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let provider_type = cfg_obj
+        .get("env")
+        .and_then(|e| e.get("COPILOT_PROVIDER_TYPE"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai");
+    let model = cfg_obj
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Find the copilot CLI binary (prefer PATH; fall back to common install locations).
+    let copilot_bin = find_copilot_cli_binary()
+        .ok_or_else(|| "copilot CLI not found; make sure it is installed and on PATH".to_string())?;
+    let copilot_bin = copilot_bin.to_string_lossy().to_string();
+
+    let mut env: Vec<(String, String)> = vec![
+        ("COPILOT_PROVIDER_BASE_URL".to_string(), base_url.to_string()),
+        ("COPILOT_PROVIDER_TYPE".to_string(), provider_type.to_string()),
+    ];
+    if !api_key.is_empty() {
+        env.push(("COPILOT_PROVIDER_API_KEY".to_string(), api_key.to_string()));
+    }
+    if !model.is_empty() {
+        env.push(("COPILOT_MODEL".to_string(), model.to_string()));
+    }
+    if let Some(proxy) = &outbound_proxy {
+        env.push(("HTTP_PROXY".to_string(), proxy.clone()));
+        env.push(("HTTPS_PROXY".to_string(), proxy.clone()));
+        env.push(("ALL_PROXY".to_string(), proxy.clone()));
+    }
+    env.push((
+        "NO_PROXY".to_string(),
+        "localhost,127.0.0.1,::1".to_string(),
+    ));
+
+    #[cfg(target_os = "windows")]
+    let command_line = {
+        let mut lines = Vec::new();
+        if let Some(dir) = cwd.as_deref().filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("cd /d \"{}\" || exit /b 1", escape_batch(dir)));
+        }
+        for (k, v) in &env {
+            lines.push(format!("set \"{k}={}\"", escape_batch(v)));
+        }
+        lines.push(format!("\"{}\"", escape_batch(&copilot_bin)));
+        lines.join("\r\n")
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let command_line = {
+        let mut lines = Vec::new();
+        if let Some(dir) = cwd.as_deref().filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("cd {}", shell_quote(dir)));
+        }
+        for (k, v) in &env {
+            lines.push(format!("export {k}={}", shell_quote(v)));
+        }
+        lines.push(shell_quote(&copilot_bin));
+        lines.join("\n")
+    };
+
+    launch_agent_terminal(&command_line, "copilot_cli")?;
+
+    Ok(serde_json::json!({
+        "copilotBinary": copilot_bin,
+        "providerId": provider.id,
+        "env": env,
+    }))
+}
+
+/// Find the copilot CLI binary (PATH + common npm/standalone locations).
+fn find_copilot_cli_binary() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(found) = find_on_windows_path("copilot.exe") {
+            return Some(found);
+        }
+        if let Some(found) = find_on_windows_path("copilot.cmd") {
+            return Some(found);
+        }
+        // npm global install: %APPDATA%\npm\copilot.cmd
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let p = std::path::PathBuf::from(appdata).join("npm").join("copilot.cmd");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(found) = find_on_unix_path("copilot") {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn escape_batch(value: &str) -> String {
+    value
+        .replace('^', "^^")
+        .replace('%', "%%")
+        .replace('&', "^&")
+        .replace('|', "^|")
+        .replace('<', "^<")
+        .replace('>', "^>")
+        .replace('(', "^(")
+        .replace(')', "^)")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// Run a command script in the user's default/preferred terminal (new window).
+/// `script_stem` is used for the temp script/batch filename (e.g. "codex_cli" / "copilot_cli").
+fn launch_agent_terminal(command_line: &str, script_stem: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let bat = std::env::temp_dir().join(format!(
+            "aag_{script_stem}_{}.bat",
+            std::process::id()
+        ));
+        let content = format!(
+            "@echo off\r\n{command_line}\r\necho.\r\necho [AAG] Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n"
+        );
+        std::fs::write(&bat, content).map_err(|e| format!("failed to write batch file: {e}"))?;
+        let bat_path = bat.to_string_lossy().to_string();
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", &bat_path])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(|e| format!("failed to launch terminal: {e}"))?;
+        if !output.status.success() {
+            return Err("failed to launch terminal".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = std::env::temp_dir().join(format!(
+            "aag_{script_stem}_{}.sh",
+            std::process::id()
+        ));
+        let content = format!(
+            "#!/bin/sh\n{command_line}\necho \"[AAG] Press Enter to close.\"\nread -r _\nrm -f \"{script_path}\"\n",
+            script_path = script.display()
+        );
+        std::fs::write(&script, content).map_err(|e| format!("failed to write script: {e}"))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("failed to set permissions: {e}"))?;
+        let applescript = format!(
+            "tell application \"Terminal\"\n  activate\n  do script \"sh {}\"\nend tell",
+            script.display()
+        );
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&applescript)
+            .output()
+            .map_err(|e| format!("failed to launch terminal: {e}"))?;
+        if !output.status.success() {
+            return Err("failed to launch terminal".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let script = std::env::temp_dir().join(format!(
+            "aag_{script_stem}_{}.sh",
+            std::process::id()
+        ));
+        let content = format!(
+            "#!/bin/sh\n{command_line}\necho \"[AAG] Press Enter to close.\"\nread -r _\nrm -f \"{script_path}\"\n",
+            script_path = script.display()
+        );
+        std::fs::write(&script, content).map_err(|e| format!("failed to write script: {e}"))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("failed to set permissions: {e}"))?;
+        for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal"] {
+            if std::process::Command::new(terminal)
+                .arg("-e")
+                .arg(&script)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        return Err("no usable terminal emulator found".to_string());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = command_line;
+        let _ = script_stem;
+        Err("unsupported operating system".to_string())
+    }
 }
 
 // ----- Proxy commands (Phase 2) -----
@@ -277,6 +763,48 @@ async fn proxy_stop(state: tauri::State<'_, Mutex<Option<RunningProxy>>>) -> Res
 }
 
 use database::dao::proxy_config::ProxyConfig;
+
+// ----- Proxy providers + Routes CRUD (failover config) -----
+// The Router is rebuilt from the DB every time `proxy_start` runs, so saving
+// a provider or route then restarting the proxy applies the new failover chain.
+
+#[tauri::command]
+fn proxy_provider_list(
+    db: tauri::State<'_, Database>,
+) -> Result<Vec<database::dao::proxy_providers::ProxyProvider>, String> {
+    db.get_all_proxy_providers().map_err(String::from)
+}
+
+#[tauri::command]
+fn proxy_provider_save(
+    db: tauri::State<'_, Database>,
+    provider: database::dao::proxy_providers::ProxyProvider,
+) -> Result<(), String> {
+    db.save_proxy_provider(&provider).map_err(String::from)
+}
+
+#[tauri::command]
+fn proxy_provider_delete(db: tauri::State<'_, Database>, id: String) -> Result<(), String> {
+    db.delete_proxy_provider(&id).map_err(String::from)
+}
+
+#[tauri::command]
+fn route_list(db: tauri::State<'_, Database>) -> Result<Vec<database::dao::routes::Route>, String> {
+    db.get_all_routes().map_err(String::from)
+}
+
+#[tauri::command]
+fn route_save(
+    db: tauri::State<'_, Database>,
+    route: database::dao::routes::Route,
+) -> Result<(), String> {
+    db.save_route(&route).map_err(String::from)
+}
+
+#[tauri::command]
+fn route_delete(db: tauri::State<'_, Database>, alias: String) -> Result<(), String> {
+    db.delete_route(&alias).map_err(String::from)
+}
 
 // ----- Backup commands (Phase 4) -----
 
@@ -580,7 +1108,11 @@ pub fn run() {
             app_info, app_check_update,
             deeplink_parse,
             provider_list, provider_current, provider_get, provider_save, provider_delete, provider_switch,
+            settings_get, settings_set,
+            codex_cli_status, codex_open_cli_terminal, copilot_open_cli_terminal,
             proxy_status, proxy_start, proxy_stop,
+            proxy_provider_list, proxy_provider_save, proxy_provider_delete,
+            route_list, route_save, route_delete,
             backup_create, backup_list, backup_delete,
             mcp_list, mcp_save, mcp_delete, mcp_toggle_app,
             skill_list, skill_save, skill_delete,

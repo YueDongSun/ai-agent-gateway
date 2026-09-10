@@ -7,31 +7,38 @@ import {
 
 export function SessionsPage() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [allSessions, setAllSessions] = useState<SessionMeta[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [activeApp, setActiveApp] = useState<string | null>(null);
 
-  const refresh = async (appId: string | null) => {
+  const refresh = async () => {
     setError(null);
     try {
-      const list = await listSessions(appId ?? undefined);
-      setSessions(list);
+      // Always fetch the full list so the per-app tabs keep their counts even
+      // while the visible rows are filtered to one app. Filtering client-side
+      // also keeps the search box working across apps.
+      const list = await listSessions(undefined);
+      setAllSessions(list);
+      setSessions(
+        activeApp ? list.filter((s) => s.appId === activeApp) : list,
+      );
     } catch (e) {
       setError(String(e));
     }
   };
 
   useEffect(() => {
-    void refresh(activeApp);
+    void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeApp]);
 
   const appCounts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const s of sessions) m.set(s.appId, (m.get(s.appId) ?? 0) + 1);
+    for (const s of allSessions) m.set(s.appId, (m.get(s.appId) ?? 0) + 1);
     return m;
-  }, [sessions]);
+  }, [allSessions]);
 
   const filtered = useMemo(() => {
     if (!search) return sessions;
@@ -52,7 +59,7 @@ export function SessionsPage() {
     setError(null);
     try {
       await deleteSession(id);
-      await refresh(activeApp);
+      await refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -89,7 +96,7 @@ export function SessionsPage() {
           className={activeApp === null ? 'tab active' : 'tab'}
           onClick={() => setActiveApp(null)}
         >
-          All ({sessions.length})
+          All ({allSessions.length})
         </button>
         {Array.from(appCounts.entries()).map(([app, count]) => (
           <button

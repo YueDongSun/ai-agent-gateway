@@ -58,6 +58,8 @@ export const AgentId = z.enum([
   'zcode',
   'minimax',
   'kimi',
+  'pi',
+  'antigravity',
 ]);
 export type AgentId = z.infer<typeof AgentId>;
 

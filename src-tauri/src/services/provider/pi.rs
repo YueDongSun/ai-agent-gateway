@@ -23,7 +23,7 @@
 //! ```json
 //! {
 //!   "providerId": "my-provider",
-//!   "baseUrl": "http://127.0.0.1:8989/v1",
+//!   "baseUrl": "http://127.0.0.1:8787/v1",
 //!   "apiKey": "...",
 //!   "api": "openai-completions",
 //!   "model": "claude-sonnet-4",
@@ -57,7 +57,6 @@ fn provider_api(settings: &Value) -> String {
 
 /// Write `provider.settings_config` to pi's `models.json` + `settings.json`,
 /// backing up existing files first.
-#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
     let obj = provider.settings_config.as_object().ok_or_else(|| {
         AppError::Config("pi provider settings_config must be a JSON object".into())
@@ -160,8 +159,6 @@ mod tests {
 
     #[test]
     fn write_live_writes_models_and_settings() {
-        let _env_guard = crate::config::test_env_lock().blocking_lock();
-
         // Use AAG_HOME_DIR override so we don't touch the real ~/.pi.
         let tmp = std::env::temp_dir().join(format!("aag-pi-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
@@ -172,7 +169,7 @@ mod tests {
             "My Pi Provider".into(),
             json!({
                 "providerId": "my-pi-prov",
-                "baseUrl": "http://127.0.0.1:8989/v1",
+                "baseUrl": "http://127.0.0.1:8787/v1",
                 "apiKey": "sk-test",
                 "api": "openai-completions",
                 "model": "claude-sonnet-4",
@@ -188,7 +185,7 @@ mod tests {
         )
         .unwrap();
         let prov = &models["providers"]["my-pi-prov"];
-        assert_eq!(prov["baseUrl"], "http://127.0.0.1:8989/v1");
+        assert_eq!(prov["baseUrl"], "http://127.0.0.1:8787/v1");
         assert_eq!(prov["apiKey"], "sk-test");
         assert_eq!(prov["api"], "openai-completions");
         assert_eq!(prov["models"][0]["id"], "claude-sonnet-4");

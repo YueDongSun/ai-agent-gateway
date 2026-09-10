@@ -409,6 +409,86 @@ code {
   letter-spacing: 0.5px;
 }
 
+/* ----- Failover config (Proxy page) ----- */
+
+.proxy-failover {
+  margin-top: 16px;
+  background: #141922;
+  border: 1px solid #232733;
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.failover-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.failover-col {
+  background: #171c28;
+  border: 1px solid #232733;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.failover-col .list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.failover-col h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.failover-provider-list,
+.failover-route-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.failover-provider,
+.failover-route {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  background: #1a1f2c;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.failover-provider-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.route-hop-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.route-hop-row select,
+.route-hop-row input {
+  flex: 1;
+}
+
+.route-hops {
+  margin-top: 8px;
+}
+
 /* ----- Backup page ----- */
 
 .backup-page {
@@ -1056,4 +1136,204 @@ code {
 .about-update-msg {
   font-size: 12px;
   color: #8a93a6;
+}
+/* ===== Codex CLI isolated-agent page ===== */
+.codexcli-page {
+  max-width: 760px;
+}
+
+.codexcli-page h2 {
+  margin: 0 0 8px;
+}
+
+.codexcli-desc {
+  color: #8a93a6;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.codexcli-desc code {
+  background: #232733;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.codexcli-status {
+  background: #14171d;
+  border: 1px solid #232733;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.codexcli-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 13px;
+  gap: 12px;
+}
+
+.codexcli-status-key {
+  color: #8a93a6;
+  white-space: nowrap;
+}
+
+.codexcli-status-val {
+  text-align: right;
+  word-break: break-all;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.tag {
+  display: inline-block;
+  border-radius: 10px;
+  padding: 1px 9px;
+  font-size: 11px;
+}
+
+.tag-green {
+  background: #143d27;
+  color: #4ac26b;
+}
+
+.tag-gray {
+  background: #232733;
+  color: #8a93a6;
+}
+
+.codexcli-field {
+  margin-bottom: 14px;
+}
+
+.codexcli-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.codexcli-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f1115;
+  border: 1px solid #232733;
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #e6e6e6;
+  font-size: 13px;
+  font-family: inherit;
+  margin-top: 4px;
+}
+
+.codexcli-input:focus {
+  outline: none;
+  border-color: #4a90e2;
+}
+
+.codexcli-hint {
+  color: #8a93a6;
+  font-size: 12px;
+  margin: 5px 0 0;
+  line-height: 1.5;
+}
+
+.codexcli-hint code {
+  background: #232733;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11px;
+}
+
+.codexcli-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.codexcli-copilot {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #232733;
+}
+
+.codexcli-copilot h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
+.btn-primary {
+  background: #4a90e2;
+  border-color: #4a90e2;
+  color: #fff;
+  font-weight: 600;
+}
+
+.codexcli-notice {
+  background: #143d27;
+  border: 1px solid #4ac26b;
+  color: #4ac26b;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.codexcli-error {
+  background: #3d1414;
+  border: 1px solid #ff8182;
+  color: #ff8182;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+/* Codex CLI first-run onboarding */
+.codexcli-onboarding {
+  background: #0f1a2b;
+  border: 1px solid #4a90e2;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.codexcli-onboarding h4 {
+  margin: 0 0 6px;
+  color: #4a90e2;
+  font-size: 13px;
+}
+
+.codexcli-onboarding p {
+  margin: 0 0 10px;
+  color: #8a93a6;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.codexcli-onboarding code {
+  background: #232733;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
 }

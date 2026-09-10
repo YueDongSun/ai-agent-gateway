@@ -1,8 +1,10 @@
 # DESIGN.md — Migrating `ai-agent-gateway` to cc-switch feature parity
 
-> Status: design phase. The current `src/` (Node/TypeScript proxy + CLI/TUI) remains
-> the working proxy. The Tauri desktop shell (`src-tauri/`, `ui/`) is being added
-> alongside and will eventually subsume the CLI/TUI.
+> Status: **feature-complete**. Phases 0-10 are done (see `PROGRESS.md` for the
+> verification log). The Tauri desktop shell (`src-tauri/`, `ui/`) is the
+> primary deliverable; the Node `src/` proxy remains runnable standalone for
+> headless use. This document remains the architectural reference — read it
+> alongside `PROGRESS.md` before modifying `src-tauri/` or `ui/`.
 
 ## Reference implementation
 
@@ -278,10 +280,18 @@ Each adapter exposes `detect()`, `read()`, `write(provider)`, `restore_backup()`
 
 ## Phasing
 
-**Phase 0 — Tauri skeleton (this iteration)** ✅ in progress
+**Phase 0 — Tauri skeleton** ✅ done
 - `src-tauri/Cargo.toml` + `tauri.conf.json` + minimal `main.rs`/`lib.rs`.
 - `ui/` with Vite + React + Tailwind + shadcn/ui baseline, an empty `App.tsx` that opens a window saying "AAG".
 - No functional parity yet. Tauri `dev` boots, window appears.
+
+**Post-Phase-10 addition — Codex CLI isolated CODEX_HOME** ✅ done (2026-08-03)
+- `app_meta` key/value table (schema v9) + `settings` DAO
+  (`KEY_CODEX_CLI_HOME`, `KEY_OUTBOUND_PROXY`).
+- `provider_switch` writes Codex live config to an isolated CODEX_HOME when set,
+  leaving the Codex desktop app's `~/.codex` untouched.
+- `codex_open_cli_terminal` launches a terminal with `CODEX_HOME` + outbound
+  proxy env injected. UI: `CodexCli` page.
 
 **Phase 1 — Provider CRUD + active switching**
 - Implement `providers` + `active_providers` tables + DAOs.

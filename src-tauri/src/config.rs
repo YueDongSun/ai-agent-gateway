@@ -79,8 +79,34 @@ pub fn get_claude_settings_path() -> PathBuf {
 }
 
 /// Return the Codex config directory (`~/.codex`).
+///
+/// When `codex_cli_home` is `Some`, the CLI config is isolated into that
+/// directory instead (independent CODEX_HOME), leaving the Codex desktop
+/// app's shared `~/.codex` untouched.
+pub fn get_codex_config_dir_with_override(codex_cli_home: Option<&str>) -> PathBuf {
+    match codex_cli_home.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => resolve_user_path(raw),
+        None => get_home_dir().join(".codex"),
+    }
+}
+
+/// Return the Codex config directory (`~/.codex`).
 pub fn get_codex_config_dir() -> PathBuf {
-    get_home_dir().join(".codex")
+    get_codex_config_dir_with_override(None)
+}
+
+/// Expand `~` / `~/` / `~\` prefixes in a user-supplied path.
+fn resolve_user_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return get_home_dir();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return get_home_dir().join(rest);
+    }
+    if let Some(rest) = raw.strip_prefix("~\\") {
+        return get_home_dir().join(rest);
+    }
+    PathBuf::from(raw)
 }
 
 /// Return the Codex `config.toml` path.
@@ -91,6 +117,70 @@ pub fn get_codex_config_path() -> PathBuf {
 /// Return the Codex `auth.json` path.
 pub fn get_codex_auth_path() -> PathBuf {
     get_codex_config_dir().join("auth.json")
+}
+
+/// Return the Copilot CLI config directory (`~/.copilot`).
+///
+/// GitHub Copilot CLI stores its user-editable settings at
+/// `~/.copilot/settings.json` (JSONC) and its managed state at
+/// `~/.copilot/config.json`. Custom providers are injected at launch via
+/// `COPILOT_PROVIDER_*` env vars (no persistent provider file exists), so
+/// AAG persists the `model` choice + the env block in `settings.json`.
+pub fn get_copilot_config_dir() -> PathBuf {
+    get_home_dir().join(".copilot")
+}
+
+/// Return the Copilot CLI `settings.json` path.
+pub fn get_copilot_settings_path() -> PathBuf {
+    get_copilot_config_dir().join("settings.json")
+}
+
+/// Return the pi (Microsoft coding agent) config directory
+/// (`~/.pi/agent`). Custom providers live in `models.json` and the default
+/// model in `settings.json`.
+pub fn get_pi_config_dir() -> PathBuf {
+    get_home_dir().join(".pi").join("agent")
+}
+
+/// Return the pi `models.json` path (custom provider map).
+pub fn get_pi_models_path() -> PathBuf {
+    get_pi_config_dir().join("models.json")
+}
+
+/// Return the pi `settings.json` path (default model).
+pub fn get_pi_settings_path() -> PathBuf {
+    get_pi_config_dir().join("settings.json")
+}
+
+/// Return the Antigravity desktop app config directory.
+///
+/// Antigravity is a VS Code-derived Electron app. On Windows it stores its
+/// profile under `%APPDATA%\Antigravity` (with `User/settings.json` once the
+/// user opens the settings UI); macOS `~/Library/Application Support/Antigravity`;
+/// Linux `~/.config/Antigravity`.
+pub fn get_antigravity_config_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("Antigravity");
+        }
+        get_home_dir().join("AppData").join("Roaming").join("Antigravity")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        get_home_dir().join("Library").join("Application Support").join("Antigravity")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        get_home_dir().join(".config").join("Antigravity")
+    }
+}
+
+/// Return the Antigravity `User/settings.json` path (created by the app once
+/// the settings UI is opened).
+#[allow(dead_code)] // Planned for the Antigravity adapter's future write path
+pub fn get_antigravity_settings_path() -> PathBuf {
+    get_antigravity_config_dir().join("User").join("settings.json")
 }
 
 // ---- File I/O helpers (mirror cc-switch config.rs:274+) ----

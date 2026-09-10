@@ -200,9 +200,27 @@ pub async fn stream(
         let first = match chunk_stream.next().await {
             Some(c) => c,
             None => {
-                provider.breaker().record_success();
-                log::info!("router: STREAM OK (empty) {} <- {}/{}", req.model, provider.id(), hop.model);
-                return Ok(futures_util::stream::empty().boxed());
+                // An upstream that opened the stream but yielded zero chunks
+                // (e.g. the OpenAI/Anthropic provider swallowing an HTTP 4xx/5xx
+                // as an empty SSE body) should NOT be treated as a successful
+                // empty completion — that would surface a 200 with no data to
+                // the client. Record a failure and fail over to the next hop.
+                // Mock providers never hit this path (they always yield a role
+                // chunk + a finish chunk), so the seeded demo routes are
+                // unaffected.
+                provider.breaker().record_failure();
+                log::warn!(
+                    "router: STREAM EMPTY {} <- {}/{} (treating as failure)",
+                    req.model,
+                    provider.id(),
+                    hop.model
+                );
+                last_err = Some(canonical::make_error(
+                    format!("provider {} returned an empty stream", provider.id()),
+                    Some(502),
+                    Some(true),
+                ));
+                continue;
             }
         };
         provider.breaker().record_success();
@@ -215,4 +233,225 @@ pub async fn stream(
     }
     Err(last_err.unwrap_or_else(|| canonical::make_error("all stream hops exhausted", Some(503), Some(false))))
 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::dao::proxy_providers::CircuitBreakerConfig;
+    use crate::proxy::circuit_breaker::CircuitBreaker;
+    use crate::proxy::providers::Provider;
+    use async_trait::async_trait;
+    use futures_core::Stream;
+    use futures_util::StreamExt;
+    use std::pin::Pin;
+
+    fn empty_cb() -> CircuitBreakerConfig {
+        CircuitBreakerConfig {
+            failure_threshold: 3,
+            cooldown_ms: 15_000,
+            half_open_retries: 1,
+            success_threshold: 2,
+        }
+    }
+
+    /// A provider that yields a stream but with zero chunks on `stream()` —
+    /// simulating an upstream that swallowed an HTTP error into an empty SSE
+    /// body (see the OpenAI/Anthropic streaming providers).
+    struct EmptyStreamProvider {
+        id: &'static str,
+        breaker: CircuitBreaker,
+    }
+
+    impl EmptyStreamProvider {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for EmptyStreamProvider {
+        fn id(&self) -> &str { self.id }
+        fn enabled(&self) -> bool { true }
+        fn models(&self) -> &[String] { &[] }
+        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+
+        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+            Err(canonical::make_error("unused", Some(500), Some(true)))
+        }
+
+        fn stream(
+            &self,
+            _req: &ChatCompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            Ok(futures_util::stream::empty().boxed())
+        }
+    }
+
+    /// A provider whose `stream()` fails before yielding anything (like mock-fail).
+    struct ErrStreamProvider {
+        id: &'static str,
+        breaker: CircuitBreaker,
+    }
+
+    impl ErrStreamProvider {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ErrStreamProvider {
+        fn id(&self) -> &str { self.id }
+        fn enabled(&self) -> bool { true }
+        fn models(&self) -> &[String] { &[] }
+        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+
+        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+            Err(canonical::make_error("unused", Some(500), Some(true)))
+        }
+
+        fn stream(
+            &self,
+            _req: &ChatCompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            Err(canonical::make_error("forced failure", Some(503), Some(true)))
+        }
+    }
+
+    /// A real streaming provider that yields one role chunk then a finish chunk.
+    struct WorkingProvider {
+        id: &'static str,
+        breaker: CircuitBreaker,
+    }
+
+    impl WorkingProvider {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for WorkingProvider {
+        fn id(&self) -> &str { self.id }
+        fn enabled(&self) -> bool { true }
+        fn models(&self) -> &[String] { &[] }
+        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+
+        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+            Err(canonical::make_error("unused", Some(500), Some(true)))
+        }
+
+        fn stream(
+            &self,
+            req: &ChatCompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            let model = req.model.clone();
+            let stream = futures_util::stream::iter(vec![
+                crate::proxy::converter::make_stream_chunk(
+                    "id",
+                    &model,
+                    crate::proxy::canonical::StreamDelta { role: Some("assistant".into()), content: None },
+                    None,
+                ),
+                crate::proxy::converter::make_stream_chunk(
+                    "id",
+                    &model,
+                    crate::proxy::canonical::StreamDelta { role: None, content: None },
+                    Some("stop".into()),
+                ),
+            ]);
+            Ok(Box::pin(stream))
+        }
+    }
+
+    fn req_for(model: &str) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: model.into(),
+            messages: vec![],
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_stream_fails_over_to_next_hop() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("empty".into(), Arc::new(EmptyStreamProvider::new("empty")));
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop { provider: "empty".into(), model: "m".into() },
+                RouteHop { provider: "working".into(), model: "m".into() },
+            ],
+        );
+        let router = Router::new(providers, routes);
+
+        let mut s = router.stream(&req_for("m")).await.expect("stream should succeed");
+        use futures_util::StreamExt;
+        let chunks: Vec<OAIStreamChunk> = s.by_ref().collect().await;
+        assert!(!chunks.is_empty(), "should fail over to the working provider");
+        assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("stop")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stream_with_no_fallback_returns_error() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("empty".into(), Arc::new(EmptyStreamProvider::new("empty")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![RouteHop { provider: "empty".into(), model: "m".into() }],
+        );
+        let router = Router::new(providers, routes);
+
+        let err = match router.stream(&req_for("m")).await {
+            Ok(_) => panic!("empty stream with no fallback should error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, Some(502));
+        assert!(err.retriable);
+    }
+
+    #[tokio::test]
+    async fn error_stream_fails_over_to_next_hop() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("err".into(), Arc::new(ErrStreamProvider::new("err")));
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop { provider: "err".into(), model: "m".into() },
+                RouteHop { provider: "working".into(), model: "m".into() },
+            ],
+        );
+        let router = Router::new(providers, routes);
+
+        let mut s = router.stream(&req_for("m")).await.expect("stream should succeed");
+        use futures_util::StreamExt;
+        let chunks: Vec<OAIStreamChunk> = s.by_ref().collect().await;
+        assert!(!chunks.is_empty(), "should fail over to the working provider");
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("stop")
+        );
+    }
 }

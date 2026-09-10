@@ -81,6 +81,32 @@ export async function stopProxy(): Promise<void> {
   await invoke('proxy_stop');
 }
 
+// ----- Proxy providers + Routes CRUD (failover config) -----
+
+export async function listProxyProviders(): Promise<ProxyProvider[]> {
+  return invoke<ProxyProvider[]>('proxy_provider_list');
+}
+
+export async function saveProxyProvider(provider: ProxyProvider): Promise<void> {
+  await invoke('proxy_provider_save', { provider });
+}
+
+export async function deleteProxyProvider(id: string): Promise<void> {
+  await invoke('proxy_provider_delete', { id });
+}
+
+export async function listRoutes(): Promise<Route[]> {
+  return invoke<Route[]>('route_list');
+}
+
+export async function saveRoute(route: Route): Promise<void> {
+  await invoke('route_save', { route });
+}
+
+export async function deleteRoute(alias: string): Promise<void> {
+  await invoke('route_delete', { alias });
+}
+
 // ----- Direct HTTP fetches (call the proxy as a client would) -----
 
 export async function fetchProxyHealth(

@@ -61,7 +61,12 @@ export function ProvidersPage() {
       setCurrent(id);
       // Re-read list in case ordering changed.
       await refresh(appType);
-      setError(`Switched ${id}. Wrote ${result.written.length} file(s).`);
+      const written = result.written.join(', ');
+      setError(
+        appType === 'codex'
+          ? `Switched ${id}. Wrote ${result.written.length} file(s) to: ${written}`
+          : `Switched ${id}. Wrote ${result.written.length} file(s).`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -195,6 +200,20 @@ export function ProvidersPage() {
                 Claude Code: <code>{`{ "env": { "ANTHROPIC_BASE_URL": "...", "ANTHROPIC_AUTH_TOKEN": "..." } }`}</code>
                 <br />
                 Codex: <code>{`{ "auth": {...}, "config": "model = \"...\"\n..." }`}</code>
+                <br />
+                Copilot CLI: <code>{`{ "model": "claude-sonnet-4", "env": { "COPILOT_PROVIDER_BASE_URL": "http://127.0.0.1:8787/v1", "COPILOT_PROVIDER_API_KEY": "...", "COPILOT_PROVIDER_TYPE": "openai" } }`}</code>
+                <br />
+                Pi: <code>{`{ "providerId": "my-pi", "baseUrl": "http://127.0.0.1:8787/v1", "apiKey": "...", "model": "claude-sonnet-4", "models": ["claude-sonnet-4", "gpt-4o"] }`}</code>
+                {appType === 'antigravity' && (
+                  <>
+                    <br />
+                    <span className="muted" style={{ color: '#e5a04a' }}>
+                      ⚠ Antigravity desktop switching is not supported yet (no public config
+                      format). Switching to an Antigravity provider returns an error; configure
+                      the API key directly in Antigravity's model dropdown.
+                    </span>
+                  </>
+                )}
               </small>
             </label>
             <div className="modal-actions">

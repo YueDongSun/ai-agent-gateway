@@ -4,6 +4,17 @@ Unified **Gateway Proxy** + **Config Switcher** for AI Coding Agents
 
 A comprehensive solution inspired by `cc-switch` capabilities, with broader agent support and enhanced proxy infrastructure. Supports Copilot, Kilo, Cursor, Zcode, MiniMax, Kimi agents while providing a local OpenAI & Anthropic compatible proxy with **circuit-breaker auto-failover** mechanism.
 
+> **Desktop app (primary):** AAG is now a **Tauri 2 desktop app** (`src-tauri/` +
+> `ui/`), feature-complete through Phase 10 — SQLite SSOT, provider switching
+> for Claude Code / Codex (including **isolated Codex CLI CODEX_HOME** that
+> keeps the CLI separate from the Codex desktop app's `~/.codex`), a local
+> proxy with streaming SSE + circuit breaker + failover, backup/restore, MCP,
+> Skills, Sessions, Usage dashboard, S3/WebDAV sync, deep links, tray and
+> auto-update. See `DESIGN.md` / `PROGRESS.md` for details.
+>
+> **Legacy CLI:** the original Node proxy (`src/`) still works standalone via
+> `npm run gateway` for headless / scripted use.
+>
 > **Note on `cc-switch/`:** This repository no longer carries the upstream `cc-switch` source as a git submodule. The `cc-switch/` directory is a placeholder you can populate yourself (e.g. `git clone <cc-switch-url> cc-switch/`) if you want to compare or vendor its behavior. `src/agents/switcher.ts` already implements an equivalent config-rewriting flow for every supported agent.
 
 ## Features
@@ -50,24 +61,64 @@ A comprehensive solution inspired by `cc-switch` capabilities, with broader agen
 
 ## Quick Start
 
-### Installation
+### Desktop app (primary)
+
 ```bash
-git clone <repository-url>
-cd cc_copilot_kilo
-npm install
+cd ui && npm install        # install React deps
+cd src-tauri && cargo check # Rust typecheck (build ui/dist first if needed)
+npm run tauri:dev           # from repo root: dev window
+npm run tauri:build         # from repo root: production installer (.msi/.dmg/.deb/...)
 ```
 
-### Basic Usage
-```bash
-# Interactive TUI Menu (recommended)
-npm run dev
+Data lives in `~/.aag/aag.db` (SQLite). Override locations with
+`AAG_CONFIG_DIR` (app data + DB) and `AAG_HOME_DIR` (agent config paths) for
+portable installs / testing.
 
-# Direct Commands
-npm run gateway      # Start proxy server on default port 8787
+#### Installer location (Windows)
+
+`npm run tauri:build` produces the release bundle under
+`src-tauri/target/release/bundle/`:
+
+- `nsis/AI Agent Gateway_<version>_x64-setup.exe` — user-friendly setup wizard (recommended)
+- `msi/AI Agent Gateway_<version>_x64_en-US.msi` — MSI for IT-managed deployment
+
+Install either and launch "AI Agent Gateway" from the Start menu. The app keeps
+its data in `~/.aag/aag.db` (SQLite) and writes live agent config under the
+user home — see the Codex CLI page for isolating the Codex CLI from the Codex
+desktop app's shared `~/.codex`.
+
+#### Browser-only demo mode (no Tauri)
+
+The React UI can run in a plain browser without the Rust backend, which is
+useful for UI development and demos:
+
+```bash
+cd ui && npm run dev     # then open http://localhost:1420
+# or: npm run demo       # same server, auto-opens the browser
+```
+
+When the Tauri bridge (`window.__TAURI_INTERNALS__`) is absent,
+`ui/src/lib/mock/backend.ts` installs an in-browser mock IPC backend that
+implements every command the UI invokes (with realistic seed data for all 11
+tabs) and intercepts the proxy page's direct `fetch` calls. Inside the Tauri
+webview the mock is a no-op and the real Rust backend wins, so production is
+unaffected.
+
+Debug hooks in the browser console:
+
+- `window.__aagDemoSetError(cmd | null)` — force a command to reject so UI error paths can be exercised
+- `window.__aagDemoSeedDeeplink('aag://switch/<id>?app=<type>')` — fire a deep-link event
+- URL param `?deeplink=aag://...` — seed one deep link on page load
+
+### Legacy CLI (Node)
+
+```bash
+npm install
+npm run dev              # Interactive TUI Menu (recommended)
+npm run gateway          # Start proxy server on default port 8787
 npm run gateway -p 9000  # Start on custom port
-npm run test         # Run comprehensive e2e test suite
-npm run typecheck     # TypeScript type checking
-npm run build        # Production build
+npm run test             # Run comprehensive e2e test suite
+npm run typecheck        # TypeScript type checking
 ```
 
 ### Configuration
@@ -409,7 +460,7 @@ function processRequest(route: Route, request: Request): Promise<Response> {
 |--------------|-------------|------------|-----------------|----------|
 | **Anthropic Claude** | `https://api.anthropic.com` | `/v1/messages` | claude-3-5-sonnet, claude-3-haiku | Constitutional AI, Long context |
 | **Bedrock Claude** | `https://bedrock-runtime.us-east-1.amazonaws.com` | `/v1/messages` | claude-3-sonnet-20240229 | AWS integration, Enterprise features |
-| **GLM (智谱AI)** | `https://open.bigmodel.cn/api/anthropic` | `/v1/messages` | glm-4, glm-3-turbo | Chinese optimization, Research models |
+| **GLM (Zhipu AI)** | `https://open.bigmodel.cn/api/anthropic` | `/v1/messages` | glm-4, glm-3-turbo | Chinese optimization, Research models |
 
 ### Mock Provider
 | Provider Type | API Endpoint | Wire Format | Features |

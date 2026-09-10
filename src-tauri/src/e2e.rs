@@ -82,7 +82,7 @@ mod tests {
             "current provider should be e2e-claude"
         );
 
-        let live = write_live_snapshot(AppType::ClaudeCode, &provider)
+        let live = write_live_snapshot(AppType::ClaudeCode, &provider, None)
             .expect("write_live_snapshot should succeed for ClaudeCode");
         assert!(!live.written.is_empty(), "should write at least one file");
         let actual_written = &live.written[0];
