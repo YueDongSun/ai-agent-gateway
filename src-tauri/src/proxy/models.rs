@@ -24,21 +24,6 @@ pub const OFFICIAL_MODELS: &[OfficialModel] = &[
     OfficialModel { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
 ];
 
-/// Default Codex model entry (client-facing id + display name).
-pub struct CodexModel {
-    pub id: &'static str,
-    pub display_name: &'static str,
-}
-
-/// Default Codex models that clients request. Each gets a seeded failover
-/// route; the upstream model is configured per-provider in the route editor.
-pub const CODEX_MODELS: &[CodexModel] = &[
-    CodexModel { id: "codex-5-6-sol", display_name: "5.6Sol" },
-    CodexModel { id: "codex-5-6-luna", display_name: "5.6Luna" },
-    CodexModel { id: "codex-5-6-terra", display_name: "5.6Terra" },
-    CodexModel { id: "codex-5-5", display_name: "5.5" },
-];
-
 /// Look up the official display name for a model id.
 pub fn display_name_for(id: &str) -> Option<&'static str> {
     OFFICIAL_MODELS.iter().find(|m| m.id == id).map(|m| m.display_name)
@@ -53,16 +38,6 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for m in OFFICIAL_MODELS {
             assert!(m.id.starts_with("claude-"), "id {} must start with claude-", m.id);
-            assert!(!m.display_name.is_empty());
-            assert!(seen.insert(m.id), "duplicate id {}", m.id);
-        }
-    }
-
-    #[test]
-    fn codex_models_are_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for m in CODEX_MODELS {
-            assert!(m.id.starts_with("codex-"), "id {} must start with codex-", m.id);
             assert!(!m.display_name.is_empty());
             assert!(seen.insert(m.id), "duplicate id {}", m.id);
         }

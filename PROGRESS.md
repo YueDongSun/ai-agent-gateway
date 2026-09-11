@@ -9,8 +9,8 @@
 > 6. If verification fails, set `status: blocked` and describe the blocker - do NOT advance.
 
 ## Status: ready
-## Current phase: 13
-## Next action: Phase 13 (browser testability) complete + committed — in-browser demo mode lets the whole React UI run under `cd ui && npm run dev` without Tauri: `ui/src/lib/mock/backend.ts` installs a mock IPC handler (all 46 commands) + intercepts the two direct proxy fetches, with seed data for every page and debug hooks (`window.__aagDemoSetError(cmd|null)`, `window.__aagDemoSeedDeeplink(url)`, `?deeplink=` URL param). Re-verified live in a real browser across all 11 nav tabs (2026-08-06) — provider add/switch/delete, proxy start + breaker table, backup/MCP/skills/sessions/usage/sync/codex-cli seed rows, deeplink parse + execute, forced-error banner; console clean. README now documents the demo mode (`ui` demo section under Quick Start). Next optional: React component tests (vitest + jsdom) using the same mock.
+## Current phase: 14
+## Next action: Phase 14 (official-model gateway surface) Step 1 complete — `proxy::models` catalog + Anthropic-shaped `/v1/models` + official-model route seeds live and verified. The Claude-Desktop-style path now works end-to-end: request `claude-fable-5` etc. on `/v1/messages` → routed through the failover hop chain → response echoes the official name back. Next: Step 2 (optional) — per-alias model display in the Proxy page route table, or move on to the next feature phase (e.g. CC-proxy subprocess management).
 
 ## Pending one-time actions (do these before Phase 1 Step 1)
 
@@ -529,3 +529,14 @@ User request: continue optimizing per PROGRESS, commit, and test all functionali
   - Console clean (no errors) across all interactions.
 - **Next-action item completed**: README gained a "Browser-only demo mode (no Tauri)" section under Quick Start (how to run, what the mock covers, the 3 debug hooks + `npm run demo` alias that auto-opens the browser).
 - Committed everything as one change: `feat(ui): add browser demo mode with mock IPC backend + README docs`.
+
+### Phase 14 - Official-model gateway surface for Claude-native clients (IN PROGRESS, Step 1 ✅ 2026-08-16)
+Goal (user request): 仿照 cc-switch，给 Claude 桌面端做一个单独的 gateway 转接 — 对外显示 Claude 官方模型名（fable-5 等），内部用故障转发链路。
+- [x] Step 1: official model catalog + Anthropic-shaped model list + route seeds. Done 2026-08-16.
+  - New `src-tauri/src/proxy/models.rs`: `OFFICIAL_MODELS` catalog (fable-5, opus-4-8/4-7/4-6, sonnet-5, sonnet-4-6, haiku-4-5) + `display_name_for()`. 2 unit tests (unique+claude-prefixed ids; display-name lookup).
+  - `/v1/models` now returns entries carrying BOTH shapes: Anthropic Models API fields (`type: "model"`, `display_name`, `created_at`, envelope `has_more`/`first_id`/`last_id`) + the old OpenAI fields (`object`, `created`, `owned_by`) for back-compat. ids sorted. Unknown SDKs ignore extra fields, so existing OpenAI clients (and the UI's `fetchProxyModels`) are unaffected.
+  - `database/seed.rs`: after the demo routes, seeds one failover route per official model id (idempotent per alias — runs even on existing installs so upgrades gain the aliases). Default hops: mock-primary → mock-fallback; users edit hops on the Proxy page to point at real providers.
+  - e2e extended: seed asserts 3 + OFFICIAL_MODELS.len() routes + aliases contain `claude-fable-5`; `/v1/models` entry for fable-5 has `type=model` + `display_name="Claude Fable 5"`; new block — POST `/v1/messages` with `model: "claude-fable-5"` → 200, response `model` echoes `claude-fable-5`, `type=message`, non-empty text content block (the exact Claude-Desktop-style path).
+  - Browser demo mock (`ui/src/lib/mock/backend.ts`) kept in sync: `OFFICIAL_CLAUDE_MODELS` const, provider model lists extended, per-official-model routes seeded, `/v1/models` interceptor returns the dual-shape entries.
+  - Verification all green: `npm run typecheck` clean; `npm test` 18/18; `cargo check` 0 warnings; `cargo test --lib -- --test-threads=1` **74/74** (72 + 2 models.rs; e2e updated + passing); `ui/ npx tsc --noEmit` clean; `ui/ npx vite build` clean.
+- [ ] Step 2 (optional): Proxy page route table shows display names; CLAUDE.md/DESIGN.md architecture note for the official-model surface.

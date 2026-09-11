@@ -8,6 +8,7 @@ use crate::database::{lock_conn, Database};
 use crate::database::dao::proxy_providers::{CircuitBreakerConfig, ProxyProvider};
 use crate::database::dao::routes::{Route, RouteHop};
 use crate::error::AppError;
+use rusqlite::params;
 
 const MOCK_PRIMARY: &str = "mock-primary";
 const MOCK_FALLBACK: &str = "mock-fallback";
@@ -102,6 +103,37 @@ impl Database {
                     RouteHop { provider: MOCK_FALLBACK.into(), model: "mock-fast".into() },
                 ],
             })?;
+        }
+
+        // Official Claude model routes (idempotent per alias): each official
+        // id gets a failover chain, so Anthropic-native clients that request
+        // e.g. "claude-fable-5" are transparently served by the hop chain and
+        // see the official name echoed back. Runs even when the demo routes
+        // above already exist, so existing installs gain the aliases on
+        // upgrade. Users then edit the hops on the Proxy page to point at
+        // their real providers.
+        for m in crate::proxy::models::OFFICIAL_MODELS {
+            let exists = {
+                let conn = lock_conn!(self.conn);
+                conn.query_row(
+                    "SELECT COUNT(*) FROM routes WHERE alias = ?1",
+                    params![m.id],
+                    |row| row.get::<_, i64>(0),
+                )? > 0
+            };
+            if !exists {
+                self.save_route(&Route {
+                    alias: m.id.into(),
+                    description: format!(
+                        "{} via failover chain (edit hops on the Proxy page)",
+                        m.display_name
+                    ),
+                    hops: vec![
+                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
+                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
+                    ],
+                })?;
+            }
         }
 
         Ok(())

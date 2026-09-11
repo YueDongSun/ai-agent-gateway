@@ -7,6 +7,7 @@
 pub mod canonical;
 pub mod circuit_breaker;
 pub mod converter;
+pub mod models;
 pub mod providers;
 pub mod router;
 pub mod server;

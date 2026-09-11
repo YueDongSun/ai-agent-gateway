@@ -60,7 +60,17 @@ mod tests {
         let proxy_providers = db.get_all_proxy_providers().expect("get_all_proxy_providers");
         assert_eq!(proxy_providers.len(), 2, "seed should create 2 mock providers");
         let routes = db.get_all_routes().expect("get_all_routes");
-        assert_eq!(routes.len(), 3, "seed should create 3 routes");
+        let aliases: Vec<&str> = routes.iter().map(|r| r.alias.as_str()).collect();
+        // 3 demo routes + one per official Claude model (see
+        // proxy::models::OFFICIAL_MODELS — seeded so Anthropic-native clients
+        // can request official ids and flow through the failover chain).
+        assert_eq!(
+            routes.len(),
+            3 + crate::proxy::models::OFFICIAL_MODELS.len(),
+            "seed should create demo + official-model routes, got: {aliases:?}"
+        );
+        assert!(aliases.contains(&"claude-sonnet-4"), "demo route missing: {aliases:?}");
+        assert!(aliases.contains(&"claude-fable-5"), "official model route missing: {aliases:?}");
 
         // ── 3. Provider flow: save → current → live write ──
         let provider = Provider::new(
@@ -203,6 +213,62 @@ mod tests {
             models_text.contains("claude-sonnet-4"),
             "/v1/models should list claude-sonnet-4, got: {models_text}"
         );
+        assert!(
+            models_text.contains("claude-fable-5"),
+            "/v1/models should list the official claude-fable-5, got: {models_text}"
+        );
+        let models_json: Value =
+            serde_json::from_str(&models_text).expect("/v1/models should be valid JSON");
+        let fable = models_json["data"]
+            .as_array()
+            .expect("models.data array")
+            .iter()
+            .find(|m| m["id"] == "claude-fable-5")
+            .expect("claude-fable-5 entry");
+        assert_eq!(
+            fable["type"], "model",
+            "Anthropic-shaped entry should carry type=model"
+        );
+        assert_eq!(
+            fable["display_name"], "Claude Fable 5",
+            "official models should expose their display name"
+        );
+
+        // ── 4a2. Official model name via /v1/messages routes through the
+        // failover chain and the response echoes the requested model back.
+        // This is the Claude Desktop-style integration path.
+        let ant_body = json!({
+            "model": "claude-fable-5",
+            "max_tokens": 256,
+            "messages": [{ "role": "user", "content": "official model roundtrip" }]
+        });
+        let ant_resp = client
+            .post(format!("{base}/v1/messages"))
+            .json(&ant_body)
+            .send()
+            .await
+            .expect("POST /v1/messages");
+        assert!(
+            ant_resp.status().is_success(),
+            "/v1/messages with claude-fable-5 should 200, body: {:?}",
+            ant_resp.text().await
+        );
+        let ant_json: Value = ant_resp.json().await.expect("/v1/messages JSON");
+        assert_eq!(
+            ant_json["model"].as_str(),
+            Some("claude-fable-5"),
+            "response must echo the requested official model, got: {ant_json}"
+        );
+        assert_eq!(ant_json["type"].as_str(), Some("message"));
+        let content_nonempty = ant_json["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.is_empty()))
+            })
+            .unwrap_or(false);
+        assert!(content_nonempty, "content blocks non-empty, got: {ant_json}");
 
         // ── 4b. Non-streaming completion via the seeded route ──
         let body = json!({

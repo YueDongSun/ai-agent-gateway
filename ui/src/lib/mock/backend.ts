@@ -35,6 +35,19 @@ import type { SyncConfig } from '../api/sync';
 import type { ProxyProvider, Route } from '../api/proxy';
 import type { DeeplinkAction } from '../api/deeplink';
 
+// Official Claude model ids — mirrors src-tauri/src/proxy/models.rs
+// OFFICIAL_MODELS. Kept in sync so the browser demo advertises the same
+// model list the Rust backend serves.
+const OFFICIAL_CLAUDE_MODELS = [
+  'claude-fable-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-5',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+];
+
 interface TauriInternals {
   runCallback: (id: number, data: unknown) => void;
 }
@@ -160,7 +173,7 @@ const proxyProviders: ProxyProvider[] = [
     type: 'mock',
     apiKey: '',
     baseURL: '',
-    models: ['claude-sonnet-4', 'gpt-5'],
+    models: ['claude-sonnet-4', 'gpt-5', ...OFFICIAL_CLAUDE_MODELS],
     enabled: true,
     timeoutMs: 60000,
     weight: 1,
@@ -172,7 +185,7 @@ const proxyProviders: ProxyProvider[] = [
     type: 'mock',
     apiKey: '',
     baseURL: '',
-    models: ['claude-sonnet-4', 'gpt-5'],
+    models: ['claude-sonnet-4', 'gpt-5', ...OFFICIAL_CLAUDE_MODELS],
     enabled: true,
     timeoutMs: 60000,
     weight: 1,
@@ -191,6 +204,18 @@ const routes: Route[] = [
   },
   { alias: 'gpt-5', description: 'GPT-5 alias', hops: [{ provider: 'mock-primary', model: 'gpt-5' }] },
   { alias: 'mock-fail', description: 'Always fails (tests failover)', hops: [{ provider: 'mock-fallback', model: 'claude-sonnet-4' }] },
+  // Official Claude model routes — mirrors the Rust seed
+  // (src-tauri/src/proxy/models.rs OFFICIAL_MODELS + database/seed.rs): each
+  // official id is a failover alias so the proxy advertises and serves the
+  // same model list as api.anthropic.com.
+  ...OFFICIAL_CLAUDE_MODELS.map((id) => ({
+    alias: id,
+    description: 'Official Claude model via failover chain',
+    hops: [
+      { provider: 'mock-primary', model: id },
+      { provider: 'mock-fallback', model: id },
+    ],
+  })),
 ];
 
 // ----- Backup -----
@@ -803,9 +828,22 @@ function installFetchInterceptor() {
       );
     }
     if (url.startsWith(`${DEMO_PROXY_BASE}/v1/models`)) {
-      const ids = [...new Set(routes.map((r) => r.alias))];
+      const ids = [...new Set(routes.map((r) => r.alias))].sort();
       return new Response(
-        JSON.stringify({ data: ids.map((id) => ({ id })) }),
+        JSON.stringify({
+          object: 'list',
+          data: ids.map((id) => ({
+            id,
+            type: 'model',
+            display_name: id,
+            object: 'model',
+            created: 1_700_000_000,
+            owned_by: 'ai-agent-gateway',
+          })),
+          has_more: false,
+          first_id: ids[0] ?? null,
+          last_id: ids[ids.length - 1] ?? null,
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }

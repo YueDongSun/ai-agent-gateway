@@ -94,15 +94,33 @@ async fn health(State(state): State<ProxyAppState>) -> impl IntoResponse {
     }))
 }
 
+/// Model list in a shape both SDKs accept: Anthropic Models API fields
+/// (`type`, `display_name`, `created_at`, envelope `has_more`/`first_id`/
+/// `last_id`) plus the OpenAI fields (`object`, `created`, `owned_by`) kept
+/// for back-compat with existing clients. Unknown SDKs ignore extra fields.
 async fn list_models(State(state): State<ProxyAppState>) -> impl IntoResponse {
-    Json(json!({
-        "object": "list",
-        "data": state.router.list_models().into_iter().map(|id| json!({
+    let mut ids = state.router.list_models();
+    ids.sort();
+    let data: Vec<_> = ids.iter().map(|id| {
+        let display_name = crate::proxy::models::display_name_for(id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| id.clone());
+        json!({
             "id": id,
+            "type": "model",
+            "display_name": display_name,
+            "created_at": "2026-01-01T00:00:00Z",
             "object": "model",
             "created": 1_700_000_000,
             "owned_by": "ai-agent-gateway",
-        })).collect::<Vec<_>>(),
+        })
+    }).collect();
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "has_more": false,
+        "first_id": ids.first().cloned(),
+        "last_id": ids.last().cloned(),
     }))
 }
 
