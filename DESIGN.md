@@ -261,6 +261,25 @@ Port `src/gateway/` semantics to Rust:
 
 The existing Node proxy stays as a fallback path until the Rust one is feature-complete.
 
+#### Official-model gateway surface (Phase 14)
+
+For Anthropic-native clients (Claude Desktop-style integrations, the Anthropic
+SDKs) the proxy presents itself as the official API:
+
+- `proxy/models.rs` — `OFFICIAL_MODELS` catalog (claude-fable-5, opus-4-8/4-7/4-6,
+  sonnet-5, sonnet-4-6, haiku-4-5) with display names.
+- `GET /v1/models` returns entries carrying **both** wire shapes — Anthropic
+  Models API fields (`type: "model"`, `display_name`, `created_at`,
+  `has_more`/`first_id`/`last_id` envelope) and OpenAI fields (`object`,
+  `created`, `owned_by`) — so either SDK family parses the list; unknown
+  fields are ignored.
+- `POST /v1/messages` accepts official model ids and routes them through the
+  failover hop chain (each official id is seeded as a route in
+  `database/seed.rs`, idempotent per alias so upgrades gain the aliases); the
+  response echoes the requested model id back to the client.
+- The mirror constant in `ui/src/lib/models.ts` keeps the frontend (Proxy page
+  badges + demo mock seeds) in sync with the Rust catalog.
+
 ### Adapter pattern for AI coding CLIs
 
 Mirrors `src/agents/adapters.ts` but per app:

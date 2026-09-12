@@ -6,6 +6,7 @@ import {
   toggleMcpApp,
   type McpServer,
 } from '../../lib/api/mcp';
+import { useT } from '../../lib/ctx';
 
 interface AddFormState {
   id: string;
@@ -16,6 +17,7 @@ interface AddFormState {
 const EMPTY_FORM: AddFormState = { id: '', name: '', configJson: '{"command":"","args":[],"env":{}}' };
 
 export function McpPage() {
+  const t = useT();
   const [servers, setServers] = useState<McpServer[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,7 +50,7 @@ export function McpPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm(`Delete MCP server "${id}"?`)) return;
+    if (!confirm(t('mcp.delete.confirm', { id }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -85,9 +87,9 @@ export function McpPage() {
   return (
     <div className="mcp-page">
       <header className="page-header">
-        <h2>MCP Servers</h2>
+        <h2>{t('mcp.title')}</h2>
         <button className="btn primary" onClick={() => setShowAdd(true)} disabled={busy}>
-          + Add server
+          {t('mcp.add')}
         </button>
       </header>
 
@@ -96,9 +98,7 @@ export function McpPage() {
       <section className="list-section">
         {servers.length === 0 ? (
           <p className="muted">
-            No MCP servers configured. Click <strong>Add server</strong> to register one.
-            Servers with enabled Claude / Codex flags are projected to those apps' configs
-            on switch.
+            {t('mcp.empty')}
           </p>
         ) : (
           <ul className="mcp-list">
@@ -123,7 +123,7 @@ export function McpPage() {
                         checked={s.enabledClaude}
                         onChange={() => handleToggle(s, 'claude')}
                       />
-                      <span>Claude</span>
+                      <span>{t('mcp.col.claude')}</span>
                     </label>
                     <label>
                       <input
@@ -131,13 +131,13 @@ export function McpPage() {
                         checked={s.enabledCodex}
                         onChange={() => handleToggle(s, 'codex')}
                       />
-                      <span>Codex</span>
+                      <span>{t('mcp.col.codex')}</span>
                     </label>
                   </div>
                 </div>
                 <div className="mcp-actions">
                   <button className="btn danger" onClick={() => handleDelete(s.id)} disabled={busy}>
-                    Delete
+                    {t('common.delete')}
                   </button>
                 </div>
               </li>
@@ -149,9 +149,9 @@ export function McpPage() {
       {showAdd && (
         <div className="modal-backdrop" onClick={() => setShowAdd(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Add MCP server</h3>
+            <h3>{t('mcp.modal.add')}</h3>
             <label>
-              <span>ID (unique, no spaces)</span>
+              <span>{t('mcp.modal.id')} (unique, no spaces)</span>
               <input
                 value={form.id}
                 onChange={(e) => setForm({ ...form, id: e.target.value })}
@@ -159,7 +159,7 @@ export function McpPage() {
               />
             </label>
             <label>
-              <span>Display name</span>
+              <span>{t('mcp.modal.name')}</span>
               <input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -167,7 +167,7 @@ export function McpPage() {
               />
             </label>
             <label>
-              <span>server_config (JSON: command, args, env)</span>
+              <span>{t('mcp.modal.config')}</span>
               <textarea
                 rows={8}
                 value={form.configJson}
@@ -177,14 +177,14 @@ export function McpPage() {
             </label>
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowAdd(false)}>
-                Cancel
+                {t('mcp.modal.cancel')}
               </button>
               <button
                 className="btn primary"
                 onClick={handleAdd}
                 disabled={!form.id || !form.name}
               >
-                Save
+                {t('mcp.modal.save')}
               </button>
             </div>
           </div>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../../lib/ctx';
 import {
   deeplinkParse,
   subscribeDeeplink,
@@ -43,6 +44,7 @@ function formatAction(a: DeeplinkAction): string {
 /// action. v2 (Step 5): per-row Execute button dispatches the parsed action
 /// via the App-owned `onExecute` callback.
 export function DeepLinkPage({ onExecute }: DeepLinkPageProps) {
+  const t = useT();
   const [urls, setUrls] = useState<ReceivedUrl[]>([]);
 
   useEffect(() => {
@@ -127,21 +129,16 @@ export function DeepLinkPage({ onExecute }: DeepLinkPageProps) {
   return (
     <div className="deeplink-page">
       <header className="page-header">
-        <h2>Deep links</h2>
+        <h2>{t('deeplink.title')}</h2>
         <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-          URLs the OS hands to AAG via the <code>aag://</code> scheme land
-          here. Each URL is parsed on the backend
-          (<code>aag://switch/&lt;id&gt;</code>, <code>aag://mcp/&lt;id&gt;</code>, …).
-          Click <strong>Execute</strong> on a row to dispatch its action.
+          {t('deeplink.intro')}
         </p>
       </header>
 
       <section className="list-section">
         {urls.length === 0 ? (
           <p className="muted">
-            No deep-link URLs received yet. On macOS the OS launches AAG with
-            the URL; on Windows / Linux the URL arrives as a CLI argument
-            (handled by the single-instance plugin).
+            {t('deeplink.empty')}
           </p>
         ) : (
           <ul className="deeplink-list">
@@ -162,14 +159,14 @@ export function DeepLinkPage({ onExecute }: DeepLinkPageProps) {
                         className="btn primary deeplink-execute"
                         onClick={() => void handleExecute(i)}
                       >
-                        Execute
+                        {t('deeplink.execute')}
                       </button>
                     )}
                   </div>
                 )}
                 {u.actionError && (
                   <div className="deeplink-action deeplink-action-error">
-                    parse error: {u.actionError}
+                    {t('deeplink.error', { message: u.actionError })}
                   </div>
                 )}
                 {u.executeResult && (

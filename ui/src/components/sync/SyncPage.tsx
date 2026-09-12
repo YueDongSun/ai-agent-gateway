@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../../lib/ctx';
 import {
   deleteSyncConfig,
   listSyncConfigs,
@@ -39,6 +40,7 @@ const emptyWebdav: SyncConfig = {
 };
 
 export function SyncPage() {
+  const t = useT();
   const [configs, setConfigs] = useState<Record<SyncProvider, SyncConfig | null>>({
     s3: null,
     webdav: null,
@@ -129,7 +131,7 @@ export function SyncPage() {
   return (
     <div className="sync-page">
       <header className="page-header">
-        <h2>Cloud sync</h2>
+        <h2>{t('sync.title')}</h2>
         <p className="muted" style={{ margin: 0, fontSize: 12 }}>
           Upload your AAG database to S3 or WebDAV so multiple devices share the
           same provider configuration. S3 uses AWS Signature v4; custom
@@ -186,6 +188,7 @@ function SyncCard({
   onRun,
   busy,
 }: SyncCardProps) {
+  const t = useT();
   const [draft, setDraft] = useState<SyncConfig>(current ?? emptyConfig);
 
   // When the parent refresh yields a new current value, replace the draft.
@@ -211,7 +214,7 @@ function SyncCard({
   return (
     <section className={`sync-card sync-card-${provider}`}>
       <div className="sync-card-header">
-        <h3>{provider === 's3' ? 'Amazon S3 (or S3-compatible)' : 'WebDAV'}</h3>
+        <h3>{provider === 's3' ? t('sync.s3') + ' (or S3-compatible)' : t('sync.webdav')}</h3>
         <label className="sync-enabled">
           <input
             type="checkbox"
@@ -219,12 +222,12 @@ function SyncCard({
             onChange={(e) => update('enabled', e.target.checked)}
             disabled={busy}
           />
-          Enabled
+          {t('sync.enabled')}
         </label>
       </div>
 
       <div className="sync-field">
-        <label>Endpoint</label>
+        <label>{t('sync.endpoint')}</label>
         <input
           type="text"
           value={draft.endpoint}
@@ -237,7 +240,7 @@ function SyncCard({
       {provider === 's3' ? (
         <>
           <div className="sync-field">
-            <label>Bucket</label>
+            <label>{t('sync.bucket')}</label>
             <input
               type="text"
               value={draft.bucket ?? ''}
@@ -247,7 +250,7 @@ function SyncCard({
             />
           </div>
           <div className="sync-field">
-            <label>Region</label>
+            <label>{t('sync.region')}</label>
             <input
               type="text"
               value={draft.region ?? ''}
@@ -259,7 +262,7 @@ function SyncCard({
         </>
       ) : (
         <div className="sync-field">
-          <label>Remote directory</label>
+          <label>{t('sync.remotePath')}</label>
           <input
             type="text"
             value={draft.remotePath ?? ''}
@@ -271,7 +274,7 @@ function SyncCard({
       )}
 
       <div className="sync-field">
-        <label>{provider === 's3' ? 'Access key ID' : 'Username'}</label>
+        <label>{provider === 's3' ? t('sync.accessKey') : t('sync.accessKey') + ' (username)'}</label>
         <input
           type="text"
           value={draft.accessKey}
@@ -282,7 +285,7 @@ function SyncCard({
       </div>
 
       <div className="sync-field">
-        <label>{provider === 's3' ? 'Secret access key' : 'Password'}</label>
+        <label>{provider === 's3' ? t('sync.secretKey') : t('sync.secretKey') + ' (password)'}</label>
         <input
           type="password"
           value={draft.secretKey}
@@ -296,12 +299,12 @@ function SyncCard({
         <div className="sync-status">
           {current.lastSyncAt != null && (
             <span className="sync-status-line">
-              Last sync: <code>{new Date(current.lastSyncAt * 1000).toLocaleString()}</code>
+              {t('sync.lastSync')}: <code>{new Date(current.lastSyncAt * 1000).toLocaleString()}</code>
             </span>
           )}
           {current.lastError && (
             <span className="sync-status-line sync-status-error">
-              Last error: <code>{current.lastError}</code>
+              {t('sync.lastError')}: <code>{current.lastError}</code>
             </span>
           )}
         </div>
@@ -309,11 +312,11 @@ function SyncCard({
 
       <div className="sync-actions">
         <button className="btn primary" onClick={handleSaveClick} disabled={busy}>
-          Save
+          {t('sync.save')}
         </button>
         {current && (
           <button className="btn danger" onClick={() => onDelete(provider)} disabled={busy}>
-            Delete
+            {t('sync.delete')}
           </button>
         )}
         {current && (
@@ -323,7 +326,7 @@ function SyncCard({
             disabled={busy}
             title="Stamp a test last_sync_at + last_error on this config row"
           >
-            Test stamp
+            {t('sync.testStamp')}
           </button>
         )}
         {current && (
@@ -333,21 +336,21 @@ function SyncCard({
               onClick={() => onRun(provider, 'check')}
               disabled={busy}
             >
-              Check connection
+              {t('sync.check')}
             </button>
             <button
               className="btn"
               onClick={() => onRun(provider, 'upload')}
               disabled={busy}
             >
-              Upload now
+              {t('sync.upload')}
             </button>
             <button
               className="btn"
               onClick={() => onRun(provider, 'download')}
               disabled={busy}
             >
-              Download now
+              {t('sync.download')}
             </button>
           </>
         )}

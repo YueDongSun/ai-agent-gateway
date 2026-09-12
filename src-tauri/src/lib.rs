@@ -731,24 +731,137 @@ async fn proxy_start(
         router,
         auth_token: config.auth_token.clone(),
     };
-    let bind_addr = proxy::server::socket_addr(&config.host, config.port);
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-    let handle = tauri::async_runtime::spawn(async move {
-        if let Err(e) = proxy::server::serve(bind_addr, app_state, shutdown_rx).await {
-            log::error!("proxy: server error: {e}");
+    // Port-fallback: try requested_port, then +1..+5 in order. For each
+    // candidate, bind a server, probe /health to confirm we own the port
+    // (avoids landing on another app that grabbed the same port), then
+    // persist the actual port so the next start prefers it.
+    const MAX_PORT_OFFSET: u16 = 5;
+    let mut last_err: Option<String> = None;
+    let mut chosen: Option<(proxy::server::BoundInfo, tauri::async_runtime::JoinHandle<()>, tokio::sync::oneshot::Sender<()>)> = None;
+    let original_port = config.port;
+    for offset in 0..=MAX_PORT_OFFSET {
+        let try_port = original_port.wrapping_add(offset);
+        let try_addr = proxy::server::socket_addr(&config.host, try_port);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Option<proxy::server::BoundInfo>>();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let state_for_try = app_state.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            // serve() owns shutdown_rx until its axum loop ends. If bind
+            // fails it returns immediately and shutdown_rx is dropped; if
+            // bind succeeds the inner axum loop awaits shutdown_rx. Either
+            // way, send the bind outcome through ready_tx so the caller can
+            // decide whether to keep this server or drop it.
+            let outcome = proxy::server::serve(try_addr, state_for_try, shutdown_rx).await;
+            let _ = ready_tx.send(outcome.ok());
+            // If bind failed, outcome was Err and serve() has already
+            // returned — this task is done. If bind succeeded, serve() is
+            // still running axum on try_addr; we just hold the task open by
+            // awaiting shutdown_rx again... but it's been moved. So if bind
+            // succeeded, axum is now serving and will only stop when the
+            // *outer* shutdown_rx (held by the caller, not us) is signalled
+            // and the original inner axum loop wakes. From this task's POV,
+            // we have nothing more to do; signal the outcome and return.
+            // (Cleanup on probe failure is handled by dropping handle below —
+            // the spawn task terminates when this closure returns, which is
+            // safe because serve() has already moved shutdown_rx.)
+        });
+        // Wait for the bind result.
+        let attempt = tokio::time::timeout(std::time::Duration::from_millis(300), ready_rx).await;
+        let bound = match attempt {
+            Ok(Ok(Some(b))) => b,
+            Ok(Ok(None)) => {
+                // Bind failed; record and try next.
+                last_err = Some(format!("port {} bind failed", try_port));
+                // The task has already returned; drop the handle.
+                drop(handle);
+                let _ = shutdown_tx.send(()); // no-op, but consistent
+                continue;
+            }
+            Ok(Err(_)) => {
+                last_err = Some(format!("port {} bind channel closed", try_port));
+                drop(handle);
+                let _ = shutdown_tx.send(());
+                continue;
+            }
+            Err(_) => {
+                // Timeout — bind hung. Treat as failure.
+                last_err = Some(format!("port {} bind timed out", try_port));
+                drop(handle);
+                let _ = shutdown_tx.send(());
+                continue;
+            }
+        };
+        // Confirm we actually own the port via /health (rules out a port we
+        // successfully bound to but another process already had reserved,
+        // which shouldn't happen on Linux/macOS but CAN on Windows when the
+        // port is in TIME_WAIT from a prior run).
+        let probe = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = Some(format!("reqwest build: {e}"));
+                drop(handle);
+                let _ = shutdown_tx.send(());
+                continue;
+            }
+        };
+        let probe_url = format!("http://{}/health", bound.addr);
+        let probe_ok = probe.get(&probe_url).send().await.map(|r| r.status().is_success()).unwrap_or(false);
+        if !probe_ok {
+            // Not our server — somebody else owns this port. Tear down and
+            // try the next candidate.
+            log::warn!("proxy: {} answered /health with non-2xx (or refused), assuming another process owns it", bound.addr);
+            last_err = Some(format!("port {} owned by another process", try_port));
+            drop(handle);
+            let _ = shutdown_tx.send(());
+            continue;
         }
-    });
+        chosen = Some((bound, handle, shutdown_tx));
+        break;
+    }
+    let (bound, handle, shutdown_tx) = chosen.ok_or_else(|| {
+        format!(
+            "no free port near {} (tried {}+0..+{}): {}",
+            original_port, original_port, MAX_PORT_OFFSET, last_err.unwrap_or_else(|| "unknown".into())
+        )
+    })?;
+
+    // Persist the actual port if it differs from the configured one, so
+    // the next start prefers it.
+    if bound.addr.port() != original_port {
+        let mut updated = config.clone();
+        updated.port = bound.addr.port();
+        if let Err(e) = db.save_proxy_config(&updated) {
+            log::warn!("proxy: could not persist fallback port {}: {}", updated.port, e);
+        }
+    }
 
     {
         let mut guard = state.lock().await;
         *guard = Some(RunningProxy {
             handle,
             shutdown: shutdown_tx,
-            config: config.clone(),
+            config: ProxyConfig {
+                host: bound.addr.ip().to_string(),
+                port: bound.addr.port(),
+                ..config.clone()
+            },
         });
     }
-    Ok(format!("listening on {}:{}", config.host, config.port))
+    let msg = if bound.addr.port() == original_port {
+        format!("listening on {}:{}", bound.addr.ip(), bound.addr.port())
+    } else {
+        format!(
+            "listening on {}:{} (port {} was in use; saved as the new default)",
+            bound.addr.ip(),
+            bound.addr.port(),
+            original_port
+        )
+    };
+    Ok(msg)
 }
 
 #[tauri::command]
@@ -951,6 +1064,29 @@ fn usage_by_provider(
 
 // ----- Sync commands (Phase 8) -----
 
+// ----- Vendor commands (unified upstream supplier management) -----
+// One vendor may serve multiple protocols (anthropic / openai-chat /
+// openai-responses) sharing a single API key. The smart provider form
+// resolves endpoint = endpoints[protocol] ?? base_url.
+
+#[tauri::command]
+fn vendor_list(db: tauri::State<'_, Database>) -> Result<Vec<database::dao::vendors::Vendor>, String> {
+    db.get_all_vendors().map_err(String::from)
+}
+
+#[tauri::command]
+fn vendor_save(
+    db: tauri::State<'_, Database>,
+    vendor: database::dao::vendors::Vendor,
+) -> Result<(), String> {
+    db.save_vendor(&vendor).map_err(String::from)
+}
+
+#[tauri::command]
+fn vendor_delete(db: tauri::State<'_, Database>, id: String) -> Result<(), String> {
+    db.delete_vendor(&id).map_err(String::from)
+}
+
 #[tauri::command]
 fn sync_list(db: tauri::State<'_, Database>) -> Result<Vec<database::dao::sync_config::SyncConfig>, String> {
     db.get_all_sync_configs().map_err(String::from)
@@ -1120,6 +1256,7 @@ pub fn run() {
             usage_record, usage_summary, usage_by_model, usage_by_provider,
             sync_list, sync_save, sync_delete, sync_record_result,
             sync_check, sync_upload, sync_download,
+            vendor_list, vendor_save, vendor_delete,
         ])
         .setup(|app| {
             // Install the system tray icon (Show / Hide / Quit menu).

@@ -5,6 +5,7 @@ import {
   saveSkill,
   type InstalledSkill,
 } from '../../lib/api/skills';
+import { useT } from '../../lib/ctx';
 
 interface AddFormState {
   id: string;
@@ -27,6 +28,7 @@ const EMPTY_FORM: AddFormState = {
 };
 
 export function SkillsPage() {
+  const t = useT();
   const [skills, setSkills] = useState<InstalledSkill[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,7 +50,7 @@ export function SkillsPage() {
   }, []);
 
   const handleDelete = async (id: string) => {
-    if (!confirm(`Delete skill "${id}"?`)) return;
+    if (!confirm(t('skills.delete.confirm', { id }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -99,9 +101,9 @@ export function SkillsPage() {
   return (
     <div className="skills-page">
       <header className="page-header">
-        <h2>Skills</h2>
+        <h2>{t('skills.title')}</h2>
         <button className="btn primary" onClick={() => setShowAdd(true)} disabled={busy}>
-          + Add skill
+          {t('skills.add')}
         </button>
       </header>
 
@@ -110,9 +112,7 @@ export function SkillsPage() {
       <section className="list-section">
         {skills.length === 0 ? (
           <p className="muted">
-            No skills installed. Click <strong>Add skill</strong> to register one.
-            Skills with enabled Claude / Codex flags are projected to those apps'
-            skills directories on switch.
+            {t('skills.empty')}
           </p>
         ) : (
           <ul className="skill-list">
@@ -133,12 +133,12 @@ export function SkillsPage() {
                   <div className="skill-toggles muted">
                     Claude: {s.enabledClaude ? 'on' : 'off'} ·
                     Codex: {s.enabledCodex ? 'on' : 'off'} ·
-                    Installed: {formatDate(s.installedAt)}
+                    {t('skills.col.installed')}: {formatDate(s.installedAt)}
                   </div>
                 </div>
                 <div className="skill-actions">
                   <button className="btn danger" onClick={() => handleDelete(s.id)} disabled={busy}>
-                    Delete
+                    {t('common.delete')}
                   </button>
                 </div>
               </li>
@@ -150,9 +150,9 @@ export function SkillsPage() {
       {showAdd && (
         <div className="modal-backdrop" onClick={() => setShowAdd(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Add skill</h3>
+            <h3>{t('skills.modal.add')}</h3>
             <label>
-              <span>ID (unique, no spaces)</span>
+              <span>{t('skills.modal.id')} (unique, no spaces)</span>
               <input
                 value={form.id}
                 onChange={(e) => setForm({ ...form, id: e.target.value })}
@@ -160,7 +160,7 @@ export function SkillsPage() {
               />
             </label>
             <label>
-              <span>Display name</span>
+              <span>{t('skills.modal.name')}</span>
               <input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -168,7 +168,7 @@ export function SkillsPage() {
               />
             </label>
             <label>
-              <span>Directory (filesystem path)</span>
+              <span>{t('skills.modal.directory')}</span>
               <input
                 value={form.directory}
                 onChange={(e) => setForm({ ...form, directory: e.target.value })}
@@ -176,7 +176,7 @@ export function SkillsPage() {
               />
             </label>
             <label>
-              <span>Description (optional)</span>
+              <span>{t('skills.modal.description')}</span>
               <input
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
@@ -185,7 +185,7 @@ export function SkillsPage() {
             </label>
             <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 8 }}>
               <label>
-                <span>Repo owner</span>
+                <span>{t('skills.modal.owner')}</span>
                 <input
                   value={form.repoOwner}
                   onChange={(e) => setForm({ ...form, repoOwner: e.target.value })}
@@ -193,7 +193,7 @@ export function SkillsPage() {
                 />
               </label>
               <label>
-                <span>Repo name</span>
+                <span>{t('skills.modal.repoName')}</span>
                 <input
                   value={form.repoName}
                   onChange={(e) => setForm({ ...form, repoName: e.target.value })}
@@ -201,7 +201,7 @@ export function SkillsPage() {
                 />
               </label>
               <label>
-                <span>Branch</span>
+                <span>{t('skills.modal.branch')}</span>
                 <input
                   value={form.repoBranch}
                   onChange={(e) => setForm({ ...form, repoBranch: e.target.value })}
@@ -211,14 +211,14 @@ export function SkillsPage() {
             </div>
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowAdd(false)}>
-                Cancel
+                {t('skills.modal.cancel')}
               </button>
               <button
                 className="btn primary"
                 onClick={handleAdd}
                 disabled={!form.id || !form.name || !form.directory}
               >
-                Save
+                {t('skills.modal.save')}
               </button>
             </div>
           </div>

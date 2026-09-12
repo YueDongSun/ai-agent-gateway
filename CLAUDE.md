@@ -80,8 +80,25 @@ AAG manages per-agent config to point each CLI at a provider or the local proxy:
 `route_*` commands) so users can build real failover chains (alias → hops) and restart
 the proxy to apply them.
 
-UI: `Providers` nav page (per-app tabs) + `CodexCli` nav page (Codex + Copilot terminal
+**Official-model gateway surface** (Phase 14): the proxy advertises the official
+Claude model list (`proxy/models.rs::OFFICIAL_MODELS` — fable-5, opus-4-8/4-7/4-6,
+sonnet-5, sonnet-4-6, haiku-4-5) on `/v1/models` (entries carry both Anthropic and
+OpenAI fields) and seeds one failover route per official id (`database/seed.rs`).
+Anthropic-native clients point `ANTHROPIC_BASE_URL` at the proxy, see the official
+model names, and their requests flow through the hop chains — the response echoes
+the requested official id back. UI mirror: `ui/src/lib/models.ts`.
+
+UI: `Providers` nav page (per-app tabs) + `Vendors` nav page + `CodexCli` nav page (Codex + Copilot terminal
 launchers) + `Proxy` page (start/stop + failover config).
+
+**Vendors (unified supplier management)**: a vendor = one upstream supplier that may serve
+multiple protocols (`anthropic` / `openai-chat` / `openai-responses`) sharing a single API key,
+with optional per-protocol endpoint overrides (`endpoints[protocol]` wins over `base_url`).
+Stored in the `vendors` table (`database/dao/vendors.rs`, schema v10; commands `vendor_list/save/delete`).
+The provider smart form (`ui/src/lib/providerForm.ts` + ProvidersPage) has a vendor picker:
+picking a vendor auto-fills endpoint + key and auto-selects the protocol the target app
+speaks (`APP_PROTOCOL`: claude_code→anthropic, codex/copilot/pi→openai-chat). Provider
+rows keep a baked-in `settings_config` snapshot, so deleting a vendor never cascades.
 
 ## Conventions
 

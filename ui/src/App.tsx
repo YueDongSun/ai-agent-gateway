@@ -4,6 +4,7 @@ import { appCheckUpdate } from './lib/api/app';
 import { switchProvider } from './lib/api/providers';
 import type { DeeplinkAction } from './lib/api/deeplink';
 import { ProvidersPage } from './components/providers/ProvidersPage';
+import { VendorsPage } from './components/vendors/VendorsPage';
 import { ProxyPage } from './components/proxy/ProxyPage';
 import { BackupPage } from './components/backup/BackupPage';
 import { McpPage } from './components/mcp/McpPage';
@@ -13,6 +14,9 @@ import { UsagePage } from './components/usage/UsagePage';
 import { SyncPage } from './components/sync/SyncPage';
 import { DeepLinkPage } from './components/deeplink/DeepLinkPage';
 import { CodexCliPage } from './components/codexcli/CodexCliPage';
+import { I18nCtx, useCtx } from './lib/ctx';
+import { useI18n } from './i18n/index';
+import { useTheme } from './lib/theme';
 
 interface AppInfo {
   name: string;
@@ -20,9 +24,38 @@ interface AppInfo {
   phase: string;
 }
 
-type View = 'app' | 'providers' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli';
+type View = 'app' | 'providers' | 'vendors' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli';
 
-export function App() {
+/* ---- Sun/Moon icons (inline SVG — no asset dependency) ---- */
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" />
+      <line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function AppInner() {
+  const ctx = useCtx();
+  const { t, locale, setLocale, theme, themeOverride, setThemeOverride } = ctx;
+
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>('providers');
@@ -44,49 +77,65 @@ export function App() {
         endpoint: updateEndpoint.trim() || null,
       });
       if (latest) {
-        setUpdateMsg(`Update available: v${latest}`);
+        setUpdateMsg(t('app.update.available', { version: latest }));
       } else {
-        setUpdateMsg('No update available.');
+        setUpdateMsg(t('app.update.none'));
       }
     } catch (e) {
-      setUpdateMsg(`Update check failed: ${String(e)}`);
+      setUpdateMsg(t('app.update.failed', { message: String(e) }));
     } finally {
       setCheckingUpdate(false);
     }
   };
 
-  /// Dispatch a parsed deep-link action. Returns a human-readable result
-  /// string for the DeepLinkPage to render. Errors are caught here so the
-  /// page can show them without crashing.
   const handleExecuteDeeplink = async (
     action: DeeplinkAction,
   ): Promise<string> => {
     switch (action.kind) {
       case 'switchProvider': {
         const r = await switchProvider(action.providerId, action.appType);
-        return `Switched to ${action.providerId} (wrote ${r.written.length} file(s))`;
+        return t('deeplink.switchProvider', { name: action.providerId, count: r.written.length });
       }
       case 'focusProvider':
         setView('providers');
-        return `Opened Providers page (focus: ${action.providerId})`;
+        return t('deeplink.focusProvider', { name: action.providerId });
       case 'focusMcp':
         setView('mcp');
-        return `Opened MCP page (focus: ${action.serverId})`;
+        return t('deeplink.focusMcp', { name: action.serverId });
       case 'focusSkill':
         setView('skills');
-        return `Opened Skills page (focus: ${action.skillId})`;
+        return t('deeplink.focusSkill', { name: action.skillId });
       case 'showDeeplinks':
         setView('deeplink');
-        return 'Opened Deep links page';
+        return t('deeplink.showDeeplinks');
       case 'unknown':
-        return `Unknown action: ${action.reason}`;
+        return t('deeplink.unknown', { reason: action.reason });
     }
+  };
+
+  const nav = (key: string, viewId: View) => (
+    <button
+      key={viewId}
+      className={view === viewId ? 'nav-item active' : 'nav-item'}
+      onClick={() => setView(viewId)}
+    >
+      {t(key)}
+    </button>
+  );
+
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    setThemeOverride(next);
+  };
+
+  const nextLang = () => {
+    setLocale(locale === 'en' ? 'zh' : 'en');
   };
 
   if (error) {
     return (
       <div className="aag-root">
-        <pre className="aag-error">Error: {error}</pre>
+        <pre className="aag-error">{t('app.error', { message: error })}</pre>
       </div>
     );
   }
@@ -95,85 +144,52 @@ export function App() {
     <div className="aag-root">
       <header className="aag-header">
         <div className="aag-header-row">
-          <h1>{info?.name ?? 'AI Agent Gateway'}</h1>
+          <h1>{info?.name ?? t('app.brand')}</h1>
           <nav className="aag-nav">
-            <button
-              className={view === 'providers' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('providers')}
-            >
-              Providers
-            </button>
-            <button
-              className={view === 'proxy' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('proxy')}
-            >
-              Proxy
-            </button>
-            <button
-              className={view === 'backup' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('backup')}
-            >
-              Backup
-            </button>
-            <button
-              className={view === 'mcp' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('mcp')}
-            >
-              MCP
-            </button>
-            <button
-              className={view === 'skills' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('skills')}
-            >
-              Skills
-            </button>
-            <button
-              className={view === 'sessions' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('sessions')}
-            >
-              Sessions
-            </button>
-            <button
-              className={view === 'usage' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('usage')}
-            >
-              Usage
-            </button>
-            <button
-              className={view === 'sync' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('sync')}
-            >
-              Sync
-            </button>
-            <button
-              className={view === 'deeplink' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('deeplink')}
-            >
-              Deep links
-            </button>
-            <button
-              className={view === 'codexcli' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('codexcli')}
-            >
-              Codex CLI
-            </button>
-            <button
-              className={view === 'app' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setView('app')}
-            >
-              About
-            </button>
+            {nav('app.nav.providers', 'providers')}
+            {nav('app.nav.vendors',   'vendors')}
+            {nav('app.nav.proxy',       'proxy')}
+            {nav('app.nav.backup',      'backup')}
+            {nav('app.nav.mcp',         'mcp')}
+            {nav('app.nav.skills',      'skills')}
+            {nav('app.nav.sessions',    'sessions')}
+            {nav('app.nav.usage',       'usage')}
+            {nav('app.nav.sync',        'sync')}
+            {nav('app.nav.deeplink',    'deeplink')}
+            {nav('app.nav.codexcli',    'codexcli')}
+            {nav('app.nav.about',       'app')}
           </nav>
+          <div className="header-controls">
+            <button
+              className="theme-btn"
+              onClick={toggleTheme}
+              title={t('header.theme.toggle')}
+              aria-label={t('header.theme.toggle')}
+            >
+              {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+              <span>{theme === 'dark' ? t('header.theme.light') : t('header.theme.dark')}</span>
+            </button>
+            <button
+              className="lang-btn"
+              onClick={nextLang}
+              title={t('header.lang.toggle')}
+              aria-label={t('header.lang.toggle')}
+            >
+              {locale === 'en' ? '中' : 'EN'}
+            </button>
+          </div>
         </div>
         {info && (
           <p className="aag-sub">
-            v{info.version} · Phase {info.phase}
+            {t('app.subtitle', { version: info.version, phase: info.phase })}
           </p>
         )}
       </header>
       <main className="aag-main">
         {view === 'providers' ? (
           <ProvidersPage />
+        ) : view === 'vendors' ? (
+          <VendorsPage />
         ) : view === 'proxy' ? (
           <ProxyPage />
         ) : view === 'backup' ? (
@@ -194,9 +210,9 @@ export function App() {
           <CodexCliPage />
         ) : (
           <section>
-            <h2>About</h2>
+            <h2>{t('app.nav.about')}</h2>
             <p>
-              AAG (AI Agent Gateway) is a Tauri desktop app for managing provider
+              AAG ({t('app.brand')}) is a Tauri desktop app for managing provider
               configuration across multiple AI coding CLIs (Claude Code, Codex,
               Gemini CLI, OpenCode, OpenClaw, Hermes, Grok Build, Claude Desktop).
             </p>
@@ -210,7 +226,7 @@ export function App() {
                 className="about-update-endpoint"
                 value={updateEndpoint}
                 onChange={(e) => setUpdateEndpoint(e.target.value)}
-                placeholder="https://releases.example.com/aag/latest.json (optional)"
+                placeholder={t('app.update.placeholder')}
                 disabled={checkingUpdate}
               />
               <button
@@ -218,7 +234,7 @@ export function App() {
                 onClick={handleCheckUpdate}
                 disabled={checkingUpdate}
               >
-                {checkingUpdate ? 'Checking…' : 'Check for update'}
+                {checkingUpdate ? t('app.update.checking') : t('app.update.check')}
               </button>
               {updateMsg && (
                 <span className="about-update-msg">{updateMsg}</span>
@@ -228,10 +244,26 @@ export function App() {
         )}
       </main>
       <footer className="aag-footer">
-        Local proxy with circuit breaker + failover (streaming SSE, OpenAI &
-        Anthropic compatible) · SQLite SSOT · backup · MCP · skills · sessions ·
-        usage · S3/WebDAV sync · deep links · tray.
+        {t('app.footer')}
       </footer>
     </div>
+  );
+}
+
+export function App() {
+  const i18n = useI18n();
+  const { resolved, override, setOverride } = useTheme();
+
+  const ctx = {
+    ...i18n,
+    theme: resolved,
+    themeOverride: override,
+    setThemeOverride: setOverride,
+  };
+
+  return (
+    <I18nCtx.Provider value={ctx}>
+      <AppInner />
+    </I18nCtx.Provider>
   );
 }

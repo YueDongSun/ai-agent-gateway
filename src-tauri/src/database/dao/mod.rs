@@ -14,3 +14,4 @@ pub mod settings;
 pub mod skills;
 pub mod sync_config;
 pub mod usage;
+pub mod vendors;

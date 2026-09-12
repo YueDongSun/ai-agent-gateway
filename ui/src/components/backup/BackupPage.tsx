@@ -5,8 +5,10 @@ import {
   listBackups,
   type BackupEntry,
 } from '../../lib/api/backup';
+import { useT } from '../../lib/ctx';
 
 export function BackupPage() {
+  const t = useT();
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -30,7 +32,7 @@ export function BackupPage() {
     setError(null);
     try {
       const entry = await createBackup();
-      setError(`Created backup "${entry.label}" (${(entry.sizeBytes / 1024).toFixed(1)} KB)`);
+      setError(t('backup.created.detail', { label: entry.label, size: (entry.sizeBytes / 1024).toFixed(1) }));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -40,7 +42,7 @@ export function BackupPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm(`Delete backup "${id}"?`)) return;
+    if (!confirm(t('backup.delete.confirm', { id }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -70,9 +72,9 @@ export function BackupPage() {
   return (
     <div className="backup-page">
       <header className="page-header">
-        <h2>Backups</h2>
+        <h2>{t('backup.title')}</h2>
         <button className="btn primary" onClick={handleCreate} disabled={busy}>
-          + Create backup
+          {t('backup.create')}
         </button>
       </header>
 
@@ -81,9 +83,7 @@ export function BackupPage() {
       <section className="list-section">
         {backups.length === 0 ? (
           <p className="muted">
-            No backups yet. Click <strong>Create backup</strong> to snapshot the current
-            configuration (providers, routes, proxy config). Old backups are
-            automatically rotated — only the 10 most recent are kept.
+            {t('backup.empty')}
           </p>
         ) : (
           <ul className="backup-list">
@@ -102,7 +102,7 @@ export function BackupPage() {
                     onClick={() => handleDelete(b.id)}
                     disabled={busy}
                   >
-                    Delete
+                    {t('common.delete')}
                   </button>
                 </div>
               </li>

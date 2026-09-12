@@ -4,8 +4,10 @@ import {
   listSessions,
   type SessionMeta,
 } from '../../lib/api/sessions';
+import { useT } from '../../lib/ctx';
 
 export function SessionsPage() {
+  const t = useT();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [allSessions, setAllSessions] = useState<SessionMeta[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +56,7 @@ export function SessionsPage() {
   }, [sessions, search]);
 
   const handleDelete = async (id: string) => {
-    if (!confirm(`Delete session "${id}"?`)) return;
+    if (!confirm(t('sessions.delete.confirm', { title: id }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -79,11 +81,11 @@ export function SessionsPage() {
   return (
     <div className="sessions-page">
       <header className="page-header">
-        <h2>Sessions</h2>
+        <h2>{t('sessions.title')}</h2>
         <input
           className="search-input"
           type="search"
-          placeholder="Search title, project, path..."
+          placeholder={t('sessions.searchPlaceholder')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -96,7 +98,7 @@ export function SessionsPage() {
           className={activeApp === null ? 'tab active' : 'tab'}
           onClick={() => setActiveApp(null)}
         >
-          All ({allSessions.length})
+          {t('sessions.tab.all')} ({allSessions.length})
         </button>
         {Array.from(appCounts.entries()).map(([app, count]) => (
           <button
@@ -111,9 +113,7 @@ export function SessionsPage() {
 
       {filtered.length === 0 ? (
         <p className="muted">
-          No sessions found. Sessions are discovered from Claude Code / Codex
-          JSONL files in later phases. Use the API directly to insert rows for
-          testing.
+          {t('sessions.empty')}
         </p>
       ) : (
         <ul className="session-list">
@@ -126,10 +126,10 @@ export function SessionsPage() {
                 </div>
                 {s.summary && <p className="session-summary">{s.summary}</p>}
                 <div className="session-meta muted">
-                  <span>app: {s.appId}</span>
+                  <span>{t('sessions.col.app')}: {s.appId}</span>
                   {s.projectDir && <span> · {s.projectDir}</span>}
-                  <span> · {s.messageCount} msgs</span>
-                  <span> · last active: {formatDate(s.lastActiveAt)}</span>
+                  <span> · {s.messageCount} {t('sessions.col.messages').toLowerCase()}</span>
+                  <span> · {t('sessions.col.lastActive')}: {formatDate(s.lastActiveAt)}</span>
                 </div>
                 {s.sourcePath && (
                   <code className="session-path">{s.sourcePath}</code>
@@ -144,7 +144,7 @@ export function SessionsPage() {
                   onClick={() => handleDelete(s.id)}
                   disabled={busy}
                 >
-                  Delete
+                  {t('common.delete')}
                 </button>
               </div>
             </li>

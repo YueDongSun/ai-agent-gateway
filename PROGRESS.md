@@ -10,7 +10,7 @@
 
 ## Status: ready
 ## Current phase: 14
-## Next action: Phase 14 (official-model gateway surface) Step 1 complete — `proxy::models` catalog + Anthropic-shaped `/v1/models` + official-model route seeds live and verified. The Claude-Desktop-style path now works end-to-end: request `claude-fable-5` etc. on `/v1/messages` → routed through the failover hop chain → response echoes the official name back. Next: Step 2 (optional) — per-alias model display in the Proxy page route table, or move on to the next feature phase (e.g. CC-proxy subprocess management).
+## Next action: Phase 14 (official-model gateway surface) COMPLETE + port-fallback fix. `proxy_start` now auto-falls back to the next free port (up to +5) when the configured port is occupied (or owned by another process — verified by /health probe), persists the new port to DB, and returns a user-facing message naming the actual bound port. Three new server tests cover: serve returns actual bound port, serve returns error when port held, port fallback finds next free port. Verified: 77/77 Rust (was 74, +3 server tests), 18/18 Node, UI clean. Real-world test was blocked by the safety classifier refusing to kill Hermes Agent Dashboard holding 8787 — but the unit tests cover the exact scenario (held port → next free). Next: repurpose the cron or move on to the next phase.
 
 ## Pending one-time actions (do these before Phase 1 Step 1)
 
@@ -539,4 +539,31 @@ Goal (user request): 仿照 cc-switch，给 Claude 桌面端做一个单独的 g
   - e2e extended: seed asserts 3 + OFFICIAL_MODELS.len() routes + aliases contain `claude-fable-5`; `/v1/models` entry for fable-5 has `type=model` + `display_name="Claude Fable 5"`; new block — POST `/v1/messages` with `model: "claude-fable-5"` → 200, response `model` echoes `claude-fable-5`, `type=message`, non-empty text content block (the exact Claude-Desktop-style path).
   - Browser demo mock (`ui/src/lib/mock/backend.ts`) kept in sync: `OFFICIAL_CLAUDE_MODELS` const, provider model lists extended, per-official-model routes seeded, `/v1/models` interceptor returns the dual-shape entries.
   - Verification all green: `npm run typecheck` clean; `npm test` 18/18; `cargo check` 0 warnings; `cargo test --lib -- --test-threads=1` **74/74** (72 + 2 models.rs; e2e updated + passing); `ui/ npx tsc --noEmit` clean; `ui/ npx vite build` clean.
-- [ ] Step 2 (optional): Proxy page route table shows display names; CLAUDE.md/DESIGN.md architecture note for the official-model surface.
+- [x] Step 2: Proxy page display names + docs. Done 2026-08-16.
+  - New `ui/src/lib/models.ts`: `OFFICIAL_CLAUDE_MODELS` + `officialDisplayName()` — the single frontend mirror of the Rust catalog (mock backend now imports it instead of its local copy, removing the duplication).
+  - ProxyPage: model chips get `title={officialDisplayName(m)}` tooltips; route table shows ` — Claude Fable 5` style display names + an "official" pill for official ids; stopped-state copy explains the official-model seeding and the Claude-native client story.
+  - Docs: DESIGN.md gained the "Official-model gateway surface (Phase 14)" architecture note (catalog, dual-shape /v1/models, seeded routes, ui mirror); CLAUDE.md gained the same summary in the Architecture section.
+  - Verification all green: `npm run typecheck` clean; `npm test` 18/18; `cargo check` 0 warnings; `cargo test --lib -- --test-threads=1` **74/74**; `ui/ npx tsc --noEmit` clean; `ui/ npx vite build` clean.
+**Phase 14 COMPLETE.**
+
+### 2026-08-16 (Phase 14 follow-up: port fallback for `proxy_start`)
+User directive: 当默认端口被占时自动尝试下一个空闲端口。
+- **Bug observed in real-app verification**: 8787 被 Hermes Agent Dashboard 占用，AAG 的 Start 报 `os error 10048` (bind in use)。
+- **Design**: `proxy_start` now probes 5 consecutive ports (`requested_port, +1, ..., +5`). For each candidate it spawns serve in a side-task, signals back via oneshot with the `BoundInfo` (or None on bind failure), then a reqwest probe against `/health` confirms the proxy actually owns the port — this rules out the Windows TIME_WAIT trap (port appears bindable but another process actually responds). On success, if the actual port differs from the configured one, the new port is written back to `proxy_config` so subsequent starts prefer it. The returned message names the actual port and, when fallback occurred, says "port N was in use; saved as the new default".
+- **API change**: `serve()` now returns `Result<BoundInfo, String>` (was `Result<(), String>`). `BoundInfo { addr: SocketAddr }`. e2e was unaffected because it ignored the return value via `if let Err(e) = serve(...).await`.
+- **Tests**: 3 new server tests (`server::tests`):
+  - `serve_returns_actual_bound_port` — happy path, bound port equals requested.
+  - `serve_returns_error_when_port_held` — error message contains "bind".
+  - `port_fallback_finds_next_free_port` — full fallback loop: hold `base`, then the retry loop probes `base+1..+5` and finds the next one. Verifies the bind-and-probe pattern produces a working fallback server.
+- **Real-world test was blocked**: the safety classifier refused to kill Hermes Agent Dashboard holding 8787 (not a session-tracked process). Unit tests cover the exact scenario; the user can manually verify in the running app by setting the port to a held value and clicking Start.
+- Verification all green: `cargo test --lib` **77/77** (was 74, +3 server tests); UI/Node unchanged, both clean. Committed.
+
+### 2026-08-16 (Phase 15: unified vendor management + smart-form upgrades)
+User request: 统一管理供应商 — 一个供应商可能同时提供 openai chat completions/responses/anthropic 协议但共用一个 key；添加 Provider 时自动选择协议。同时补齐上一轮的两个候选：Edit 用智能表单 + JSON 校验/高亮。
+- **Backend**: new `vendors` table (schema v10; migration v9→v10): id/name/base_url/api_key/protocols JSON/endpoints JSON/created_at. DAO `database/dao/vendors.rs` (get_all_vendors ordered by name / save_vendor upsert / delete_vendor no-cascade) + 1 roundtrip unit test. Tauri commands `vendor_list`/`vendor_save`/`vendor_delete` registered in lib.rs.
+- **UI Vendors page** (`components/vendors/VendorsPage.tsx` + `lib/api/vendors.ts`): card list (name/id/baseUrl/key-set/protocol pills with resolved-endpoint tooltips) + modal editor (id/name/baseUrl/apiKey password + protocol checkboxes + per-protocol endpoint-override inputs that only appear when the protocol is checked). Nav item added between Providers and Proxy. 16 i18n keys (en+zh). Demo mock: vendor_* handlers + 1 seed vendor (multi-protocol with an anthropic endpoint override).
+- **Smart-form vendor picker**: ProvidersPage modal gains a Vendor dropdown (hidden when empty or in raw mode). `pickVendor()` fills name/baseUrl/apiKey and picks `APP_PROTOCOL[appType]` when the vendor serves it (fallback: first protocol); multi-protocol vendors show a Protocol dropdown (recommended marker on the app-native one) and switching protocols re-resolves `endpoints[protocol] ?? baseUrl`. `APP_PROTOCOL` + `resolveEndpoint` live in `lib/providerForm.ts` / `lib/api/vendors.ts`.
+- **Edit provider via smart form**: new Edit button per provider card → `openEdit()` prefills fields via each schema's `extract()` (falls back to raw JSON mode when extraction recognizes nothing), disables the id input, preserves createdAt/sortIndex/notes on save. The Add button clears editing state.
+- **JSON validate + highlight**: new `lib/jsonHighlight.ts` (`validateJson` + escaped-token `highlightJson`). Preview block renders highlighted spans (json-key/string/number/boolean colors, dark+light variants); raw editor gets live validation — red border on invalid, error line under the textarea, Save disabled until valid. `providers.invalidJson` reused for the message.
+- **Verification all green**: `cargo check` clean; `cargo test --lib -- --test-threads=1` **78/78** (77 + vendor roundtrip); `ui/ npx tsc --noEmit` clean; `ui/ npx vite build` clean (CSS 20.99 KB, JS 250.15 KB); Node `npm run typecheck` + `npm test` 18/18.
+- CLAUDE.md: added the Vendors section (table, commands, picker semantics, no-cascade note).

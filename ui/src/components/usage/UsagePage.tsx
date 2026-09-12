@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useT } from '../../lib/ctx';
 import {
   getUsageByModel,
   getUsageByProvider,
@@ -11,11 +12,11 @@ import {
 
 type RangePreset = '24h' | '7d' | '30d' | 'all';
 
-const PRESETS: { value: RangePreset; label: string }[] = [
-  { value: '24h', label: '24h' },
-  { value: '7d', label: '7d' },
-  { value: '30d', label: '30d' },
-  { value: 'all', label: 'All time' },
+const PRESETS: { value: RangePreset; key: string }[] = [
+  { value: '24h', key: 'usage.range.24h' },
+  { value: '7d',  key: 'usage.range.7d'  },
+  { value: '30d', key: 'usage.range.30d' },
+  { value: 'all', key: 'usage.range.all' },
 ];
 
 function presetToSince(preset: RangePreset): number | null {
@@ -38,6 +39,7 @@ function formatCost(usd: number): string {
 }
 
 export function UsagePage() {
+  const t = useT();
   const [preset, setPreset] = useState<RangePreset>('7d');
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [byModel, setByModel] = useState<ModelUsage[]>([]);
@@ -94,7 +96,7 @@ export function UsagePage() {
   return (
     <div className="usage-page">
       <header className="page-header">
-        <h2>Usage</h2>
+        <h2>{t('usage.title')}</h2>
         <div className="usage-controls">
           {PRESETS.map((p) => (
             <button
@@ -102,11 +104,11 @@ export function UsagePage() {
               className={preset === p.value ? 'tab active' : 'tab'}
               onClick={() => setPreset(p.value)}
             >
-              {p.label}
+              {t(p.key)}
             </button>
           ))}
           <button className="btn" onClick={handleSeedSample} title="Insert a sample record (dev)">
-            + Sample
+            {t('usage.sample')}
           </button>
         </div>
       </header>
@@ -117,34 +119,34 @@ export function UsagePage() {
       <section className="usage-kpi-row">
         {summary ? (
           <>
-            <KpiCard label="Requests" value={String(summary.totalRequests)} />
-            <KpiCard label="Total tokens" value={formatTokens(summary.totalTokens)} />
-            <KpiCard label="Prompt" value={formatTokens(summary.totalPromptTokens)} />
-            <KpiCard label="Completion" value={formatTokens(summary.totalCompletionTokens)} />
-            <KpiCard label="Cost" value={formatCost(summary.totalCostUsd)} />
+            <KpiCard label={t('usage.kpi.requests')}  value={String(summary.totalRequests)} />
+            <KpiCard label={t('usage.kpi.totalTokens')} value={formatTokens(summary.totalTokens)} />
+            <KpiCard label={t('usage.kpi.prompt')}     value={formatTokens(summary.totalPromptTokens)} />
+            <KpiCard label={t('usage.kpi.completion')} value={formatTokens(summary.totalCompletionTokens)} />
+            <KpiCard label={t('usage.kpi.cost')}       value={formatCost(summary.totalCostUsd)} />
             <KpiCard
-              label="Avg duration"
+              label={t('usage.kpi.avgDuration')}
               value={`${Math.round(summary.avgDurationMs)}ms`}
             />
           </>
         ) : (
-          <p className="muted">{loading ? 'Loading…' : 'No data.'}</p>
+          <p className="muted">{loading ? t('common.loading') : t('common.error', { message: '' }) || 'No data.'}</p>
         )}
       </section>
 
       <div className="usage-tables">
         <section className="usage-table-section">
-          <h4>By model</h4>
+          <h4>{t('usage.byModel')}</h4>
           {byModel.length === 0 ? (
             <p className="muted">No usage records in this range.</p>
           ) : (
             <table className="usage-table">
               <thead>
                 <tr>
-                  <th>Model</th>
-                  <th>Requests</th>
-                  <th>Tokens</th>
-                  <th>Cost</th>
+                  <th>{t('usage.col.model')}</th>
+                  <th>{t('usage.col.requests')}</th>
+                  <th>{t('usage.col.tokens')}</th>
+                  <th>{t('usage.col.cost')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -162,17 +164,17 @@ export function UsagePage() {
         </section>
 
         <section className="usage-table-section">
-          <h4>By provider</h4>
+          <h4>{t('usage.byProvider')}</h4>
           {byProvider.length === 0 ? (
             <p className="muted">No usage records in this range.</p>
           ) : (
             <table className="usage-table">
               <thead>
                 <tr>
-                  <th>Provider</th>
-                  <th>Requests</th>
-                  <th>Tokens</th>
-                  <th>Cost</th>
+                  <th>{t('usage.col.provider')}</th>
+                  <th>{t('usage.col.requests')}</th>
+                  <th>{t('usage.col.tokens')}</th>
+                  <th>{t('usage.col.cost')}</th>
                 </tr>
               </thead>
               <tbody>

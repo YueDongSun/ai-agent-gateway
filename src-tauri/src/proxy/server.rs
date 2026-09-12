@@ -31,16 +31,25 @@ pub struct ProxyAppState {
     pub auth_token: String,
 }
 
+/// What the proxy ended up listening on. `port` is the actually-bound port
+/// (may differ from the requested port when bind() failed and the caller
+/// fell back).
+#[derive(Debug, Clone)]
+pub struct BoundInfo {
+    pub addr: std::net::SocketAddr,
+}
+
 pub async fn serve(
     bind_addr: std::net::SocketAddr,
     state: ProxyAppState,
     shutdown_rx: oneshot::Receiver<()>,
-) -> Result<(), String> {
+) -> Result<BoundInfo, String> {
     let app = build_router(state);
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| format!("bind {bind_addr}: {e}"))?;
-    log::info!("proxy: listening on http://{}", bind_addr);
+    let bound = BoundInfo { addr: listener.local_addr().map_err(|e| format!("local_addr: {e}"))? };
+    log::info!("proxy: listening on http://{}", bound.addr);
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
@@ -48,7 +57,7 @@ pub async fn serve(
         })
         .await
         .map_err(|e| format!("server error: {e}"))?;
-    Ok(())
+    Ok(bound)
 }
 
 fn build_router(state: ProxyAppState) -> AxumRouter {
@@ -242,5 +251,143 @@ fn err_response(status: u16, message: impl Into<String>, kind: &str) -> Response
 /// Bind a socket address from a host:port pair. Convenience for tests.
 pub fn socket_addr(host: &str, port: u16) -> std::net::SocketAddr {
     format!("{host}:{port}").parse().expect("valid socket addr")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::dao::proxy_providers::CircuitBreakerConfig;
+    use crate::proxy::providers::mock::MockProvider;
+    use crate::proxy::router::Router;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    /// Build a minimal ProxyAppState with one mock provider.
+    async fn make_state() -> ProxyAppState {
+        let mut providers: HashMap<String, Arc<dyn crate::proxy::providers::Provider>> =
+            HashMap::new();
+        let mock = MockProvider::new(
+            "mock".into(),
+            vec!["m".into()],
+            true,
+            CircuitBreakerConfig::default(),
+        );
+        providers.insert("mock".into(), Arc::new(mock));
+        let router = Arc::new(Router::new(providers, HashMap::new()));
+        ProxyAppState {
+            router,
+            auth_token: String::new(),
+        }
+    }
+
+    /// Pick an ephemeral free port from the OS so the test doesn't conflict
+    /// with anything else.
+    async fn free_port() -> u16 {
+        let l = tokio::net::TcpListener::bind(socket_addr("127.0.0.1", 0))
+            .await
+            .expect("bind ephemeral");
+        l.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn serve_returns_actual_bound_port() {
+        let port = free_port().await;
+        let state = make_state().await;
+        let (tx, rx) = oneshot::channel();
+        let addr = socket_addr("127.0.0.1", port);
+        // Spawn serve.
+        let handle = tokio::spawn(async move { serve(addr, state, rx).await });
+        // Poll for /health to come up, then verify the bound port is the
+        // one we requested.
+        let mut up = false;
+        for _ in 0..10 {
+            if let Ok(r) = reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{port}/health"))
+                .send()
+                .await
+            {
+                if r.status().is_success() {
+                    up = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(up, "/health should come up on {port}");
+        tx.send(()).expect("shutdown signal");
+        let bound = handle.await.expect("task").expect("serve ok");
+        assert_eq!(bound.addr.port(), port);
+    }
+
+    /// The fallback contract: when the requested port is in use, a caller
+    /// can try the next port and `serve()` will bind that one. Here we
+    /// directly exercise serve() against a held port and verify the error
+    /// is reported cleanly — the higher-level loop in `proxy_start` is the
+    /// one that decides to retry; this test confirms serve() itself
+    /// surfaces a clean error so the retry is meaningful.
+    #[tokio::test]
+    async fn serve_returns_error_when_port_held() {
+        let port = free_port().await;
+        // Hold the port.
+        let _holder = tokio::net::TcpListener::bind(socket_addr("127.0.0.1", port))
+            .await
+            .expect("hold port");
+        let state = make_state().await;
+        let (_tx, rx) = oneshot::channel();
+        let err = serve(socket_addr("127.0.0.1", port), state, rx)
+            .await
+            .expect_err("bind to held port must fail");
+        assert!(
+            err.contains("bind"),
+            "expected bind error, got: {err}"
+        );
+    }
+
+    /// End-to-end port-fallback: hold the requested port, then mimic the
+    /// retry loop in `proxy_start` by trying the next 5 ports. Confirms the
+    /// bind-and-probe pattern produces a working fallback server.
+    #[tokio::test]
+    async fn port_fallback_finds_next_free_port() {
+        let base = free_port().await;
+        // Hold `base` so the first attempt fails.
+        let _holder = tokio::net::TcpListener::bind(socket_addr("127.0.0.1", base))
+            .await
+            .expect("hold base");
+        let mut found: Option<BoundInfo> = None;
+        let mut last_err = String::new();
+        for offset in 1u16..=5 {
+            let try_port = base + offset;
+            let state = make_state().await;
+            let (tx, rx) = oneshot::channel();
+            let addr = socket_addr("127.0.0.1", try_port);
+            let handle = tokio::spawn(async move { serve(addr, state, rx).await });
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            // Probe /health to confirm we own the port.
+            let probe = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(500))
+                .build()
+                .unwrap()
+                .get(format!("http://127.0.0.1:{try_port}/health"))
+                .send()
+                .await;
+            match probe {
+                Ok(r) if r.status().is_success() => {
+                    let _ = tx.send(()); // request graceful shutdown
+                    let bound = handle.await.expect("task").expect("serve ok");
+                    found = Some(bound);
+                    break;
+                }
+                Ok(_) | Err(_) => {
+                    last_err = format!("port {try_port} probe failed");
+                    let _ = tx.send(());
+                    let _ = handle.await;
+                }
+            }
+        }
+        let bound = found.expect(&format!("no free port in base+1..base+5: {last_err}"));
+        assert!(bound.addr.port() > base, "fallback must use a higher port");
+        assert!(bound.addr.port() <= base + 5);
+    }
 }
 

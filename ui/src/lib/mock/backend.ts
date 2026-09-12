@@ -33,20 +33,23 @@ import type {
 } from '../api/usage';
 import type { SyncConfig } from '../api/sync';
 import type { ProxyProvider, Route } from '../api/proxy';
-import type { DeeplinkAction } from '../api/deeplink';
+import type { Vendor } from '../api/vendors';
 
-// Official Claude model ids — mirrors src-tauri/src/proxy/models.rs
-// OFFICIAL_MODELS. Kept in sync so the browser demo advertises the same
-// model list the Rust backend serves.
-const OFFICIAL_CLAUDE_MODELS = [
-  'claude-fable-5',
-  'claude-opus-4-8',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
-  'claude-sonnet-5',
-  'claude-sonnet-4-6',
-  'claude-haiku-4-5',
+// Vendor seed — mirrors a realistic multi-protocol supplier: one key,
+// three protocols, one per-protocol endpoint override.
+const vendors: Vendor[] = [
+  {
+    id: 'acme-relay',
+    name: 'Acme Relay',
+    baseUrl: 'https://api.acme.dev',
+    apiKey: 'sk-acme-demo',
+    protocols: ['anthropic', 'openai-chat'],
+    endpoints: { anthropic: 'https://api.acme.dev/anthropic' },
+    createdAt: Math.floor(Date.now() / 1000) - 86400 * 5,
+  },
 ];
+import type { DeeplinkAction } from '../api/deeplink';
+import { OFFICIAL_CLAUDE_MODELS } from '../models';
 
 interface TauriInternals {
   runCallback: (id: number, data: unknown) => void;
@@ -697,6 +700,23 @@ export function installMockBackend() {
       case 'usage_by_provider': {
         const filter = p as { since?: number | null; until?: number | null; appId?: string | null };
         return byProvider(filterRecords(filter));
+      }
+
+      // ---- vendors ----
+      case 'vendor_list':
+        return vendors;
+      case 'vendor_save': {
+        const v = p.vendor as Vendor;
+        const idx = vendors.findIndex((x) => x.id === v.id);
+        if (idx >= 0) vendors[idx] = v;
+        else vendors.push(v);
+        return null;
+      }
+      case 'vendor_delete': {
+        const idx = vendors.findIndex((x) => x.id === p.id);
+        if (idx < 0) throw new Error(`vendor "${p.id}" not found`);
+        vendors.splice(idx, 1);
+        return null;
       }
 
       // ---- sync ----

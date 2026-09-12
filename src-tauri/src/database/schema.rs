@@ -239,6 +239,24 @@ impl Database {
             [],
         )?;
 
+        // 13. Vendors - unified upstream API supplier management. One vendor
+        //     may serve multiple protocols (anthropic, openai-chat,
+        //     openai-responses) sharing a single API key. `endpoints` is a
+        //     JSON object { protocol -> url } overriding `base_url` per
+        //     protocol; `protocols` is a JSON array of enabled protocol ids.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vendors (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL DEFAULT '',
+                api_key TEXT NOT NULL DEFAULT '',
+                protocols TEXT NOT NULL DEFAULT '[]',
+                endpoints TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -319,6 +337,14 @@ impl Database {
         if version < 9 {
             conn.execute_batch("PRAGMA user_version = 9;")?;
             version = 9;
+        }
+
+        // v9 -> v10: vendors table (unified upstream supplier management).
+        // Already created above via IF NOT EXISTS, so for existing v9 DBs we
+        // just stamp the version.
+        if version < 10 {
+            conn.execute_batch("PRAGMA user_version = 10;")?;
+            version = 10;
         }
 
         if version != SCHEMA_VERSION {

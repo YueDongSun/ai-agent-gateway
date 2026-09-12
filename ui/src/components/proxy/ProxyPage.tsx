@@ -15,8 +15,11 @@ import {
   type ProxyStatus,
   type Route,
 } from '../../lib/api/proxy';
+import { officialDisplayName } from '../../lib/models';
+import { useT } from '../../lib/ctx';
 
 export function ProxyPage() {
+  const t = useT();
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [health, setHealth] = useState<ProxyHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +35,7 @@ export function ProxyPage() {
       setProviders(ps);
       setRoutes(rs);
     } catch (e) {
-      setError(`failover config load failed: ${String(e)}`);
+      setError(t('proxy.failover.loadFailed', { message: String(e) }));
     }
   };
 
@@ -58,7 +61,7 @@ export function ProxyPage() {
       setError(null);
     } catch (e) {
       setHealth(null);
-      setError(`proxy unreachable: ${String(e)}`);
+      setError(t('proxy.unreachable', { message: String(e) }));
     }
   };
 
@@ -102,7 +105,7 @@ export function ProxyPage() {
       await stopProxy();
       const s = await refreshStatus();
       setHealth(null);
-      setError(`stopped (config: ${s?.config.host ?? '?'}:${s?.config.port ?? '?'})`);
+      setError(t('proxy.stopped.config', { host: s?.config.host ?? '?', port: s?.config.port ?? '?' }));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -119,7 +122,7 @@ export function ProxyPage() {
       await saveProxyProvider(providerForm);
       setProviderForm(null);
       await refreshFailover();
-      setError('Provider saved. Restart the proxy for it to take effect.');
+      setError(t('proxy.provider.saved'));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -128,13 +131,13 @@ export function ProxyPage() {
   };
 
   const handleDeleteProvider = async (id: string) => {
-    if (!confirm(`Delete proxy provider "${id}"?`)) return;
+    if (!confirm(t('proxy.provider.deleteConfirm', { id }))) return;
     setBusy(true);
     setError(null);
     try {
       await deleteProxyProvider(id);
       await refreshFailover();
-      setError('Provider deleted. Restart the proxy for it to take effect.');
+      setError(t('proxy.provider.deleted'));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -150,7 +153,7 @@ export function ProxyPage() {
       await saveRoute(routeForm);
       setRouteForm(null);
       await refreshFailover();
-      setError('Route saved. Restart the proxy for it to take effect.');
+      setError(t('proxy.route.saved'));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -159,13 +162,13 @@ export function ProxyPage() {
   };
 
   const handleDeleteRoute = async (alias: string) => {
-    if (!confirm(`Delete route "${alias}"?`)) return;
+    if (!confirm(t('proxy.route.deleteConfirm', { alias }))) return;
     setBusy(true);
     setError(null);
     try {
       await deleteRoute(alias);
       await refreshFailover();
-      setError('Route deleted. Restart the proxy for it to take effect.');
+      setError(t('proxy.route.deleted'));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -197,15 +200,15 @@ export function ProxyPage() {
   return (
     <div className="proxy-page">
       <header className="page-header">
-        <h2>Local Proxy</h2>
+        <h2>{t('proxy.title')}</h2>
         <div className="proxy-actions">
           {!running ? (
             <button className="btn primary" onClick={handleStart} disabled={busy}>
-              Start
+              {t('proxy.start')}
             </button>
           ) : (
             <button className="btn danger" onClick={handleStop} disabled={busy}>
-              Stop
+              {t('proxy.stop')}
             </button>
           )}
         </div>
@@ -216,7 +219,7 @@ export function ProxyPage() {
       <section className="proxy-status-card">
         <div className="status-row">
           <span className={running ? 'pill on' : 'pill off'}>
-            {running ? '● running' : '○ stopped'}
+            {running ? t('proxy.running') : t('proxy.stopped')}
           </span>
           {cfg && (
             <code className="endpoint">
@@ -228,29 +231,29 @@ export function ProxyPage() {
         {running && health && (
           <>
             <div className="meta-row">
-              <span className="muted">Models:</span>
+              <span className="muted">{t('proxy.models')}</span>
               {health.models.map((m) => (
-                <code key={m} className="model-chip">
+                <code key={m} className="model-chip" title={officialDisplayName(m) ?? undefined}>
                   {m}
                 </code>
               ))}
             </div>
-            <h4>Providers</h4>
+            <h4>{t('proxy.providers')}</h4>
             <table className="provider-health">
               <thead>
                 <tr>
-                  <th>ID</th>
-                  <th>Enabled</th>
-                  <th>Breaker</th>
-                  <th>Failures</th>
-                  <th>Successes</th>
+                  <th>{t('proxy.col.id')}</th>
+                  <th>{t('proxy.col.enabled')}</th>
+                  <th>{t('proxy.col.breaker')}</th>
+                  <th>{t('proxy.col.failures')}</th>
+                  <th>{t('proxy.col.successes')}</th>
                 </tr>
               </thead>
               <tbody>
                 {health.providers.map((p) => (
                   <tr key={p.id}>
                     <td><code>{p.id}</code></td>
-                    <td>{p.enabled ? 'yes' : 'no'}</td>
+                    <td>{p.enabled ? t('proxy.col.yes') : t('proxy.col.no')}</td>
                     <td>
                       <span className={`pill ${p.breaker.state}`}>
                         {p.breaker.state}
@@ -267,29 +270,29 @@ export function ProxyPage() {
 
         {!running && (
           <p className="muted">
-            Click <strong>Start</strong> to launch the proxy on the configured
-            host:port. Default seed config gives you two mock providers and three
-            routes (<code>claude-sonnet-4</code>, <code>gpt-4o</code>,{' '}
-            <code>mock-fail</code>).
+            {t('proxy.stoppedHint', {
+              sonnet: 'claude-sonnet-4',
+              gpt: 'gpt-4o',
+              fail: 'mock-fail',
+              fable: 'claude-fable-5',
+              opus: 'claude-opus-4-8',
+            })}
           </p>
         )}
       </section>
 
       {/* ── Failover configuration (providers + routes) ── */}
       <section className="proxy-failover">
-        <h3>Failover configuration</h3>
+        <h3>{t('proxy.failover.title')}</h3>
         <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-          Add upstream providers (mock / openai / anthropic) and build model
-          alias → provider-chain routes. When the first hop fails, the proxy
-          falls back to the next. Saving here updates the DB; restart the proxy
-          to rebuild the router.
+          {t('proxy.failover.desc')}
         </p>
 
         <div className="failover-grid">
           {/* Proxy providers */}
           <div className="failover-col">
             <div className="list-header">
-              <h4>Proxy providers</h4>
+              <h4>{t('proxy.failover.providers')}</h4>
               <button
                 className="btn primary"
                 onClick={() =>
@@ -313,11 +316,11 @@ export function ProxyPage() {
                 }
                 disabled={busy}
               >
-                + Add
+                {t('proxy.failover.add')}
               </button>
             </div>
             {providers.length === 0 ? (
-              <p className="muted">No proxy providers.</p>
+              <p className="muted">{t('proxy.failover.empty.providers')}</p>
             ) : (
               <ul className="failover-provider-list">
                 {providers.map((p) => (
@@ -326,9 +329,9 @@ export function ProxyPage() {
                       <strong>{p.id}</strong>{' '}
                       <span className="muted">({p.type})</span>
                       <div className="muted" style={{ fontSize: 11 }}>
-                        {p.baseURL || '(mock)'} · models: {p.models.join(', ') || '-'}
+                        {p.baseURL || t('proxy.failover.mock')} · {p.models.length > 0 ? t('proxy.failover.models', { list: p.models.join(', ') }) : t('proxy.failover.modelsNone')}
                         {' · '}
-                        {p.enabled ? 'enabled' : 'disabled'}
+                        {p.enabled ? t('proxy.failover.enabled') : t('proxy.failover.disabled')}
                       </div>
                     </div>
                     <div className="failover-provider-actions">
@@ -337,14 +340,14 @@ export function ProxyPage() {
                         onClick={() => setProviderForm({ ...p, models: [...p.models] })}
                         disabled={busy}
                       >
-                        Edit
+                        {t('common.edit')}
                       </button>
                       <button
                         className="btn danger"
                         onClick={() => handleDeleteProvider(p.id)}
                         disabled={busy}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </li>
@@ -356,7 +359,7 @@ export function ProxyPage() {
           {/* Routes */}
           <div className="failover-col">
             <div className="list-header">
-              <h4>Routes (alias → failover chain)</h4>
+              <h4>{t('proxy.failover.routes')}</h4>
               <button
                 className="btn primary"
                 onClick={() =>
@@ -364,45 +367,54 @@ export function ProxyPage() {
                 }
                 disabled={busy}
               >
-                + Add
+                {t('proxy.failover.add')}
               </button>
             </div>
             {routes.length === 0 ? (
-              <p className="muted">No routes.</p>
+              <p className="muted">{t('proxy.failover.empty.routes')}</p>
             ) : (
               <ul className="failover-route-list">
-                {routes.map((r) => (
-                  <li key={r.alias} className="failover-route">
-                    <div>
-                      <code>{r.alias}</code>
-                      <div className="muted" style={{ fontSize: 11 }}>
-                        {r.hops.map((h) => `${h.provider}/${h.model}`).join(' → ')}
+                {routes.map((r) => {
+                  const display = officialDisplayName(r.alias);
+                  return (
+                    <li key={r.alias} className="failover-route">
+                      <div>
+                        <code>{r.alias}</code>
+                        {display && <span className="muted"> — {display}</span>}
+                        {display && (
+                          <span className="pill off" style={{ marginLeft: 6, fontSize: 10 }}>
+                            {t('proxy.route.official')}
+                          </span>
+                        )}
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          {r.hops.map((h) => `${h.provider}/${h.model}`).join(' → ')}
+                        </div>
                       </div>
-                    </div>
-                    <div className="failover-provider-actions">
-                      <button
-                        className="btn"
-                        onClick={() =>
-                          setRouteForm({
-                            alias: r.alias,
-                            description: r.description ?? '',
-                            hops: r.hops.map((h) => ({ ...h })),
-                          })
-                        }
-                        disabled={busy}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="btn danger"
-                        onClick={() => handleDeleteRoute(r.alias)}
-                        disabled={busy}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                      <div className="failover-provider-actions">
+                        <button
+                          className="btn"
+                          onClick={() =>
+                            setRouteForm({
+                              alias: r.alias,
+                              description: r.description ?? '',
+                              hops: r.hops.map((h) => ({ ...h })),
+                            })
+                          }
+                          disabled={busy}
+                        >
+                          {t('common.edit')}
+                        </button>
+                        <button
+                          className="btn danger"
+                          onClick={() => handleDeleteRoute(r.alias)}
+                          disabled={busy}
+                        >
+                          {t('common.delete')}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
@@ -413,9 +425,9 @@ export function ProxyPage() {
       {providerForm && (
         <div className="modal-backdrop" onClick={() => setProviderForm(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{providerForm.id ? `Edit provider: ${providerForm.id}` : 'Add proxy provider'}</h3>
+            <h3>{providerForm.id ? t('proxy.modal.provider.edit', { id: providerForm.id }) : t('proxy.modal.provider.add')}</h3>
             <label>
-              <span>ID</span>
+              <span>{t('proxy.modal.provider.id')}</span>
               <input
                 value={providerForm.id}
                 onChange={(e) => setProviderForm({ ...providerForm, id: e.target.value })}
@@ -423,14 +435,14 @@ export function ProxyPage() {
               />
             </label>
             <label>
-              <span>Name</span>
+              <span>{t('proxy.modal.provider.name')}</span>
               <input
                 value={providerForm.name}
                 onChange={(e) => setProviderForm({ ...providerForm, name: e.target.value })}
               />
             </label>
             <label>
-              <span>Type</span>
+              <span>{t('proxy.modal.provider.type')}</span>
               <select
                 value={providerForm.type}
                 onChange={(e) => setProviderForm({ ...providerForm, type: e.target.value })}
@@ -443,7 +455,7 @@ export function ProxyPage() {
             {providerForm.type !== 'mock' && (
               <>
                 <label>
-                  <span>Base URL (endpoint)</span>
+                  <span>{t('proxy.modal.provider.baseUrl')}</span>
                   <input
                     value={providerForm.baseURL}
                     onChange={(e) => setProviderForm({ ...providerForm, baseURL: e.target.value })}
@@ -451,7 +463,7 @@ export function ProxyPage() {
                   />
                 </label>
                 <label>
-                  <span>API key</span>
+                  <span>{t('proxy.modal.provider.apiKey')}</span>
                   <input
                     type="password"
                     value={providerForm.apiKey}
@@ -461,7 +473,7 @@ export function ProxyPage() {
               </>
             )}
             <label>
-              <span>Models (comma-separated)</span>
+              <span>{t('proxy.modal.provider.models')}</span>
               <input
                 value={providerForm.models.join(', ')}
                 onChange={(e) =>
@@ -470,7 +482,7 @@ export function ProxyPage() {
                     models: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
                   })
                 }
-                placeholder="claude-sonnet-4, gpt-4o"
+                placeholder={t('proxy.modal.provider.modelsPlaceholder')}
               />
             </label>
             <label className="checkbox-label">
@@ -479,16 +491,16 @@ export function ProxyPage() {
                 checked={providerForm.enabled}
                 onChange={(e) => setProviderForm({ ...providerForm, enabled: e.target.checked })}
               />
-              <span>Enabled</span>
+              <span>{t('proxy.modal.provider.enabled')}</span>
             </label>
             <div className="modal-actions">
-              <button className="btn" onClick={() => setProviderForm(null)}>Cancel</button>
+              <button className="btn" onClick={() => setProviderForm(null)}>{t('proxy.modal.provider.cancel')}</button>
               <button
                 className="btn primary"
                 onClick={handleSaveProvider}
                 disabled={busy || !providerForm.id || !providerForm.name}
               >
-                Save
+                {t('proxy.modal.provider.save')}
               </button>
             </div>
           </div>
@@ -499,9 +511,9 @@ export function ProxyPage() {
       {routeForm && (
         <div className="modal-backdrop" onClick={() => setRouteForm(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{routeForm.alias ? `Edit route: ${routeForm.alias}` : 'Add route'}</h3>
+            <h3>{routeForm.alias ? t('proxy.modal.route.edit', { alias: routeForm.alias }) : t('proxy.modal.route.add')}</h3>
             <label>
-              <span>Alias (model name clients request)</span>
+              <span>{t('proxy.modal.route.alias')}</span>
               <input
                 value={routeForm.alias}
                 onChange={(e) => setRouteForm({ ...routeForm, alias: e.target.value })}
@@ -509,21 +521,21 @@ export function ProxyPage() {
               />
             </label>
             <label>
-              <span>Description</span>
+              <span>{t('proxy.modal.route.description')}</span>
               <input
                 value={routeForm.description ?? ''}
                 onChange={(e) => setRouteForm({ ...routeForm, description: e.target.value })}
               />
             </label>
             <div className="route-hops">
-              <span className="muted">Hops (fallback order)</span>
+              <span className="muted">{t('proxy.modal.route.hops')}</span>
               {routeForm.hops.map((h, i) => (
                 <div key={i} className="route-hop-row">
                   <select
                     value={h.provider}
                     onChange={(e) => updateHop(i, { provider: e.target.value })}
                   >
-                    <option value="">(provider)</option>
+                    <option value="">{t('proxy.modal.route.providerPlaceholder')}</option>
                     {providers.map((p) => (
                       <option key={p.id} value={p.id}>{p.id}</option>
                     ))}
@@ -531,7 +543,7 @@ export function ProxyPage() {
                   <input
                     value={h.model}
                     onChange={(e) => updateHop(i, { model: e.target.value })}
-                    placeholder="model"
+                    placeholder={t('proxy.modal.route.modelPlaceholder')}
                   />
                   <button className="btn danger" onClick={() => removeHop(i)} disabled={routeForm.hops.length <= 1}>
                     ×
@@ -539,17 +551,17 @@ export function ProxyPage() {
                 </div>
               ))}
               <button className="btn" onClick={addRouteHop} disabled={busy}>
-                + Add hop
+                {t('proxy.modal.route.addHop')}
               </button>
             </div>
             <div className="modal-actions">
-              <button className="btn" onClick={() => setRouteForm(null)}>Cancel</button>
+              <button className="btn" onClick={() => setRouteForm(null)}>{t('proxy.modal.route.cancel')}</button>
               <button
                 className="btn primary"
                 onClick={handleSaveRoute}
                 disabled={busy || !routeForm.alias || routeForm.hops.some((h) => !h.provider || !h.model)}
               >
-                Save
+                {t('proxy.modal.route.save')}
               </button>
             </div>
           </div>

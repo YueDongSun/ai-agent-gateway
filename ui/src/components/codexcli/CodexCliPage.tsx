@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../../lib/ctx';
 import {
   codexCliStatus,
   codexOpenCliTerminal,
@@ -12,6 +13,7 @@ const KEY_CODEX_CLI_HOME = 'codex_cli_home';
 const KEY_OUTBOUND_PROXY = 'outbound_proxy';
 
 export function CodexCliPage() {
+  const t = useT();
   const [status, setStatus] = useState<CodexCliStatus | null>(null);
   const [cliHome, setCliHome] = useState('');
   const [proxy, setProxy] = useState('');
@@ -89,7 +91,7 @@ export function CodexCliPage() {
 
   return (
     <section className="codexcli-page">
-      <h2>Codex CLI Isolated Agent</h2>
+      <h2>{t('codexcli.title')}</h2>
       <p className="codexcli-desc">
         Gives Codex CLI its own dedicated configuration directory (an independent CODEX_HOME),
         fully isolated from the Codex desktop app's shared{' '}
@@ -103,9 +105,9 @@ export function CodexCliPage() {
       {s && (
         <div className="codexcli-status">
           <div className="codexcli-status-row">
-            <span className="codexcli-status-key">codex CLI</span>
+            <span className="codexcli-status-key">{t('codexcli.binaryPath')}</span>
             <span className="codexcli-status-val">
-              {s.codexBinary ?? 'Not found (please confirm codex is installed)'}
+              {s.codexBinary ?? t('codexcli.statusBinaryMissing')}
             </span>
           </div>
           <div className="codexcli-status-row">
@@ -113,27 +115,27 @@ export function CodexCliPage() {
             <span className="codexcli-status-val mono">{s.configDir}</span>
           </div>
           <div className="codexcli-status-row">
-            <span className="codexcli-status-key">Isolation status</span>
+            <span className="codexcli-status-key">{t('codexcli.status')}</span>
             <span className="codexcli-status-val">
               {s.isolationEnabled ? (
-                <span className="tag tag-green">Isolated</span>
+                <span className="tag tag-green">{t('codexcli.statusInitialized')}</span>
               ) : (
-                <span className="tag tag-gray">Not isolated (shared with the desktop app)</span>
+                <span className="tag tag-gray">{t('codexcli.statusNotInitialized')}</span>
               )}
             </span>
           </div>
           <div className="codexcli-status-row">
-            <span className="codexcli-status-key">Current Codex provider</span>
+            <span className="codexcli-status-key">{t('codexcli.currentProvider')}</span>
             <span className="codexcli-status-val">
               {s.currentProviderName
                 ? `${s.currentProviderName} (${s.currentProviderId})`
-                : 'Not switched (takes effect after selecting a Codex provider on the Providers page)'}
+                : t('codexcli.statusNotInitialized')}
             </span>
           </div>
           <div className="codexcli-status-row">
             <span className="codexcli-status-key">Directory initialized</span>
             <span className="codexcli-status-val">
-              {s.initialized ? 'Yes' : 'No (you need to log in once in the CLI on first run)'}
+              {s.initialized ? t('codexcli.statusInitialized') : t('codexcli.statusNotInitialized')}
             </span>
           </div>
         </div>
@@ -144,7 +146,7 @@ export function CodexCliPage() {
           <h4>First-time setup guide</h4>
           <p>
             The isolated directory <code>{s.configDir}</code> has not been initialized yet.
-            Click the “Open Codex CLI terminal with proxy” button below and complete a one-time{' '}
+            Click the "Open Codex CLI terminal" button below and complete a one-time{' '}
             <code>codex</code> login in the terminal that opens (on first launch it will
             automatically create config.toml and auth.json). After that you can switch Codex
             providers on the Providers page; configuration is written to the isolated
@@ -155,56 +157,47 @@ export function CodexCliPage() {
             onClick={handleOpenTerminal}
             disabled={busy === 'terminal'}
           >
-            {busy === 'terminal' ? 'Starting…' : 'Open Codex CLI terminal to finish setup'}
+            {busy === 'terminal' ? t('common.loading') : t('codexcli.openTerminal')}
           </button>
         </div>
       )}
 
       <div className="codexcli-field">
         <label>
-          Codex CLI configuration directory (CODEX_HOME)
+          {t('codexcli.codexHome')}
           <input
             type="text"
             className="codexcli-input"
             value={cliHome}
             onChange={(e) => setCliHome(e.target.value)}
-            placeholder="e.g. C:\Users\you\.codex-cli (blank = share ~/.codex with the desktop app)"
+            placeholder={t('codexcli.placeholder.codexHome')}
           />
         </label>
-        <p className="codexcli-hint">
-          Once an isolated directory is set, AAG writes Codex's live configuration
-          (config.toml / auth.json) into that directory, and the desktop app's{' '}
-          <code>~/.codex</code> is no longer touched.
-        </p>
       </div>
 
       <div className="codexcli-field">
         <label>
-          Global outbound proxy (optional, injected into the CLI terminal)
+          {t('codexcli.outboundProxy')}
           <input
             type="text"
             className="codexcli-input"
             value={proxy}
             onChange={(e) => setProxy(e.target.value)}
-            placeholder="e.g. http://127.0.0.1:7890 (blank = direct connection)"
+            placeholder={t('codexcli.placeholder.proxy')}
           />
         </label>
-        <p className="codexcli-hint">
-          Injects HTTP_PROXY / HTTPS_PROXY / ALL_PROXY when launching the CLI terminal;
-          NO_PROXY is set to localhost/127.0.0.1 by default.
-        </p>
       </div>
 
       <div className="codexcli-actions">
         <button className="btn" onClick={handleSave} disabled={busy === 'save'}>
-          {busy === 'save' ? 'Saving…' : 'Save settings'}
+          {busy === 'save' ? t('common.loading') : t('codexcli.save')}
         </button>
         <button
           className="btn btn-primary"
           onClick={handleOpenTerminal}
           disabled={busy === 'terminal'}
         >
-          {busy === 'terminal' ? 'Starting…' : 'Open Codex CLI terminal with proxy'}
+          {busy === 'terminal' ? t('common.loading') : t('codexcli.openTerminal')}
         </button>
       </div>
 
@@ -225,7 +218,7 @@ export function CodexCliPage() {
           onClick={handleOpenCopilotTerminal}
           disabled={busy === 'copilot'}
         >
-          {busy === 'copilot' ? 'Starting…' : 'Open Copilot CLI terminal with proxy'}
+          {busy === 'copilot' ? t('common.loading') : t('codexcli.openTerminal')}
         </button>
         {copilotMsg && <div className="codexcli-notice">{copilotMsg}</div>}
       </div>
