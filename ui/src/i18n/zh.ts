@@ -63,7 +63,6 @@ export const zh: Record<string, string> = {
   'providers.add': '+ 添加 Provider',
   'providers.empty': '暂无 Provider。点击「添加 Provider」创建。',
   'providers.current': '当前',
-  'providers.switch': '切换',
   'providers.delete': '删除',
   'providers.edit': '编辑',
   'providers.modal.add': '添加 Provider',
@@ -79,8 +78,6 @@ export const zh: Record<string, string> = {
   'providers.invalidJson': 'settingsConfig 必须是合法 JSON：{message}',
   'providers.saved': 'Provider 已保存。',
   'providers.deleted': 'Provider 已删除。',
-  'providers.switched': '已切换到 {name}。写入 {count} 个文件。',
-  'providers.switchedCodex': '已切换到 {name}。写入 {count} 个文件到：{files}',
   'providers.section': '{app} Provider',
   'providers.modal.addFor': '添加 {app} Provider',
   'providers.modal.preview': '生成的 settings_config（预览）',
@@ -92,6 +89,34 @@ export const zh: Record<string, string> = {
   'providers.modal.protocol': '协议',
   'providers.modal.protocolRecommended': '推荐',
   'providers.delete.confirm': '删除 Provider「{id}」？',
+  'providers.endpoint.title': '接入信息(填到 cc-switch)',
+  'providers.endpoint.hint': 'AAG 不修改任何本地配置文件——那是 cc-switch 的工作。在 cc-switch 里新建一个 Anthropic 供应商,Base URL 和 API Key 用下面两个值即可;请求会按本页供应商列表顺序做故障转发。',
+  'providers.endpoint.url': 'Base URL',
+  'providers.endpoint.apiKey': 'API Key',
+  'providers.endpoint.noKey': '(未设置——代理不校验)',
+  'providers.endpoint.copy': '复制',
+  'providers.chainHint': '此列表顺序 = 故障转发顺序(第一个失败自动切下一个)。settings_config 含 env.ANTHROPIC_BASE_URL 才会进入转发链。',
+  'providers.syncFromCcSwitch': '自动从 cc-switch 同步',
+  'providers.syncFromCcSwitch.help': '开启后, 每次启动代理都会把 cc-switch 中所有 claude_code 供应商新增进 AAG(不会覆盖已有条目,带锁的条目也不动)。关闭时此按钮只触发一次性导入。',
+  'providers.syncLocked': '锁定(不同步覆盖)',
+  'providers.syncLocked.help': '锁定后, 自动同步会跳过该条目;你可以放心手动调优,新增的 cc-switch 供应商仍会拉进来。',
+  'providers.locked': '已锁定',
+  'chain.title': '故障转发链',
+  'chain.empty': '还没有 claude_code 供应商。添加一条(或开启「自动从 cc-switch 同步」)即可填充转发链。',
+  'chain.noUrl': '(无 env.ANTHROPIC_BASE_URL — 此条目跳过)',
+  'chain.skipped': '已跳过',
+  'providers.dragHint': '拖动左侧 ⋮⋮ 手柄排序。列表顺序 = 故障转发链顺序。',
+  'proxy.apiKey.label': 'API Key(对 cc-switch 暴露)',
+  'proxy.apiKey.hint': '留空则代理不校验鉴权。修改后重启代理生效。',
+  'proxy.apiKey.saved': 'API Key 已保存。重启代理后生效。',
+  'providers.importCcSwitch': '从 cc-switch 导入',
+  'providers.importCcSwitch.help':
+    '从 ~/.cc-switch/cc-switch.db 读取供应商,把缺失的行加入 AAG。已存在的 AAG 供应商保留(不覆盖)。cc-switch 的 `is_current` 标记会被丢弃——导入的行可用但不会自动激活。',
+  'providers.importCcSwitch.empty':
+    'cc-switch 里没有供应商。请确认 cc-switch 至少运行过一次,其数据库 ~/.cc-switch/cc-switch.db 已有内容。',
+  'providers.importCcSwitch.report':
+    '导入 {imported} 条 · 跳过 {skipped} 条(已存在) · 源共 {total} 条。',
+  'providers.importCcSwitch.failed': 'cc-switch 导入失败:{message}',
 
   // Proxy page
   'proxy.title': '本地代理',
@@ -339,4 +364,9 @@ export const zh: Record<string, string> = {
   'header.theme.dark': '深色',
   'header.theme.auto': '跟随系统',
   'header.lang.toggle': '语言',
+
+  // Settings
+  'settings.title': '设置',
+  'settings.noConflictNeeded':
+    'AAG 不再写入任何本地配置文件(那是 cc-switch 的工作)——没有冲突可配置。以后的设备级选项会放在这里。',
 };

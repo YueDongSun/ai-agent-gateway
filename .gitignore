@@ -88,6 +88,16 @@ cc-switch.db-wal
 # (gitlink was removed; keep the path ignored so an empty dir doesn't show as untracked)
 /cc-switch/
 
+# cc-switch reference checkout (used by the import_cc_switch tool).
+# Path is user-specific; conventional locations on this machine:
+#   macOS / Linux: ~/Documents/Codex/2026-07-05/ben/work/cc-switch-src/
+#   Windows:       C:\Users\<you>\Documents\Codex\2026-07-05\ben\work\cc-switch-src\
+#   anywhere:      <repo>/cc-switch-src/  (symlink-friendly)
+# We don't pin the path here (it's user-specific and would break for
+# others). If you copy a fresh checkout into the repo root, prefer
+# `/cc-switch-src/` as the ignored name.
+/cc-switch-src/
+
 # Python cache (from legacy check_*.py scripts)
 .mypy_cache/
 __pycache__/

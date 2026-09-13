@@ -35,6 +35,7 @@ impl Database {
                 meta TEXT NOT NULL DEFAULT '{}',
                 is_current BOOLEAN NOT NULL DEFAULT 0,
                 in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+                sync_locked BOOLEAN NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, app_type)
             )",
             [],
@@ -98,7 +99,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS proxy_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 host TEXT NOT NULL DEFAULT '127.0.0.1',
-                port INTEGER NOT NULL DEFAULT 8787,
+                port INTEGER NOT NULL DEFAULT 8989,
                 auth_token TEXT NOT NULL DEFAULT '',
                 enabled BOOLEAN NOT NULL DEFAULT 0
             )",
@@ -345,6 +346,73 @@ impl Database {
         if version < 10 {
             conn.execute_batch("PRAGMA user_version = 10;")?;
             version = 10;
+        }
+
+        // v10 -> v11: cc-switch coexistence detection.
+        //
+        // No new tables — the detector stores its state in `app_meta`
+        // under the well-known keys `ccswitch_override_enabled` (string
+        // "0"/"1") and `ccswitch_last_status_json` (JSON-serialized
+        // CcSwitchStatus). For fresh DBs these rows are inserted on
+        // demand by the detector; for existing DBs the migration only
+        // needs to stamp the version.
+        if version < 11 {
+            conn.execute_batch("PRAGMA user_version = 11;")?;
+            version = 11;
+        }
+
+        // v11 -> v12: default proxy port 8787 -> 8989.
+        //
+        // For users already on v11 the singleton `proxy_config` row
+        // holds the old default; rewrite it so existing installs pick
+        // up the new port on next proxy_start. Users who explicitly
+        // configured a custom port (anything other than 8787) are
+        // untouched.
+        if version < 12 {
+            conn.execute(
+                "UPDATE proxy_config SET port = 8989 WHERE id = 1 AND port = 8787",
+                [],
+            )?;
+            conn.execute_batch("PRAGMA user_version = 12;")?;
+            version = 12;
+        }
+
+        // v12 -> v13: sweep the whole legacy fallback range.
+        //
+        // The old port-fallback persisted whatever port it landed on
+        // (8787+1..+5), and v12 only rewrote the exact old default
+        // (8787) — DBs that had drifted to 8788..8792 kept the legacy
+        // port and could get stuck when that range is held. Rewrite
+        // the entire legacy range to the new default.
+        if version < 13 {
+            conn.execute(
+                "UPDATE proxy_config SET port = 8989 WHERE id = 1 AND port BETWEEN 8787 AND 8792",
+                [],
+            )?;
+            conn.execute_batch("PRAGMA user_version = 13;")?;
+            version = 13;
+        }
+
+        // v13 -> v14: add providers.sync_locked column for "do not
+        // auto-overwrite this row when syncing from cc-switch". Existing
+        // rows default to 0 (sync-friendly). SQLite has no IF NOT EXISTS
+        // for ALTER TABLE ADD COLUMN, so we guard with a pragma check.
+        if version < 14 {
+            let has_sync_locked: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name = 'sync_locked'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if has_sync_locked == 0 {
+                conn.execute(
+                    "ALTER TABLE providers ADD COLUMN sync_locked BOOLEAN NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 14;")?;
+            version = 14;
         }
 
         if version != SCHEMA_VERSION {

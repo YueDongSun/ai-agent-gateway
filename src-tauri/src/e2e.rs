@@ -77,7 +77,7 @@ mod tests {
             "e2e-claude".into(),
             "E2E Claude Provider".into(),
             json!({
-                "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787" },
+                "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8989" },
                 "apiKey": "e2e-test-key"
             }),
         );

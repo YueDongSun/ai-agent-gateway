@@ -19,7 +19,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
             "SELECT id, name, settings_config, website_url, category, created_at,
-                    sort_index, notes, icon, icon_color, meta, in_failover_queue
+                    sort_index, notes, icon, icon_color, meta, in_failover_queue, sync_locked
              FROM providers
              WHERE app_type = ?1
              ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC",
@@ -38,6 +38,7 @@ impl Database {
             let icon_color: Option<String> = row.get(9)?;
             let meta_str: String = row.get(10)?;
             let in_failover_queue: bool = row.get(11)?;
+            let sync_locked: bool = row.get(12)?;
 
             let settings_config =
                 serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
@@ -58,6 +59,7 @@ impl Database {
                     icon_color,
                     meta: Some(meta),
                     in_failover_queue,
+                    sync_locked,
                 },
             ))
         })?;
@@ -95,7 +97,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at,
-                    sort_index, notes, icon, icon_color, meta, in_failover_queue
+                    sort_index, notes, icon, icon_color, meta, in_failover_queue, sync_locked
              FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
             |row| {
@@ -110,6 +112,7 @@ impl Database {
                 let icon_color: Option<String> = row.get(8)?;
                 let meta_str: String = row.get(9)?;
                 let in_failover_queue: bool = row.get(10)?;
+                let sync_locked: bool = row.get(11)?;
 
                 let settings_config =
                     serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
@@ -128,6 +131,7 @@ impl Database {
                     icon_color,
                     meta: Some(meta),
                     in_failover_queue,
+                    sync_locked,
                 })
             },
         );
@@ -151,22 +155,11 @@ impl Database {
         let created_at = provider.created_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
 
         conn.execute(
-            "INSERT INTO providers (
+            "INSERT OR IGNORE INTO providers (
                 id, app_type, name, settings_config, website_url, category,
                 created_at, sort_index, notes, icon, icon_color, meta,
-                is_current, in_failover_queue
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13)
-            ON CONFLICT(id, app_type) DO UPDATE SET
-                name = excluded.name,
-                settings_config = excluded.settings_config,
-                website_url = excluded.website_url,
-                category = excluded.category,
-                sort_index = excluded.sort_index,
-                notes = excluded.notes,
-                icon = excluded.icon,
-                icon_color = excluded.icon_color,
-                meta = excluded.meta,
-                in_failover_queue = excluded.in_failover_queue",
+                is_current, in_failover_queue, sync_locked
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, 0)",
             params![
                 provider.id,
                 app_type,
@@ -194,6 +187,46 @@ impl Database {
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
         )?;
+        Ok(())
+    }
+
+    /// Reorder an app's providers by writing a new `sort_index` for each
+    /// row from the supplied id list. Ids not present in the list keep
+    /// their existing sort_index (and fall after the reordered ones).
+    pub fn reorder_providers(
+        &self,
+        app_type: &str,
+        ordered_ids: &[String],
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction()?;
+        for (idx, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE providers SET sort_index = ?3 WHERE id = ?1 AND app_type = ?2",
+                params![id, app_type, (idx as i64) + 1],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Toggle the `sync_locked` bit on a single (id, app_type) row.
+    pub fn set_sync_locked(
+        &self,
+        id: &str,
+        app_type: &str,
+        locked: bool,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let updated = conn.execute(
+            "UPDATE providers SET sync_locked = ?3 WHERE id = ?1 AND app_type = ?2",
+            params![id, app_type, locked as i64],
+        )?;
+        if updated == 0 {
+            return Err(AppError::InvalidInput(format!(
+                "provider \"{id}\" not found for app \"{app_type}\""
+            )));
+        }
         Ok(())
     }
 

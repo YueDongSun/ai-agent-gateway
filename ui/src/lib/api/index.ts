@@ -12,3 +12,5 @@ export * from './sync';
 export * from './deeplink';
 export * from './codexCli';
 export * from './copilot';
+export * from './detect';
+export * from './import';

@@ -26,7 +26,7 @@ use std::sync::Mutex;
 
 /// Current schema version. Increment on every schema change and add a migration
 /// branch in `schema.rs::apply_schema_migrations`.
-pub(crate) const SCHEMA_VERSION: i32 = 10;
+pub(crate) const SCHEMA_VERSION: i32 = 14;
 
 /// Serialize a value to a JSON string, mapping errors to AppError.
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {

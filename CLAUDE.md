@@ -100,6 +100,45 @@ picking a vendor auto-fills endpoint + key and auto-selects the protocol the tar
 speaks (`APP_PROTOCOL`: claude_code→anthropic, codex/copilot/pi→openai-chat). Provider
 rows keep a baked-in `settings_config` snapshot, so deleting a vendor never cascades.
 
+**cc-switch coexistence detection** (Phase 15.5 + follow-up): when both
+AAG and [cc-switch](https://github.com/farion1231/cc-switch) are running,
+both write `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` /
+`COPILOT_PROVIDER_BASE_URL` into the same live agent config files;
+whichever wrote last wins, silently routing requests through the wrong
+proxy. **Default deployment shape**: AAG acts as an Anthropic
+upstream — cc-switch chains through it (`cc-switch → AAG → upstream`),
+and only the Codex CLI isolated CODEX_HOME window treats AAG as its
+primary endpoint. So the detector runs and shows a banner, but **the
+hard block is opt-in** (`KEY_CCSWITCH_BLOCK_ENABLED`, default off in
+`app_meta`). Detector
+(`src-tauri/src/services/detect/cc_switch.rs`) combines four signals (TCP
+probe `127.0.0.1:15721` + `~/.cc-switch/cc-switch.db` exists + live-config
+residue in `~/.claude/settings.json` / `~/.codex/config.toml`). State lives
+in `app_meta` under `ccswitch_override_enabled` + `ccswitch_last_status_json`
++ `ccswitch_block_enabled` (schema v11 is a no-op stamp — no new tables).
+Commands: `detect_cc_switch() -> CcSwitchStatus`,
+`set_cc_switch_override(enabled)`, `get_cc_switch_blocking()`,
+`set_cc_switch_blocking(enabled)`. When blocking is on, the guards reject
+`codex` / `copilot` writes whose settings point at AAG's own proxy while
+cc-switch is detected; `claude_code` is **never** blocked (Claude CLI's
+`ANTHROPIC_BASE_URL` is meant to point at AAG's upstream — that's the
+supported cc-switch → AAG chain). **UI surface is silent by default**
+(Phase 15.7): no banner, no dialogs, no polling — the only control is a
+single Settings toggle, "Overwrite cc-switch config on conflict"
+(ON = write freely; OFF = backend hard-block; maps to
+`ccswitch_block_enabled`). Default proxy port is **8989**
+(`DEFAULT_PROXY_PORT`; schema v13 sweeps the legacy 8787–8792 range),
+and `proxy_start`'s bind-ready timeout is 2s.
+
+**cc-switch provider import** (Phase 15.6): `import_cc_switch_providers`
+(`services/import_cc_switch/`) reads `~/.cc-switch/cc-switch.db`
+read-only, maps cc-switch's hyphenated app_type ids onto AAG's
+snake_case (`claude`→`claude_code`, `claude-desktop`→`claude_desktop`,
+`grokbuild`→`grok_build`), skips already-present `(id, app_type)` pairs
+(idempotent), and drops cc-switch's `is_current` bit. Providers page has
+an "Import from cc-switch" button; the report toast shows
+imported/skipped/total.
+
 ## Conventions
 
 - **Rust**: new tables bump `SCHEMA_VERSION` + add a migration branch in `schema.rs`. New commands must be registered in `lib.rs::invoke_handler`. DAO methods live in `impl Database` blocks.

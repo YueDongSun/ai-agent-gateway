@@ -14,6 +14,7 @@ import { UsagePage } from './components/usage/UsagePage';
 import { SyncPage } from './components/sync/SyncPage';
 import { DeepLinkPage } from './components/deeplink/DeepLinkPage';
 import { CodexCliPage } from './components/codexcli/CodexCliPage';
+import { SettingsPage } from './components/settings/SettingsPage';
 import { I18nCtx, useCtx } from './lib/ctx';
 import { useI18n } from './i18n/index';
 import { useTheme } from './lib/theme';
@@ -24,7 +25,7 @@ interface AppInfo {
   phase: string;
 }
 
-type View = 'app' | 'providers' | 'vendors' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli';
+type View = 'app' | 'providers' | 'vendors' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli' | 'settings';
 
 /* ---- Sun/Moon icons (inline SVG — no asset dependency) ---- */
 
@@ -158,6 +159,7 @@ function AppInner() {
             {nav('app.nav.deeplink',    'deeplink')}
             {nav('app.nav.codexcli',    'codexcli')}
             {nav('app.nav.about',       'app')}
+            {nav('settings.title',      'settings')}
           </nav>
           <div className="header-controls">
             <button
@@ -208,6 +210,8 @@ function AppInner() {
           <DeepLinkPage onExecute={handleExecuteDeeplink} />
         ) : view === 'codexcli' ? (
           <CodexCliPage />
+        ) : view === 'settings' ? (
+          <SettingsPage />
         ) : (
           <section>
             <h2>{t('app.nav.about')}</h2>

@@ -8,9 +8,13 @@ import {
   deleteProvider,
   getCurrentProvider,
   listProviders,
+  reorderProviders,
   saveProvider,
-  switchProvider,
 } from '../../lib/api/providers';
+import { getProxyConfig, type ProxyConfig } from '../../lib/api/proxy';
+import { importCcSwitchProviders } from '../../lib/api/import';
+import { getSyncWithCcSwitch, setSyncWithCcSwitch, setProviderSyncLocked } from '../../lib/api/detect';
+import { FailoverChain } from './FailoverChain';
 import { useT } from '../../lib/ctx';
 import { SCHEMAS, stringifyConfig, APP_PROTOCOL } from '../../lib/providerForm';
 import { PROTOCOL_LABELS, type Protocol, type Vendor, listVendors, resolveEndpoint } from '../../lib/api/vendors';
@@ -48,6 +52,31 @@ export function ProvidersPage() {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   /** When editing, the original provider row (id/createdAt/sortIndex preserved on save). */
   const [editing, setEditing] = useState<Provider | null>(null);
+  /** "Import from cc-switch" button state. */
+  const [importing, setImporting] = useState(false);
+  /** Auto-sync on/off (cc-switch -> AAG, fires on proxy_start). */
+  const [syncOn, setSyncOn] = useState(false);
+  /** Drag-reorder: index of the row currently being dragged (null = idle). */
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  /** Drag-reorder: index of the row currently highlighted as a drop target. */
+  const [overIdx, setOverIdx] = useState<number | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try { setSyncOn(await getSyncWithCcSwitch()); } catch {}
+    })();
+  }, []);
+  const toggleSync = async (next: boolean) => {
+    try {
+      await setSyncWithCcSwitch(next);
+      setSyncOn(next);
+    } catch (e) { setError(String(e)); }
+  };
+  const toggleLock = async (p: Provider) => {
+    try {
+      await setProviderSyncLocked(p.id, appType, !p.syncLocked);
+      await refresh(appType);
+    } catch (e) { setError(String(e)); }
+  };
 
   // Load vendors once for the picker.
   useEffect(() => {
@@ -59,6 +88,29 @@ export function ProvidersPage() {
       }
     })();
   }, []);
+
+  // Proxy endpoint (URL + API key) for the endpoint card — the thing the
+  // user hands to cc-switch.
+  const [endpoint, setEndpoint] = useState<ProxyConfig | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        setEndpoint(await getProxyConfig());
+      } catch {
+        /* card just hides its values */
+      }
+    })();
+  }, []);
+  const copy = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+      setTimeout(() => setCopied(null), 1500);
+    } catch {
+      /* clipboard unavailable — user can select the text manually */
+    }
+  };
 
   const selectedVendor = vendors.find((v) => v.id === form.vendorId) ?? null;
 
@@ -117,20 +169,34 @@ export function ProvidersPage() {
     setOpenAdvanced(false);
   }, [appType, schema]);
 
-  const handleSwitch = async (id: string) => {
+  const handleImportCcSwitch = async () => {
+    setImporting(true);
     setError(null);
     try {
-      const result = await switchProvider(id, appType);
-      setCurrent(id);
+      const report = await importCcSwitchProviders();
+      // Guard against shape drift (e.g. a backend returning snake_case)
+      // so we surface a clear message instead of a TypeError.
+      const imported = report?.imported ?? [];
+      const skipped = report?.skippedExisting ?? [];
+      const total = report?.totalInSource ?? imported.length + skipped.length;
+      // Refresh every app tab so imported rows show up regardless of
+      // which tab the user is currently on.
       await refresh(appType);
-      const written = result.written.join(', ');
-      setError(
-        appType === 'codex'
-          ? t('providers.switchedCodex', { name: id, count: result.written.length, files: written })
-          : t('providers.switched', { name: id, count: result.written.length }),
-      );
+      if (total === 0) {
+        setError(t('providers.importCcSwitch.empty'));
+      } else {
+        setError(
+          t('providers.importCcSwitch.report', {
+            imported: imported.length,
+            skipped: skipped.length,
+            total,
+          }),
+        );
+      }
     } catch (e) {
-      setError(String(e));
+      setError(t('providers.importCcSwitch.failed', { message: String(e) }));
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -274,18 +340,74 @@ export function ProvidersPage() {
 
       {error && <pre className="aag-error">{error}</pre>}
 
+      {appType === 'claude_code' && endpoint && (
+        <section className="endpoint-card">
+          <h3>{t('providers.endpoint.title')}</h3>
+          <p className="muted">{t('providers.endpoint.hint')}</p>
+          <div className="endpoint-row">
+            <span className="endpoint-label">{t('providers.endpoint.url')}</span>
+            <code>http://{endpoint.host}:{endpoint.port}</code>
+            <button
+              className="btn"
+              onClick={() => copy('url', `http://${endpoint.host}:${endpoint.port}`)}
+            >
+              {copied === 'url' ? '✓' : t('providers.endpoint.copy')}
+            </button>
+          </div>
+          <div className="endpoint-row">
+            <span className="endpoint-label">{t('providers.endpoint.apiKey')}</span>
+            <code>{endpoint.authToken || t('providers.endpoint.noKey')}</code>
+            <button
+              className="btn"
+              onClick={() => copy('key', endpoint.authToken)}
+              disabled={!endpoint.authToken}
+            >
+              {copied === 'key' ? '✓' : t('providers.endpoint.copy')}
+            </button>
+          </div>
+          <label className="settings-toggle sync-toggle">
+            <input
+              type="checkbox"
+              checked={syncOn}
+              onChange={(e) => toggleSync(e.target.checked)}
+            />
+            <span>
+              <strong>{t('providers.syncFromCcSwitch')}</strong>
+              <small className="muted">{t('providers.syncFromCcSwitch.help')}</small>
+            </span>
+          </label>
+        </section>
+      )}
+
       <section className="list-section">
+        {appType === 'claude_code' && <FailoverChain providers={providers} />}
         <div className="list-header">
           <h3>{t('providers.section', { app: t(tabKey(appType)) })}</h3>
-          <button
-            className="btn primary"
-            onClick={() => {
-              setEditing(null);
-              setShowAdd(true);
-            }}
-          >
-            {t('providers.add')}
-          </button>
+          {appType === 'claude_code' && (
+            <p className="muted">{t('providers.chainHint')}</p>
+          )}
+          {appType === 'claude_code' && (
+            <p className="muted">{t('providers.dragHint')}</p>
+          )}
+          <div className="list-header-actions">
+            <button
+              className="btn"
+              onClick={handleImportCcSwitch}
+              disabled={importing}
+              title={t('providers.importCcSwitch.help')}
+            >
+              {importing ? t('common.loading') : t('providers.importCcSwitch')}
+            </button>
+            <button
+              className="btn primary"
+              onClick={() => {
+                setEditing(null);
+                setShowAdd(true);
+              }}
+            >
+              {t('providers.add')}
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -294,26 +416,82 @@ export function ProvidersPage() {
           <p className="muted">{t('providers.empty')}</p>
         ) : (
           <ul className="provider-list">
-            {providers.map((p) => {
+            {providers.map((p, idx) => {
               const isCurrent = p.id === current;
+              const baseUrl = (p.settingsConfig?.env as Record<string, unknown> | undefined)?.ANTHROPIC_BASE_URL;
+              const dropTarget = overIdx === idx && dragIdx !== null && dragIdx !== idx;
               return (
-                <li key={p.id} className={isCurrent ? 'provider-card current' : 'provider-card'}>
-                  <div className="provider-main">
-                    <div className="provider-name">
+                <li
+                  key={p.id}
+                  className={[
+                    isCurrent ? 'provider-card-cc current' : 'provider-card-cc',
+                    dropTarget ? 'drag-over' : '',
+                  ].filter(Boolean).join(' ')}
+                  draggable={appType === 'claude_code'}
+                  onDragStart={(e) => {
+                    if (appType !== 'claude_code') return;
+                    setDragIdx(idx);
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', String(idx));
+                  }}
+                  onDragOver={(e) => {
+                    if (appType !== 'claude_code' || dragIdx === null) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    setOverIdx(idx);
+                  }}
+                  onDragLeave={() => {
+                    if (overIdx === idx) setOverIdx(null);
+                  }}
+                  onDrop={async (e) => {
+                    if (appType !== 'claude_code' || dragIdx === null) return;
+                    e.preventDefault();
+                    const from = dragIdx;
+                    const to = idx;
+                    setDragIdx(null);
+                    setOverIdx(null);
+                    if (from === to) return;
+                    const next = [...providers];
+                    const [moved] = next.splice(from, 1);
+                    next.splice(to, 0, moved);
+                    setProviders(next);
+                    try {
+                      await reorderProviders(appType, next.map((x) => x.id));
+                    } catch (err) {
+                      setError(String(err));
+                      await refresh(appType);
+                    }
+                  }}
+                  onDragEnd={() => {
+                    setDragIdx(null);
+                    setOverIdx(null);
+                  }}
+                >
+                  <span className="handle" aria-hidden>⋮⋮</span>
+                  <div className="provider-card-main">
+                    <div className="provider-card-name">
                       <strong>{p.name}</strong>
-                      {isCurrent && <span className="badge current-badge">{t('providers.current')}</span>}
+                      {isCurrent && <span className="tag tag-current">{t('providers.current')}</span>}
+                      {appType === 'claude_code' && p.syncLocked && (
+                        <span className="tag tag-locked">🔒 {t('providers.locked')}</span>
+                      )}
+                      {appType === 'claude_code' && !baseUrl && (
+                        <span className="tag tag-no-url">{t('chain.skipped')}</span>
+                      )}
                     </div>
-                    <code className="provider-id">{p.id}</code>
-                    {p.notes && <p className="provider-notes">{p.notes}</p>}
+                    <code className="provider-card-id">{p.id}</code>
+                    {p.notes && <p className="provider-card-notes">{p.notes}</p>}
                   </div>
                   <div className="provider-actions">
-                    <button
-                      className="btn"
-                      onClick={() => handleSwitch(p.id)}
-                      disabled={isCurrent}
-                    >
-                      {t('providers.switch')}
-                    </button>
+                    {appType === 'claude_code' && (
+                      <button
+                        className={p.syncLocked ? 'btn active' : 'btn'}
+                        onClick={() => toggleLock(p)}
+                        title={t('providers.syncLocked.help')}
+                      >
+                        {p.syncLocked ? `🔒 ${t('providers.locked')}` : '🔓'}
+                      </button>
+                    )}
                     <button className="btn" onClick={() => openEdit(p)}>
                       {t('providers.edit')}
                     </button>

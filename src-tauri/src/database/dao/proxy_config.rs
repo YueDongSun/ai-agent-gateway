@@ -15,11 +15,17 @@ pub struct ProxyConfig {
     pub enabled: bool,
 }
 
+/// Default proxy listen port. Chosen to avoid the most common
+/// development ports (3000/5000/8000/8080/8787/9000) so AAG plays
+/// nicely alongside other dev tools. Users can change it via the
+/// Proxy page (it persists in the `proxy_config` singleton row).
+pub const DEFAULT_PROXY_PORT: u16 = 8989;
+
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".into(),
-            port: 8787,
+            port: DEFAULT_PROXY_PORT,
             auth_token: String::new(),
             enabled: false,
         }

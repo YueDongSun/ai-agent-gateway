@@ -37,6 +37,7 @@ pub fn config_dir() -> std::path::PathBuf {
 
 /// Switching is intentionally disabled for this iteration — the on-disk schema
 /// for custom providers is not publicly documented.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(_provider: &Provider) -> Result<LiveWriteResult, AppError> {
     Err(AppError::Message(
         "Antigravity desktop switching is not supported yet (no public config format). Configure the API key in Antigravity's model dropdown, or pick another supported agent on the AAG Providers page".into(),

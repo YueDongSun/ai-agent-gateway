@@ -32,6 +32,10 @@ pub struct ResolvedRoute {
 pub struct Router {
     providers: HashMap<String, Arc<dyn Provider>>,
     routes: HashMap<String, Vec<RouteHop>>,
+    /// Homepage failover queue: provider ids tried in order when no
+    /// explicit route / provider matches the requested model. Each hop
+    /// passes the requested model through unchanged.
+    queue: Vec<String>,
 }
 
 impl Router {
@@ -41,7 +45,14 @@ impl Router {
         providers: HashMap<String, Arc<dyn Provider>>,
         routes: HashMap<String, Vec<RouteHop>>,
     ) -> Self {
-        Self { providers, routes }
+        Self { providers, routes, queue: Vec::new() }
+    }
+
+    /// Attach the homepage failover queue (checked after explicit routes
+    /// and per-provider auto-routing miss).
+    pub fn with_queue(mut self, queue: Vec<String>) -> Self {
+        self.queue = queue;
+        self
     }
 
     /// Resolve a model name to its route hops. If no explicit route exists,
@@ -58,6 +69,18 @@ impl Router {
                     model: model.into(),
                 }]);
             }
+        }
+        // Homepage failover queue: last-chance chain, model passed through.
+        if !self.queue.is_empty() {
+            return Some(
+                self.queue
+                    .iter()
+                    .map(|pid| RouteHop {
+                        provider: pid.clone(),
+                        model: model.into(),
+                    })
+                    .collect(),
+            );
         }
         None
     }

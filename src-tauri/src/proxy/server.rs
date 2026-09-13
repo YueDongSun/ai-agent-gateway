@@ -39,25 +39,43 @@ pub struct BoundInfo {
     pub addr: std::net::SocketAddr,
 }
 
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub async fn serve(
     bind_addr: std::net::SocketAddr,
     state: ProxyAppState,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<BoundInfo, String> {
+    let (bound, handle) = serve_detached(bind_addr, state, shutdown_rx).await?;
+    handle.await.map_err(|e| format!("server task join: {e}"))??;
+    Ok(bound)
+}
+
+/// Bind immediately, then serve on a detached task. Returns as soon as
+/// the listener is bound (so callers know the actual port / bind error
+/// without waiting for shutdown); the accept loop keeps running until
+/// `shutdown_rx` fires. `proxy_start` uses this so a successful bind is
+/// never mistaken for a timeout.
+pub async fn serve_detached(
+    bind_addr: std::net::SocketAddr,
+    state: ProxyAppState,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(BoundInfo, tokio::task::JoinHandle<Result<(), String>>), String> {
     let app = build_router(state);
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| format!("bind {bind_addr}: {e}"))?;
     let bound = BoundInfo { addr: listener.local_addr().map_err(|e| format!("local_addr: {e}"))? };
     log::info!("proxy: listening on http://{}", bound.addr);
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-            log::info!("proxy: graceful shutdown signal received");
-        })
-        .await
-        .map_err(|e| format!("server error: {e}"))?;
-    Ok(bound)
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+                log::info!("proxy: graceful shutdown signal received");
+            })
+            .await
+            .map_err(|e| format!("server error: {e}"))
+    });
+    Ok((bound, handle))
 }
 
 fn build_router(state: ProxyAppState) -> AxumRouter {

@@ -47,6 +47,7 @@ pub fn read_live() -> Result<Option<Value>, AppError> {
 ///
 /// `codex_cli_home` optionally overrides the Codex config directory (isolated
 /// CODEX_HOME for the CLI); `None` uses the default `~/.codex`.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(
     provider: &Provider,
     codex_cli_home: Option<&str>,

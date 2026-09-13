@@ -28,6 +28,7 @@ pub fn read_live() -> Result<Option<Value>, AppError> {
 
 /// Strip internal-only fields that must never be written to Claude Code's
 /// settings.json. Mirrors cc-switch `sanitize_claude_settings_for_live` (`live.rs:166`).
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 fn sanitize(settings: &Value) -> Value {
     let mut v = settings.clone();
     if let Some(obj) = v.as_object_mut() {
@@ -41,6 +42,7 @@ fn sanitize(settings: &Value) -> Value {
 
 /// Write `provider.settings_config` to `~/.claude/settings.json`, backing up
 /// the existing file first. Returns the written + backup paths.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
     let path = get_claude_settings_path();
     let settings = sanitize(&provider.settings_config);

@@ -22,7 +22,7 @@ impl Database {
             let conn = lock_conn!(self.conn);
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (id, host, port, auth_token, enabled)
-                 VALUES (1, '127.0.0.1', 8787, '', 0)",
+                 VALUES (1, '127.0.0.1', 8989, '', 0)",
                 [],
             )?;
         }

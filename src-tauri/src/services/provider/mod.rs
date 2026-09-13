@@ -108,6 +108,7 @@ pub struct LiveWriteResult {
 ///
 /// `codex_cli_home` optionally overrides the Codex config directory (isolated
 /// CODEX_HOME); only used for `AppType::Codex`. `None` = default `~/.codex`.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live_snapshot(
     app_type: AppType,
     provider: &Provider,

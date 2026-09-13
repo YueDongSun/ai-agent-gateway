@@ -26,6 +26,8 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
+use crate::error::AppError;
+
 #[derive(Serialize)]
 struct AppInfo {
     name: &'static str,
@@ -159,24 +161,32 @@ fn provider_delete(db: tauri::State<'_, Database>, id: String, app_type: String)
     db.delete_provider(&id, &app_type).map_err(String::from)
 }
 #[tauri::command]
+/// Mark a provider as current in the DB. As of Phase 15.9 AAG does NOT
+/// write live agent config files (`~/.claude/settings.json` etc.) — that
+/// is cc-switch's job. AAG is a standalone Anthropic-compatible provider
+/// with internal failover: point cc-switch (or any client) at the local
+/// proxy URL + auth token, and the homepage provider list is the chain.
 fn provider_switch(
     db: tauri::State<'_, Database>,
     id: String,
     app_type: String,
 ) -> Result<services::provider::LiveWriteResult, String> {
-    let app = services::provider::AppType::from_db_str(&app_type).map_err(String::from)?;
+    let _app = services::provider::AppType::from_db_str(&app_type).map_err(String::from)?;
     let provider = db.get_provider_by_id(&id, &app_type)
         .map_err(String::from)?
         .ok_or_else(|| format!("provider \"{id}\" not found for app \"{app_type}\""))?;
+
     db.set_current_provider(&id, &app_type).map_err(String::from)?;
-    // Codex CLI isolated CODEX_HOME: if an isolated directory is set, write
-    // live config there instead of the default ~/.codex; desktop app config
-    // is left untouched.
-    let codex_cli_home = db
-        .get_setting(database::dao::settings::KEY_CODEX_CLI_HOME)
-        .map_err(String::from)?;
-    services::provider::write_live_snapshot(app, &provider, codex_cli_home.as_deref())
-        .map_err(String::from)
+
+    // No live-config write (Phase 15.9): `written` is empty by design.
+    // The current marker still drives which provider the UI highlights
+    // as the chain head.
+    Ok(services::provider::LiveWriteResult {
+        app_type,
+        provider_id: provider.id,
+        written: vec![],
+        backup: None,
+    })
 }
 
 // ----- App settings (Codex CLI isolation etc.) -----
@@ -201,6 +211,126 @@ fn settings_set(
 }
 
 // ----- Codex CLI isolation -----
+
+// ----- cc-switch coexistence detection (Phase 15.5) -----
+
+/// Run the cc-switch detector and return the structured status. Honours
+/// the user's "ignore conflicts" override by flipping `suppressed`.
+#[tauri::command]
+fn detect_cc_switch(
+    db: tauri::State<'_, Database>,
+) -> Result<services::detect::cc_switch::CcSwitchStatus, String> {
+    let mut status = services::detect::cc_switch::detect();
+    let override_on = db
+        .get_setting(database::dao::settings::KEY_CCSWITCH_OVERRIDE_ENABLED)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1");
+    status.suppressed = override_on;
+    // Best-effort snapshot — never fail the command on a cache write.
+    if let Ok(json) = serde_json::to_string(&status) {
+        let _ = db.set_setting(
+            database::dao::settings::KEY_CCSWITCH_LAST_STATUS,
+            &json,
+        );
+    }
+    Ok(status)
+}
+
+/// Toggle the "ignore cc-switch conflicts" override. When `enabled=true`,
+/// `provider_switch` / `*_open_cli_terminal` skip the conflict check.
+#[tauri::command]
+fn set_cc_switch_override(
+    db: tauri::State<'_, Database>,
+    enabled: bool,
+) -> Result<(), String> {
+    db.set_setting(
+        database::dao::settings::KEY_CCSWITCH_OVERRIDE_ENABLED,
+        if enabled { "1" } else { "" },
+    )
+    .map_err(String::from)
+}
+
+/// Return whether the opt-in hard-block mode is enabled. Default off.
+#[tauri::command]
+fn get_cc_switch_blocking(
+    db: tauri::State<'_, Database>,
+) -> Result<bool, String> {
+    Ok(db
+        .get_setting(database::dao::settings::KEY_CCSWITCH_BLOCK_ENABLED)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1"))
+}
+
+/// Toggle the opt-in hard-block mode. When `enabled=true`, AAG blocks
+/// `provider_switch` (codex/copilot) and `*_open_cli_terminal` writes
+/// that point at AAG's own proxy while cc-switch is running. Off by
+/// default — the typical deployment chains cc-switch → AAG.
+#[tauri::command]
+fn set_cc_switch_blocking(
+    db: tauri::State<'_, Database>,
+    enabled: bool,
+) -> Result<(), String> {
+    db.set_setting(
+        database::dao::settings::KEY_CCSWITCH_BLOCK_ENABLED,
+        if enabled { "1" } else { "" },
+    )
+    .map_err(String::from)
+}
+
+/// Same guard as `cc_switch_guard_provider_switch` but checks the
+/// outbound proxy setting (injected into Codex/Copilot CLI terminals)
+/// rather than the provider's settings_config. Also opt-in via
+/// `ccswitch_block_enabled`. We only block when the outbound proxy
+/// points at AAG's *own* port while cc-switch is running AND would
+/// forward that port back to cc-switch — i.e. a circular routing setup.
+/// Pointing the outbound proxy at cc-switch's port (so the CLI uses
+/// cc-switch as its outbound) is also blocked when hard-block is on,
+/// because that means the CLI session will use cc-switch and any AAG
+/// proxy URL injected by the provider becomes a redundant loop.
+fn cc_switch_guard_outbound_proxy(
+    outbound_proxy: Option<&str>,
+    db: &Database,
+) -> Result<(), String> {
+    let override_on = db
+        .get_setting(database::dao::settings::KEY_CCSWITCH_OVERRIDE_ENABLED)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1");
+    if override_on {
+        return Ok(());
+    }
+    let block_on = db
+        .get_setting(database::dao::settings::KEY_CCSWITCH_BLOCK_ENABLED)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1");
+    if !block_on {
+        return Ok(());
+    }
+    let proxy_url = match outbound_proxy {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return Ok(()),
+    };
+    // Only block if outbound proxy points at cc-switch's port — AAG's own
+    // proxy port is fine to inject.
+    if !services::detect::cc_switch::url_uses_cc_switch_port(
+        proxy_url,
+        services::detect::cc_switch::CC_SWITCH_DEFAULT_PORT,
+    ) {
+        return Ok(());
+    }
+    let status = services::detect::cc_switch::detect();
+    if !status.running {
+        return Ok(());
+    }
+    Err(AppError::ConflictWithCcSwitch {
+        cc_switch_port: status.port,
+        target_url: proxy_url.to_string(),
+    }
+    .into())
+}
 
 /// Codex CLI isolation status (for the frontend to render).
 #[derive(Serialize)]
@@ -363,6 +493,10 @@ fn codex_open_cli_terminal(
         .get_setting(database::dao::settings::KEY_OUTBOUND_PROXY)
         .map_err(String::from)?;
 
+    // cc-switch coexistence guard: refuse to inject the outbound proxy if
+    // it points at cc-switch's port AND cc-switch is running.
+    cc_switch_guard_outbound_proxy(outbound_proxy.as_deref(), &db)?;
+
     let config_dir = crate::config::get_codex_config_dir_with_override(codex_cli_home.as_deref());
     std::fs::create_dir_all(&config_dir).map_err(|e| format!("failed to create CODEX_HOME: {e}"))?;
     let codex_home = config_dir.to_string_lossy().to_string();
@@ -448,6 +582,34 @@ fn copilot_open_cli_terminal(
         .and_then(|e| e.get("COPILOT_PROVIDER_BASE_URL"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| "settings_config.env.COPILOT_PROVIDER_BASE_URL is missing".to_string())?;
+
+    // cc-switch coexistence guard: refuse to launch a terminal that would
+    // inject COPILOT_PROVIDER_BASE_URL pointing at AAG's proxy while
+    // cc-switch is also running.
+    let proxy_cfg = db.get_proxy_config().map_err(String::from)?;
+    if !db
+        .get_setting(database::dao::settings::KEY_CCSWITCH_OVERRIDE_ENABLED)
+        .map_err(String::from)?
+        .as_deref()
+        .eq(&Some("1"))
+    {
+        if services::detect::cc_switch::target_is_aag_proxy(
+            base_url,
+            &proxy_cfg.host,
+            proxy_cfg.port,
+        ) {
+            let status = services::detect::cc_switch::detect();
+            if status.running {
+                return Err(AppError::ConflictWithCcSwitch {
+                    cc_switch_port: status.port,
+                    target_url: base_url.to_string(),
+                }
+                .into());
+            }
+        }
+    }
+    cc_switch_guard_outbound_proxy(outbound_proxy.as_deref(), &db)?;
+
     let api_key = cfg_obj
         .get("env")
         .and_then(|e| e.get("COPILOT_PROVIDER_API_KEY"))
@@ -662,7 +824,7 @@ fn launch_agent_terminal(command_line: &str, script_stem: &str) -> Result<(), St
 
 /// Handle to a running proxy server. Stored as Tauri managed state.
 struct RunningProxy {
-    handle: tauri::async_runtime::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<Result<(), String>>,
     shutdown: tokio::sync::oneshot::Sender<()>,
     config: database::dao::proxy_config::ProxyConfig,
 }
@@ -681,6 +843,74 @@ async fn proxy_status(state: tauri::State<'_, Mutex<Option<RunningProxy>>>) -> R
         None => ProxyConfig::default(),
     };
     Ok(ProxyStatusDto { running: guard.is_some(), config })
+}
+
+/// Read the proxy listen config + auth token (for the endpoint card the
+/// user copies into cc-switch).
+#[tauri::command]
+fn proxy_config_get(
+    db: tauri::State<'_, Database>,
+) -> Result<ProxyConfig, String> {
+    db.get_proxy_config().map_err(String::from)
+}
+
+/// Update the proxy listen config (host / port / auth token). Takes
+/// effect on next proxy start (or immediately via stop + start).
+#[tauri::command]
+fn proxy_config_save(
+    db: tauri::State<'_, Database>,
+    config: ProxyConfig,
+) -> Result<(), String> {
+    db.save_proxy_config(&config).map_err(String::from)
+}
+
+/// Whether the cc-switch auto-sync is on. When on, `proxy_start` pulls
+/// every new claude_code provider out of cc-switch's DB into AAG.
+#[tauri::command]
+fn get_sync_with_ccswitch(
+    db: tauri::State<'_, Database>,
+) -> Result<bool, String> {
+    Ok(db
+        .get_setting(database::dao::settings::KEY_SYNC_WITH_CCSWITCH)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1"))
+}
+
+/// Toggle the cc-switch auto-sync setting.
+#[tauri::command]
+fn set_sync_with_ccswitch(
+    db: tauri::State<'_, Database>,
+    enabled: bool,
+) -> Result<(), String> {
+    db.set_setting(
+        database::dao::settings::KEY_SYNC_WITH_CCSWITCH,
+        if enabled { "1" } else { "" },
+    )
+    .map_err(String::from)
+}
+
+/// Toggle `providers.sync_locked` on a single row. UI hook for "don't
+/// overwrite this entry when syncing from cc-switch".
+#[tauri::command]
+fn set_provider_sync_locked(
+    db: tauri::State<'_, Database>,
+    id: String,
+    app_type: String,
+    locked: bool,
+) -> Result<(), String> {
+    db.set_sync_locked(&id, &app_type, locked).map_err(String::from)
+}
+
+/// Reorder providers by writing a new sort_index for each id in the
+/// supplied list. Used by the Providers page drag handle.
+#[tauri::command]
+fn provider_reorder(
+    db: tauri::State<'_, Database>,
+    app_type: String,
+    ordered_ids: Vec<String>,
+) -> Result<(), String> {
+    db.reorder_providers(&app_type, &ordered_ids).map_err(String::from)
 }
 
 #[tauri::command]
@@ -726,97 +956,126 @@ async fn proxy_start(
         routes.insert(r.alias, r.hops);
     }
 
-    let router = Arc::new(proxy::router::Router::new(providers, routes));
+    // Homepage failover chain: the claude_code provider list (in homepage
+    // order) IS the failover queue. When no explicit route matches a model,
+    // the request tries each upstream in list order, model passed through.
+    // Entries without env.ANTHROPIC_BASE_URL in settings_config are skipped
+    // with a warning.
+    //
+    // If the user enabled sync_with_cc_switch_enabled, pull every new
+    // claude_code provider out of cc-switch's DB into AAG first. The
+    // sync is additive — locked rows are skipped, existing rows are
+    // untouched. Failures degrade to warnings; the proxy still starts.
+    let sync_on = db
+        .get_setting(database::dao::settings::KEY_SYNC_WITH_CCSWITCH)
+        .map_err(String::from)?
+        .as_deref()
+        == Some("1");
+    if sync_on {
+        let cc_path = services::import_cc_switch::cc_switch_db_path();
+        match services::import_cc_switch::sync_claude_code_from_cc_switch(&db, &cc_path) {
+            Ok(r) if r.imported.len() > 0 => log::info!(
+                "proxy: cc-switch auto-sync imported {} new provider(s) (skipped {})",
+                r.imported.len(),
+                r.skipped_existing.len()
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("proxy: cc-switch auto-sync failed: {e}"),
+        }
+    }
+
+    let mut queue_ids: Vec<String> = Vec::new();
+    for (_, prov) in db.get_all_providers("claude_code").map_err(String::from)? {
+        let env = prov
+            .settings_config
+            .get("env")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let base_url = env
+            .get("ANTHROPIC_BASE_URL")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if base_url.is_empty() {
+            log::warn!(
+                "proxy: failover queue skip \"{}\": no env.ANTHROPIC_BASE_URL in settings_config",
+                prov.id
+            );
+            continue;
+        }
+        let api_key = env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let pid = format!("queue-{}", prov.id);
+        let pp = database::dao::proxy_providers::ProxyProvider {
+            id: pid.clone(),
+            name: format!("{} (failover queue)", prov.name),
+            provider_type: "anthropic".into(),
+            api_key,
+            base_url,
+            models: vec![],
+            enabled: true,
+            timeout_ms: 60_000,
+            weight: 1,
+            circuit_breaker: serde_json::from_str("{}").unwrap_or_default(),
+        };
+        match proxy::providers::build_provider(&pp) {
+            Ok(p) => {
+                providers.insert(pid.clone(), Arc::from(p));
+                queue_ids.push(pid);
+            }
+            Err(e) => log::warn!("proxy: failover queue skip \"{}\": {e}", prov.id),
+        }
+    }
+
+    let router = Arc::new(proxy::router::Router::new(providers, routes).with_queue(queue_ids.clone()));
     let app_state = proxy::server::ProxyAppState {
         router,
         auth_token: config.auth_token.clone(),
     };
 
     // Port-fallback: try requested_port, then +1..+5 in order. For each
-    // candidate, bind a server, probe /health to confirm we own the port
-    // (avoids landing on another app that grabbed the same port), then
-    // persist the actual port so the next start prefers it.
+    // candidate, bind via serve_detached (bind outcome known immediately —
+    // no readiness guessing), probe /health to confirm we own the port
+    // (avoids landing on another app), then persist the actual port.
     const MAX_PORT_OFFSET: u16 = 5;
-    let mut last_err: Option<String> = None;
-    let mut chosen: Option<(proxy::server::BoundInfo, tauri::async_runtime::JoinHandle<()>, tokio::sync::oneshot::Sender<()>)> = None;
+    let mut errors: Vec<String> = Vec::new();
+    let mut chosen: Option<(proxy::server::BoundInfo, tokio::task::JoinHandle<Result<(), String>>, tokio::sync::oneshot::Sender<()>)> = None;
     let original_port = config.port;
     for offset in 0..=MAX_PORT_OFFSET {
         let try_port = original_port.wrapping_add(offset);
         let try_addr = proxy::server::socket_addr(&config.host, try_port);
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Option<proxy::server::BoundInfo>>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let state_for_try = app_state.clone();
-        let handle = tauri::async_runtime::spawn(async move {
-            // serve() owns shutdown_rx until its axum loop ends. If bind
-            // fails it returns immediately and shutdown_rx is dropped; if
-            // bind succeeds the inner axum loop awaits shutdown_rx. Either
-            // way, send the bind outcome through ready_tx so the caller can
-            // decide whether to keep this server or drop it.
-            let outcome = proxy::server::serve(try_addr, state_for_try, shutdown_rx).await;
-            let _ = ready_tx.send(outcome.ok());
-            // If bind failed, outcome was Err and serve() has already
-            // returned — this task is done. If bind succeeded, serve() is
-            // still running axum on try_addr; we just hold the task open by
-            // awaiting shutdown_rx again... but it's been moved. So if bind
-            // succeeded, axum is now serving and will only stop when the
-            // *outer* shutdown_rx (held by the caller, not us) is signalled
-            // and the original inner axum loop wakes. From this task's POV,
-            // we have nothing more to do; signal the outcome and return.
-            // (Cleanup on probe failure is handled by dropping handle below —
-            // the spawn task terminates when this closure returns, which is
-            // safe because serve() has already moved shutdown_rx.)
-        });
-        // Wait for the bind result.
-        let attempt = tokio::time::timeout(std::time::Duration::from_millis(300), ready_rx).await;
-        let bound = match attempt {
-            Ok(Ok(Some(b))) => b,
-            Ok(Ok(None)) => {
-                // Bind failed; record and try next.
-                last_err = Some(format!("port {} bind failed", try_port));
-                // The task has already returned; drop the handle.
-                drop(handle);
-                let _ = shutdown_tx.send(()); // no-op, but consistent
-                continue;
-            }
-            Ok(Err(_)) => {
-                last_err = Some(format!("port {} bind channel closed", try_port));
-                drop(handle);
-                let _ = shutdown_tx.send(());
-                continue;
-            }
-            Err(_) => {
-                // Timeout — bind hung. Treat as failure.
-                last_err = Some(format!("port {} bind timed out", try_port));
-                drop(handle);
-                let _ = shutdown_tx.send(());
+        let (bound, handle) = match proxy::server::serve_detached(try_addr, app_state.clone(), shutdown_rx).await {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("port {try_port}: {e}"));
                 continue;
             }
         };
-        // Confirm we actually own the port via /health (rules out a port we
-        // successfully bound to but another process already had reserved,
-        // which shouldn't happen on Linux/macOS but CAN on Windows when the
-        // port is in TIME_WAIT from a prior run).
+        // Confirm we actually own the port via /health (rules out the
+        // Windows TIME_WAIT trap where the port answers but isn't ours).
         let probe = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(500))
             .build()
         {
             Ok(c) => c,
             Err(e) => {
-                last_err = Some(format!("reqwest build: {e}"));
-                drop(handle);
+                errors.push(format!("port {try_port}: reqwest build: {e}"));
                 let _ = shutdown_tx.send(());
+                let _ = handle.await;
                 continue;
             }
         };
         let probe_url = format!("http://{}/health", bound.addr);
         let probe_ok = probe.get(&probe_url).send().await.map(|r| r.status().is_success()).unwrap_or(false);
         if !probe_ok {
-            // Not our server — somebody else owns this port. Tear down and
-            // try the next candidate.
             log::warn!("proxy: {} answered /health with non-2xx (or refused), assuming another process owns it", bound.addr);
-            last_err = Some(format!("port {} owned by another process", try_port));
-            drop(handle);
+            errors.push(format!("port {try_port}: owned by another process"));
             let _ = shutdown_tx.send(());
+            let _ = handle.await;
             continue;
         }
         chosen = Some((bound, handle, shutdown_tx));
@@ -825,7 +1084,10 @@ async fn proxy_start(
     let (bound, handle, shutdown_tx) = chosen.ok_or_else(|| {
         format!(
             "no free port near {} (tried {}+0..+{}): {}",
-            original_port, original_port, MAX_PORT_OFFSET, last_err.unwrap_or_else(|| "unknown".into())
+            original_port,
+            original_port,
+            MAX_PORT_OFFSET,
+            if errors.is_empty() { "unknown".into() } else { errors.join("; ") }
         )
     })?;
 
@@ -851,7 +1113,7 @@ async fn proxy_start(
             },
         });
     }
-    let msg = if bound.addr.port() == original_port {
+    let mut msg = if bound.addr.port() == original_port {
         format!("listening on {}:{}", bound.addr.ip(), bound.addr.port())
     } else {
         format!(
@@ -861,6 +1123,9 @@ async fn proxy_start(
             original_port
         )
     };
+    if !queue_ids.is_empty() {
+        msg.push_str(&format!(" · failover queue: {} provider(s)", queue_ids.len()));
+    }
     Ok(msg)
 }
 
@@ -870,7 +1135,8 @@ async fn proxy_stop(state: tauri::State<'_, Mutex<Option<RunningProxy>>>) -> Res
     if let Some(rp) = guard.take() {
         rp.shutdown.send(()).map_err(|_| "shutdown signal failed".to_string())?;
         // Wait for the server task to finish gracefully.
-        rp.handle.await.map_err(|e| e.to_string())?;
+        let result = rp.handle.await.map_err(|e| e.to_string())?;
+        result?;
     }
     Ok(())
 }
@@ -1087,6 +1353,19 @@ fn vendor_delete(db: tauri::State<'_, Database>, id: String) -> Result<(), Strin
     db.delete_vendor(&id).map_err(String::from)
 }
 
+/// One-shot import of all providers from the cc-switch SQLite DB at the
+/// default path (`~/.cc-switch/cc-switch.db` or `CC_SWITCH_DB_PATH`).
+/// Idempotent: rows whose `(id, app_type)` already exists in AAG are
+/// skipped, not overwritten. Returns a structured report so the UI can
+/// toast the number imported + skipped.
+#[tauri::command]
+fn import_cc_switch_providers(
+    db: tauri::State<'_, Database>,
+) -> Result<services::import_cc_switch::ImportReport, String> {
+    let path = services::import_cc_switch::cc_switch_db_path();
+    services::import_cc_switch::import_from_db(&db, &path).map_err(String::from)
+}
+
 #[tauri::command]
 fn sync_list(db: tauri::State<'_, Database>) -> Result<Vec<database::dao::sync_config::SyncConfig>, String> {
     db.get_all_sync_configs().map_err(String::from)
@@ -1246,7 +1525,12 @@ pub fn run() {
             provider_list, provider_current, provider_get, provider_save, provider_delete, provider_switch,
             settings_get, settings_set,
             codex_cli_status, codex_open_cli_terminal, copilot_open_cli_terminal,
-            proxy_status, proxy_start, proxy_stop,
+            detect_cc_switch, set_cc_switch_override,
+            get_cc_switch_blocking, set_cc_switch_blocking,
+            proxy_status, proxy_start, proxy_stop, proxy_config_get, proxy_config_save,
+            get_sync_with_ccswitch, set_sync_with_ccswitch,
+            set_provider_sync_locked,
+            provider_reorder,
             proxy_provider_list, proxy_provider_save, proxy_provider_delete,
             route_list, route_save, route_delete,
             backup_create, backup_list, backup_delete,
@@ -1257,6 +1541,7 @@ pub fn run() {
             sync_list, sync_save, sync_delete, sync_record_result,
             sync_check, sync_upload, sync_download,
             vendor_list, vendor_save, vendor_delete,
+            import_cc_switch_providers,
         ])
         .setup(|app| {
             // Install the system tray icon (Show / Hide / Quit menu).

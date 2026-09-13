@@ -15,6 +15,31 @@ pub const KEY_CODEX_CLI_HOME: &str = "codex_cli_home";
 /// Well-known setting key: global outbound proxy (injected into the Codex CLI
 /// terminal).
 pub const KEY_OUTBOUND_PROXY: &str = "outbound_proxy";
+/// Well-known setting key: when `"1"`, skip the cc-switch coexistence
+/// check before provider switching / CLI terminal launch. Allows advanced
+/// users to opt out of the safety dialog when they knowingly run both
+/// apps side-by-side (off by default).
+pub const KEY_CCSWITCH_OVERRIDE_ENABLED: &str = "ccswitch_override_enabled";
+/// Well-known setting key: when `"1"`, AAG actively blocks writes that
+/// would clobber cc-switch's `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` in
+/// `~/.claude/settings.json` and `~/.codex/config.toml`. Off by default
+/// because the typical user setup is the reverse: cc-switch chains
+/// *through* AAG (cc-switch → AAG → upstream), and AAG only serves
+/// Anthropic `/v1/messages` to upstream-aware clients like Codex CLI's
+/// isolated CODEX_HOME window. The banner is always shown when cc-switch
+/// is detected; this toggle only flips the hard-block behaviour.
+pub const KEY_CCSWITCH_BLOCK_ENABLED: &str = "ccswitch_block_enabled";
+/// Well-known setting key: when `"1"`, `proxy_start` runs an
+/// automatic `INSERT OR IGNORE` pass that pulls every claude_code
+/// provider out of `~/.cc-switch/cc-switch.db` into AAG. Existing AAG
+/// rows are not overwritten; manually-tuned providers can opt out via
+/// `providers.sync_locked = true` (toggled in the Providers UI).
+pub const KEY_SYNC_WITH_CCSWITCH: &str = "sync_with_cc_switch_enabled";
+/// Well-known setting key: the most recent cc-switch detection status,
+/// stored as a JSON-encoded `CcSwitchStatus`. Lets the frontend skip the
+/// initial detect() round-trip after a relaunch when the snapshot is
+/// fresh enough.
+pub const KEY_CCSWITCH_LAST_STATUS: &str = "ccswitch_last_status_json";
 
 impl Database {
     /// Read a setting value. Returns `Ok(None)` if the key is absent.

@@ -33,6 +33,7 @@ pub fn get_db_path() -> PathBuf {
 }
 
 /// Return the backups directory (`~/.aag/backups/`), creating it if absent.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn get_backups_dir() -> Result<PathBuf, AppError> {
     let dir = get_app_config_dir().join("backups");
     fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
@@ -143,11 +144,13 @@ pub fn get_pi_config_dir() -> PathBuf {
 }
 
 /// Return the pi `models.json` path (custom provider map).
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn get_pi_models_path() -> PathBuf {
     get_pi_config_dir().join("models.json")
 }
 
 /// Return the pi `settings.json` path (default model).
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn get_pi_settings_path() -> PathBuf {
     get_pi_config_dir().join("settings.json")
 }
@@ -187,6 +190,7 @@ pub fn get_antigravity_settings_path() -> PathBuf {
 
 /// Atomic write: write to `<path>.tmp.<n>` then rename. Prevents config
 /// corruption if the process is interrupted mid-write.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
@@ -200,6 +204,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 }
 
 /// Serialize a value to pretty JSON and atomically write it.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppError> {
     let json = serde_json::to_string_pretty(data)?;
     atomic_write(path, json.as_bytes())
@@ -227,11 +232,13 @@ pub fn read_text_file(path: &Path) -> Result<Option<String>, AppError> {
 }
 
 /// Atomically write a text file (for TOML / plain text).
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
 /// Copy a file to a backup path (best-effort, used before overwriting live config).
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn backup_file(src: &Path, dst: &Path) -> Result<(), AppError> {
     if !src.exists() {
         return Ok(());

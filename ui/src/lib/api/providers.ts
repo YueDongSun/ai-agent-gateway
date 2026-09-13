@@ -41,3 +41,12 @@ export async function switchProvider(
 ): Promise<LiveWriteResult> {
   return invoke<LiveWriteResult>('provider_switch', { id, appType });
 }
+
+/// Reorder providers by writing a new sort_index for each id. Used by
+/// the drag handle on the Providers page.
+export async function reorderProviders(
+  appType: string,
+  orderedIds: string[],
+): Promise<void> {
+  await invoke('provider_reorder', { appType, orderedIds });
+}

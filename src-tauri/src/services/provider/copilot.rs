@@ -19,7 +19,7 @@
 //! {
 //!   "model": "claude-sonnet-4",
 //!   "env": {
-//!     "COPILOT_PROVIDER_BASE_URL": "http://127.0.0.1:8787/v1",
+//!     "COPILOT_PROVIDER_BASE_URL": "http://127.0.0.1:8989/v1",
 //!     "COPILOT_PROVIDER_API_KEY": "...",
 //!     "COPILOT_PROVIDER_TYPE": "openai"
 //!   }
@@ -105,6 +105,7 @@ fn strip_jsonc_comments(raw: &str) -> String {
 
 /// Write `provider.settings_config` to `~/.copilot/settings.json`, merging with
 /// any existing user settings and backing up the original first.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
     let path = get_copilot_settings_path();
     let obj = provider.settings_config.as_object().ok_or_else(|| {

@@ -165,7 +165,7 @@ const copilotSchema: AppSchema = {
       key: 'baseUrl',
       label: 'Provider base URL',
       type: 'text',
-      placeholder: 'http://127.0.0.1:8787/v1',
+      placeholder: 'http://127.0.0.1:8989/v1',
       required: true,
     },
     {
@@ -237,7 +237,7 @@ const piSchema: AppSchema = {
       key: 'baseUrl',
       label: 'Provider base URL',
       type: 'text',
-      placeholder: 'http://127.0.0.1:8787/v1',
+      placeholder: 'http://127.0.0.1:8989/v1',
     },
     {
       key: 'apiKey',

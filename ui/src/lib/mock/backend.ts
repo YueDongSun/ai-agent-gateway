@@ -18,6 +18,10 @@
 ///   - `window.__aagDemoSetError(null)`             — clear the forced error
 ///   - `window.__aagDemoSeedDeeplink('aag://switch/claude-1?app=claude_code')`
 ///     — fire a deep-link event so DeepLinkPage renders + parses a URL
+///   - `window.__aagDemoSetConflict(true|false)`
+///     — toggle the mock cc-switch coexistence flag, so the banner /
+///       dialog UI can be exercised end-to-end without a real cc-switch
+///       instance running alongside the demo
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import { mockIPC } from '@tauri-apps/api/mocks';
 import type { AppType, Provider } from '../api/types';
@@ -92,7 +96,7 @@ function seedProviders() {
       name: 'Via local proxy',
       settingsConfig: {
         env: {
-          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787',
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8989',
           ANTHROPIC_AUTH_TOKEN: 'demo',
         },
       },
@@ -127,7 +131,7 @@ function seedProviders() {
       settingsConfig: {
         model: 'claude-sonnet-4',
         env: {
-          COPILOT_PROVIDER_BASE_URL: 'http://127.0.0.1:8787/v1',
+          COPILOT_PROVIDER_BASE_URL: 'http://127.0.0.1:8989/v1',
           COPILOT_PROVIDER_API_KEY: 'demo',
           COPILOT_PROVIDER_TYPE: 'openai',
         },
@@ -141,7 +145,7 @@ function seedProviders() {
       name: 'Pi + Claude via proxy',
       settingsConfig: {
         providerId: 'pi-claude',
-        baseUrl: 'http://127.0.0.1:8787/v1',
+        baseUrl: 'http://127.0.0.1:8989/v1',
         apiKey: 'demo',
         model: 'claude-sonnet-4',
         models: ['claude-sonnet-4', 'gpt-5'],
@@ -168,6 +172,7 @@ seedProviders();
 // ----- Proxy failover -----
 
 let proxyRunning = false;
+let proxyConfig = { host: '127.0.0.1', port: 8989, authToken: 'demo-key', enabled: true };
 
 const proxyProviders: ProxyProvider[] = [
   {
@@ -343,8 +348,49 @@ const syncConfigs: SyncConfig[] = [
 
 const settings = new Map<string, string>([
   ['codex_cli_home', 'C:\\Users\\dev\\.codex-cli'],
-  ['outbound_proxy', 'http://127.0.0.1:8787'],
+  ['outbound_proxy', 'http://127.0.0.1:8989'],
+  ['ccswitch_override_enabled', '0'],
+  ['ccswitch_block_enabled', '0'],
 ]);
+
+// ----- cc-switch coexistence (Phase 15.5) -----
+
+/**
+ * In the browser demo we can't actually probe localhost ports. The mock
+ * defaults to "cc-switch not running" so the rest of the UI flows
+ * normally. To exercise the conflict UI, call
+ * `window.__aagDemoSetConflict(true)` in DevTools — that flips a module
+ * flag the next `detect_cc_switch` invocation reads.
+ */
+let ccswitchMockRunning = false;
+
+export function setMockCcSwitchRunning(running: boolean) {
+  ccswitchMockRunning = running;
+}
+
+function targetUrlPointsAtAag(settingsConfig: unknown): { aagPort: number; url: string } | null {
+  if (!settingsConfig || typeof settingsConfig !== 'object') return null;
+  const obj = settingsConfig as Record<string, unknown>;
+  const env = (obj.env ?? {}) as Record<string, unknown>;
+  const candidates = [
+    typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : null,
+    typeof env.OPENAI_BASE_URL === 'string' ? env.OPENAI_BASE_URL : null,
+    typeof env.COPILOT_PROVIDER_BASE_URL === 'string' ? env.COPILOT_PROVIDER_BASE_URL : null,
+  ].filter((x): x is string => Boolean(x));
+  for (const url of candidates) {
+    if (!/^https?:\/\/(127\.0\.0\.1|localhost|::1):(\d+)/.test(url)) continue;
+    const m = url.match(/:(\d+)/);
+    if (!m) continue;
+    const port = Number(m[1]);
+    // In the demo, AAG's port is 8989 and cc-switch's port is 15721.
+    if (port === 8989) return { aagPort: port, url };
+  }
+  return null;
+}
+
+function conflictErrorMessage(target: { aagPort: number; url: string }): string {
+  return `conflict with cc-switch (running at 127.0.0.1:15721); AAG would write ${target.url} but cc-switch is already proxying — please disable cc-switch's proxy or enable 'ignore cc-switch conflict' in settings`;
+}
 
 // ---------------------------------------------------------------------------
 // Debug hooks
@@ -541,6 +587,22 @@ export function installMockBackend() {
         if (currentByApp.get(appType) === p.id) currentByApp.delete(appType);
         return null;
       }
+      case 'provider_reorder': {
+        const appType = String(p.appType);
+        const ids = p.orderedIds as string[];
+        const list = providers.get(appType) ?? [];
+        const next: Provider[] = [];
+        for (const id of ids) {
+          const found = list.find((x) => x.id === id);
+          if (found) next.push(found);
+        }
+        // Keep any items not in the ordered list at the end.
+        for (const item of list) {
+          if (!ids.includes(item.id)) next.push(item);
+        }
+        providers.set(appType, next);
+        return null;
+      }
       case 'provider_switch': {
         const appType = String(p.appType);
         const id = String(p.id);
@@ -552,6 +614,25 @@ export function installMockBackend() {
         if (!(providers.get(appType) ?? []).some((p) => p.id === id)) {
           throw new Error(`provider "${id}" not found for app "${appType}"`);
         }
+        // Mirror the Rust cc-switch coexistence guard. Hard-block is
+        // opt-in via `ccswitch_block_enabled` (default off). When the
+        // demo is configured to "pretend cc-switch is running" AND the
+        // user enabled blocking AND the provider points at AAG's mock
+        // proxy AND the app is codex/copilot (claude_code never blocks),
+        // reject with the structured error so the UI dialog renders.
+        const provider = (providers.get(appType) ?? []).find((x) => x.id === id);
+        const overrideOn = settings.get('ccswitch_override_enabled') === '1';
+        const blockOn = settings.get('ccswitch_block_enabled') === '1';
+        if (
+          ccswitchMockRunning &&
+          blockOn &&
+          !overrideOn &&
+          provider &&
+          ['codex', 'copilot'].includes(appType)
+        ) {
+          const target = targetUrlPointsAtAag(provider.settingsConfig);
+          if (target) throw new Error(conflictErrorMessage(target));
+        }
         currentByApp.set(appType, id);
         return {
           app_type: appType,
@@ -561,17 +642,60 @@ export function installMockBackend() {
         };
       }
 
+      // ---- cc-switch coexistence (Phase 15.5 + follow-up) ----
+      case 'detect_cc_switch': {
+        const overrideOn = settings.get('ccswitch_override_enabled') === '1';
+        return {
+          running: ccswitchMockRunning,
+          source: ccswitchMockRunning ? 'port' : null,
+          port: 15721,
+          liveUrlClaude: null,
+          liveUrlCodex: null,
+          checkedAt: Math.floor(Date.now() / 1000),
+          suppressed: overrideOn,
+        };
+      }
+      case 'set_cc_switch_override': {
+        const enabled = Boolean(p.enabled);
+        settings.set('ccswitch_override_enabled', enabled ? '1' : '0');
+        return null;
+      }
+      case 'get_cc_switch_blocking':
+        return settings.get('ccswitch_block_enabled') === '1';
+      case 'set_cc_switch_blocking': {
+        const enabled = Boolean(p.enabled);
+        settings.set('ccswitch_block_enabled', enabled ? '1' : '0');
+        return null;
+      }
+
+      // ---- import_cc_switch_providers (Phase 15.5+ follow-up) ----
+      // Demo mode can't actually open the user's cc-switch SQLite DB
+      // (it's outside the demo's reach and IndexedDB isn't SQLite).
+      // Returns an empty report so the import button renders cleanly.
+      case 'import_cc_switch_providers':
+        return {
+          sourceDb: '(demo: no real filesystem access)',
+          imported: [],
+          skippedExisting: [],
+          totalInSource: 0,
+        };
+
       // ---- proxy ----
       case 'proxy_status':
         return {
           running: proxyRunning,
-          config: { host: '127.0.0.1', port: 8787, authToken: '', enabled: true },
+          config: proxyConfig,
         };
       case 'proxy_start':
         proxyRunning = true;
         return 'mock proxy started (demo: no real HTTP listener)';
       case 'proxy_stop':
         proxyRunning = false;
+        return null;
+      case 'proxy_config_get':
+        return proxyConfig;
+      case 'proxy_config_save':
+        proxyConfig = p.config as typeof proxyConfig;
         return null;
       case 'proxy_provider_list':
         return proxyProviders;
@@ -772,7 +896,18 @@ export function installMockBackend() {
             (providers.get('codex') ?? []).find((p) => p.id === currentByApp.get('codex'))?.name ??
             null,
         };
-      case 'codex_open_cli_terminal':
+      case 'codex_open_cli_terminal': {
+        const overrideOn = settings.get('ccswitch_override_enabled') === '1';
+        const blockOn = settings.get('ccswitch_block_enabled') === '1';
+        if (ccswitchMockRunning && blockOn && !overrideOn) {
+          const proxy = settings.get('outbound_proxy') ?? '';
+          const m = /^(https?:\/\/(?:127\.0\.0\.1|localhost|::1)):(\d+)/.exec(proxy);
+          if (m) {
+            const url = `${m[1]}:${m[2]}`;
+            const port = Number(m[2]);
+            throw new Error(conflictErrorMessage({ aagPort: port, url }));
+          }
+        }
         return {
           codexHome: 'C:\\Users\\dev\\.codex-cli',
           codexBinary: 'codex.exe',
@@ -782,18 +917,32 @@ export function installMockBackend() {
             ['HTTPS_PROXY', settings.get('outbound_proxy') ?? ''],
           ],
         };
+      }
 
       // ---- copilot cli ----
-      case 'copilot_open_cli_terminal':
+      case 'copilot_open_cli_terminal': {
+        const overrideOn = settings.get('ccswitch_override_enabled') === '1';
+        const blockOn = settings.get('ccswitch_block_enabled') === '1';
+        if (ccswitchMockRunning && blockOn && !overrideOn) {
+          const copilotProviderId = currentByApp.get('copilot');
+          const copilotProvider = copilotProviderId
+            ? (providers.get('copilot') ?? []).find((p) => p.id === copilotProviderId)
+            : undefined;
+          if (copilotProvider) {
+            const target = targetUrlPointsAtAag(copilotProvider.settingsConfig);
+            if (target) throw new Error(conflictErrorMessage(target));
+          }
+        }
         return {
           copilotBinary: 'copilot.cmd',
           providerId: currentByApp.get('copilot') ?? 'copilot-claude',
           env: [
-            ['COPILOT_PROVIDER_BASE_URL', 'http://127.0.0.1:8787/v1'],
+            ['COPILOT_PROVIDER_BASE_URL', 'http://127.0.0.1:8989/v1'],
             ['COPILOT_PROVIDER_TYPE', 'openai'],
             ['COPILOT_MODEL', 'claude-sonnet-4'],
           ],
         };
+      }
 
       // ---- deep links ----
       case 'deeplink_parse':
@@ -824,7 +973,7 @@ export function installMockBackend() {
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-const DEMO_PROXY_BASE = 'http://127.0.0.1:8787';
+const DEMO_PROXY_BASE = 'http://127.0.0.1:8989';
 
 /// Intercept the two direct proxy fetches (ProxyPage polls these via `fetch`,
 /// not invoke) so the demo shows the failover health table. Any other URL is
@@ -879,11 +1028,12 @@ export function initDemo() {
   Object.assign(window, {
     __aagDemoSetError: setMockError,
     __aagDemoSeedDeeplink: seedDeeplink,
+    __aagDemoSetConflict: setMockCcSwitchRunning,
     __aagDemoIsDemo: true,
   });
   console.info(
     '[aag-demo] running with an in-browser mock backend (no Tauri). ' +
-      'Debug: window.__aagDemoSetError(cmd|null) · window.__aagDemoSeedDeeplink(url)',
+      'Debug: window.__aagDemoSetError(cmd|null) · window.__aagDemoSeedDeeplink(url) · window.__aagDemoSetConflict(true|false)',
   );
   // Exercise the deep-link flow after mount so DeepLinkPage has a sample URL.
   const injected = new URLSearchParams(window.location.search).get('deeplink');

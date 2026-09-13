@@ -69,6 +69,16 @@ export interface ProxyHealth {
 
 // ----- Tauri commands (defined in src-tauri/src/lib.rs) -----
 
+/// Read the proxy listen config (host/port/authToken) for the endpoint card.
+export async function getProxyConfig(): Promise<ProxyConfig> {
+  return invoke<ProxyConfig>('proxy_config_get');
+}
+
+/// Update the proxy listen config (host/port/authToken). Applies on next start.
+export async function saveProxyConfig(config: ProxyConfig): Promise<void> {
+  await invoke('proxy_config_save', { config });
+}
+
 export async function getProxyStatus(): Promise<ProxyStatus> {
   return invoke<ProxyStatus>('proxy_status');
 }

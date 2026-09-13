@@ -15,6 +15,7 @@ import {
   type ProxyStatus,
   type Route,
 } from '../../lib/api/proxy';
+import { getProxyConfig, saveProxyConfig } from '../../lib/api/proxy';
 import { officialDisplayName } from '../../lib/models';
 import { useT } from '../../lib/ctx';
 
@@ -197,6 +198,32 @@ export function ProxyPage() {
   const running = status?.running ?? false;
   const cfg = status?.config;
 
+  // API-key editor state (proxy_config.authToken) — the key cc-switch sends
+  // as Bearer/x-api-key.
+  const [apiKey, setApiKey] = useState('');
+  const [savingKey, setSavingKey] = useState(false);
+  useEffect(() => {
+    void (async () => {
+      try {
+        setApiKey((await getProxyConfig()).authToken ?? '');
+      } catch {
+        /* editor stays empty */
+      }
+    })();
+  }, []);
+  const handleSaveKey = async () => {
+    if (!cfg) return;
+    setSavingKey(true);
+    try {
+      await saveProxyConfig({ ...cfg, authToken: apiKey.trim() });
+      setError(t('proxy.apiKey.saved'));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
   return (
     <div className="proxy-page">
       <header className="page-header">
@@ -227,6 +254,24 @@ export function ProxyPage() {
             </code>
           )}
         </div>
+
+        <div className="endpoint-editor">
+          <label>
+            <span>{t('proxy.apiKey.label')}</span>
+            <input
+              type="text"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-aag-..."
+              spellCheck={false}
+              disabled={savingKey}
+            />
+          </label>
+          <button className="btn" onClick={handleSaveKey} disabled={savingKey || !cfg}>
+            {savingKey ? t('common.loading') : t('common.save')}
+          </button>
+        </div>
+        <p className="muted endpoint-editor-hint">{t('proxy.apiKey.hint')}</p>
 
         {running && health && (
           <>

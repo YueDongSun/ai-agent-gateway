@@ -62,7 +62,6 @@ export const en = {
   'providers.add': '+ Add provider',
   'providers.empty': 'No providers yet. Click "Add provider" to create one.',
   'providers.current': 'CURRENT',
-  'providers.switch': 'Switch',
   'providers.delete': 'Delete',
   'providers.edit': 'Edit',
   'providers.modal.add': 'Add provider',
@@ -78,8 +77,6 @@ export const en = {
   'providers.invalidJson': 'settingsConfig must be valid JSON: {message}',
   'providers.saved': 'Provider saved.',
   'providers.deleted': 'Provider deleted.',
-  'providers.switched': 'Switched to {name}. Wrote {count} file(s).',
-  'providers.switchedCodex': 'Switched to {name}. Wrote {count} file(s) to: {files}',
   'providers.section': '{app} providers',
   'providers.modal.addFor': 'Add {app} provider',
   'providers.modal.preview': 'Generated settings_config (preview)',
@@ -91,6 +88,36 @@ export const en = {
   'providers.modal.protocol': 'Protocol',
   'providers.modal.protocolRecommended': 'recommended',
   'providers.delete.confirm': 'Delete provider "{id}"?',
+  'providers.endpoint.title': 'Endpoint (paste into cc-switch)',
+  'providers.endpoint.hint': 'AAG never touches local config files — config writes are cc-switch territory. In cc-switch, create an Anthropic provider with the Base URL and API Key below; requests fail over through this page\'s provider list in order.',
+  'providers.endpoint.url': 'Base URL',
+  'providers.endpoint.apiKey': 'API Key',
+  'providers.endpoint.noKey': '(not set — proxy accepts any key)',
+  'providers.endpoint.copy': 'Copy',
+  'providers.chainHint': 'List order = failover order (first failure falls through to the next). A provider joins the chain only if its settings_config has env.ANTHROPIC_BASE_URL.',
+  'providers.syncFromCcSwitch': 'Auto-sync from cc-switch',
+  'providers.syncFromCcSwitch.help':
+    'When on, every proxy_start pulls new claude_code providers out of cc-switch\'s DB into AAG. Existing rows are not overwritten; locked rows are skipped. When off, the button below only fires a one-time import.',
+  'providers.syncLocked': 'Lock (do not overwrite)',
+  'providers.syncLocked.help':
+    'Lock a row so the auto-sync path leaves it alone. You can hand-tune it and new upstream entries from cc-switch still get pulled in.',
+  'providers.locked': 'LOCKED',
+  'chain.title': 'Failover chain',
+  'chain.empty': 'No claude_code providers yet. Add one (or turn on Auto-sync from cc-switch) to populate the chain.',
+  'chain.noUrl': '(no env.ANTHROPIC_BASE_URL — entry is skipped)',
+  'chain.skipped': 'SKIPPED',
+  'providers.dragHint': 'Drag the handle (⋮⋮) to reorder. List order = failover chain order.',
+  'proxy.apiKey.label': 'API Key (exposed to cc-switch)',
+  'proxy.apiKey.hint': 'Leave empty to disable auth. Restart the proxy to apply.',
+  'proxy.apiKey.saved': 'API Key saved. Restart the proxy to apply.',
+  'providers.importCcSwitch': 'Import from cc-switch',
+  'providers.importCcSwitch.help':
+    'Read providers from ~/.cc-switch/cc-switch.db and add any missing rows to AAG. Existing AAG providers are kept (no overwrite). cc-switch\'s `is_current` bit is dropped — imported rows are available but not auto-activated.',
+  'providers.importCcSwitch.empty':
+    'No providers found in cc-switch. Make sure cc-switch has been run at least once so its DB at ~/.cc-switch/cc-switch.db is populated.',
+  'providers.importCcSwitch.report':
+    'Imported {imported} · Skipped {skipped} (already present) · Source had {total}.',
+  'providers.importCcSwitch.failed': 'cc-switch import failed: {message}',
 
   // Proxy page
   'proxy.title': 'Local Proxy',
@@ -338,6 +365,11 @@ export const en = {
   'header.theme.dark': 'Dark',
   'header.theme.auto': 'Auto',
   'header.lang.toggle': 'Language',
+
+  // Settings
+  'settings.title': 'Settings',
+  'settings.noConflictNeeded':
+    'AAG no longer writes live agent config files (config writes are cc-switch territory) — nothing to conflict over. Future device-level toggles will land here.',
 } as const;
 
 export type MessageKey = keyof typeof en;

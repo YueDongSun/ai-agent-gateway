@@ -15,6 +15,7 @@ use std::collections::HashMap;
 /// Protocol ids a vendor can serve. Keep in sync with
 /// `ui/src/lib/api/vendors.ts` (PROTOCOLS) and the app->protocol mapping in
 /// the smart form.
+#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub const PROTOCOL_ANTHROPIC: &str = "anthropic";
 pub const PROTOCOL_OPENAI_CHAT: &str = "openai-chat";
 pub const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
