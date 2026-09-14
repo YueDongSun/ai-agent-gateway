@@ -17,6 +17,12 @@ export interface CodexCliTerminalResult {
   env: Array<[string, string]>;
 }
 
+export interface CodexDesktopResult {
+  codexHome: string;
+  codexBinary: string;
+  mirror: boolean;
+}
+
 /** Read a device-level setting (app_meta table). */
 export async function settingsGet(key: string): Promise<string | null> {
   return invoke<string | null>('settings_get', { key });
@@ -39,4 +45,9 @@ export async function codexOpenCliTerminal(
   return invoke<CodexCliTerminalResult>('codex_open_cli_terminal', {
     cwd: cwd ?? null,
   });
+}
+
+/** Launch a NEW Codex Desktop instance against AAG's mirror CODEX_HOME. */
+export async function codexOpenDesktopWindow(): Promise<CodexDesktopResult> {
+  return invoke<CodexDesktopResult>('codex_open_desktop_window');
 }

@@ -53,6 +53,7 @@ impl Database {
                     half_open_retries: 1,
                     success_threshold: 2,
                 },
+                model_mapping: Default::default(),
             })?;
             self.save_proxy_provider(&ProxyProvider {
                 id: MOCK_FALLBACK.into(),
@@ -70,6 +71,7 @@ impl Database {
                     half_open_retries: 1,
                     success_threshold: 2,
                 },
+                model_mapping: Default::default(),
             })?;
         }
 
@@ -125,7 +127,32 @@ impl Database {
                 self.save_route(&Route {
                     alias: m.id.into(),
                     description: format!(
-                        "{} via failover chain (edit hops on the Proxy page)",
+                        "{} via failover chain (edit hops on the route editor)",
+                        m.display_name
+                    ),
+                    hops: vec![
+                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
+                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
+                    ],
+                })?;
+            }
+        }
+
+        // Seed default Codex model routes (same pattern as Claude routes).
+        for m in crate::proxy::models::CODEX_MODELS {
+            let exists = {
+                let conn = lock_conn!(self.conn);
+                conn.query_row(
+                    "SELECT COUNT(*) FROM routes WHERE alias = ?1",
+                    params![m.id],
+                    |row| row.get::<_, i64>(0),
+                )? > 0
+            };
+            if !exists {
+                self.save_route(&Route {
+                    alias: m.id.into(),
+                    description: format!(
+                        "{} — configure upstream models in the route editor",
                         m.display_name
                     ),
                     hops: vec![

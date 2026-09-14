@@ -6,7 +6,13 @@
 use serde::{Deserialize, Serialize};
 
 /// A chat completion request in canonical OpenAI format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `tools` and `tool_choice` are stored as raw `serde_json::Value` arrays
+/// because tool definition shapes differ between OpenAI / Anthropic / Codex
+/// Responses API and we don't want to maintain three near-identical
+/// structs. The converter layer is responsible for translating between
+/// shapes (see `proxy::converter`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -16,15 +22,36 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// OpenAI-format tool definitions. Each entry is a JSON object whose
+    /// concrete shape depends on the upstream protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// OpenAI-format tool selector ("auto" / "none" / "required" /
+    /// `{"type":"function","function":{"name":"X"}}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
     /// Capture any extra fields to pass through.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// One message in a chat completion request.
+///
+/// `tool_calls` is stored as raw values (OpenAI's `tool_calls` array shape
+/// varies between providers — index, function name + JSON-string args). The
+/// canonical encoder preserves order; converters normalise to the target
+/// protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: serde_json::Value,
+    /// OpenAI-style assistant tool invocations: array of
+    /// `{id, type, function:{name, arguments}}` objects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// OpenAI-style `tool` role message id (`role: tool`, `tool_call_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -54,6 +81,13 @@ pub struct OAIMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// OpenAI `tool_calls` array on an assistant message (id / type /
+    /// function name + JSON-string arguments).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// OpenAI `refusal` field — surfaced verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -69,6 +103,10 @@ pub struct Usage {
 }
 
 /// A single streaming chunk (the JSON object inside an SSE `data:` line).
+///
+/// Top-level flatten captures `object: "chat.completion.chunk"` already in
+/// the explicit field, plus any provider-specific top-level keys
+/// (`system_fingerprint`, etc).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAIStreamChunk {
     pub id: String,
@@ -76,6 +114,9 @@ pub struct OAIStreamChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<StreamChoice>,
+    /// Captures `usage` (often the last chunk) plus other top-level fields.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +125,9 @@ pub struct StreamChoice {
     pub delta: StreamDelta,
     #[serde(rename = "finish_reason", skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// Provider-specific extras (e.g. `logprobs`).
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +136,17 @@ pub struct StreamDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// OpenAI `tool_calls` array delta — usually with `index`, sometimes
+    /// `id`/`function.name` only, sometimes `function.arguments` fragment.
+    /// Critical for streaming tool use; without this field the entire
+    /// tool-call payload was being silently dropped by serde.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// DeepSeek/Kimi-style `reasoning_content` (or Anthropic `thinking`
+    /// delta passthrough). Stored under the same key on the wire as the
+    /// upstream sent it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning: Option<String>,
 }
 
 /// Error from a provider during request execution.

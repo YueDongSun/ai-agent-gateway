@@ -8,7 +8,10 @@
 //! Ported from `src/gateway/server.ts` (Hono). Uses axum 0.7.
 
 use crate::proxy::canonical::ChatCompletionRequest;
-use crate::proxy::converter::{anthropic_req_to_oai_req, oai_chunks_to_anthropic_stream, oai_resp_to_anthropic_resp, AnthropicRequest};
+use crate::proxy::converter::{
+    anthropic_req_to_oai_req, chat_chunks_to_responses_stream, chat_to_responses, oai_chunks_to_anthropic_stream, oai_resp_to_anthropic_resp, responses_to_chat, AnthropicRequest,
+};
+use crate::proxy::responses::{ResponsesRequest, STREAM_DONE};
 use crate::proxy::router::Router;
 use axum::{
     extract::State,
@@ -24,11 +27,14 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 /// Shared state for the proxy server. `Arc<Router>` is built once at start
-/// time from the DB snapshot.
+/// time from the DB snapshot. `pinned_provider` is a runtime toggle: when
+/// set to Some(id), ALL requests are forced through that provider (bypassing
+/// the failover chain).
 #[derive(Clone)]
 pub struct ProxyAppState {
     pub router: Arc<Router>,
     pub auth_token: String,
+    pub pinned_provider: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// What the proxy ended up listening on. `port` is the actually-bound port
@@ -84,6 +90,7 @@ fn build_router(state: ProxyAppState) -> AxumRouter {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1/responses", post(responses))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
 }
@@ -114,10 +121,14 @@ fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
 }
 
 async fn health(State(state): State<ProxyAppState>) -> impl IntoResponse {
+    let last_used = state.router.last_used.lock().ok().and_then(|g| g.clone());
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     Json(json!({
         "status": "ok",
         "providers": state.router.health(),
         "models": state.router.list_models(),
+        "lastUsed": last_used,
+        "pinnedProvider": pinned,
     }))
 }
 
@@ -169,7 +180,13 @@ async fn chat_completions(
     if req.stream {
         return stream_chat_completions(state, req).await;
     }
-    match state.router.complete(&req).await {
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+    let result = if let Some(ref pid) = pinned {
+        state.router.complete_with_provider(pid, &req).await
+    } else {
+        state.router.complete_for(crate::proxy::router::SURFACE_CHAT, &req).await
+    };
+    match result {
         Ok(resp) => match serde_json::to_value(resp) {
             Ok(v) => Json(v).into_response(),
             Err(e) => err_response(500, format!("serialize error: {e}"), "internal_error"),
@@ -182,7 +199,13 @@ async fn chat_completions(
 }
 
 async fn stream_chat_completions(state: ProxyAppState, req: ChatCompletionRequest) -> Response {
-    let stream = match state.router.stream(&req).await {
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+    let stream = if let Some(ref pid) = pinned {
+        state.router.stream_with_provider(pid, &req).await
+    } else {
+        state.router.stream_for(crate::proxy::router::SURFACE_CHAT, &req).await
+    };
+    let stream = match stream {
         Ok(s) => s,
         Err(e) => {
             let status = e.status.unwrap_or(500);
@@ -228,7 +251,13 @@ async fn messages(
     let oai_req = anthropic_req_to_oai_req(&ant_req);
     let requested_model = ant_req.model.clone();
     if ant_req.stream == Some(true) {
-        let stream = match state.router.stream(&oai_req).await {
+        let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+        let stream = if let Some(ref pid) = pinned {
+            state.router.stream_with_provider(pid, &oai_req).await
+        } else {
+            state.router.stream_for(crate::proxy::router::SURFACE_CLAUDE, &oai_req).await
+        };
+        let stream = match stream {
             Ok(s) => s,
             Err(e) => {
                 let status = e.status.unwrap_or(500);
@@ -246,7 +275,13 @@ async fn messages(
             .body(body)
             .unwrap();
     }
-    let oai_resp = match state.router.complete(&oai_req).await {
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+    let oai_resp = if let Some(ref pid) = pinned {
+        state.router.complete_with_provider(pid, &oai_req).await
+    } else {
+        state.router.complete_for(crate::proxy::router::SURFACE_CLAUDE, &oai_req).await
+    };
+    let oai_resp = match oai_resp {
         Ok(r) => r,
         Err(e) => {
             let status = e.status.unwrap_or(500);
@@ -264,6 +299,99 @@ async fn messages(
 fn err_response(status: u16, message: impl Into<String>, kind: &str) -> Response {
     let body = json!({ "error": { "message": message.into(), "type": kind } });
     (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body)).into_response()
+}
+
+/// OpenAI Responses API endpoint. Accepts the Responses request shape,
+/// converts to canonical OpenAI Chat Completions, runs the failover router,
+/// then converts the response back to the Responses envelope. Streaming
+/// emits SSE events using the Responses API's named-event format
+/// (`event: response.created\ndata: ...\n\n` etc.) terminated by
+/// `data: [DONE]\n\n`. This is the surface the Codex CLI / Codex Desktop
+/// app uses natively.
+async fn responses(
+    State(state): State<ProxyAppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = check_auth(&headers, &state.auth_token) {
+        return resp;
+    }
+    let req: ResponsesRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return err_response(400, format!("invalid JSON body: {e}"), "invalid_request_error"),
+    };
+    if req.model.is_empty() {
+        return err_response(400, "model is required", "invalid_request_error");
+    }
+    let requested_model = req.model.clone();
+    let chat_req = responses_to_chat(&req);
+
+    if req.stream {
+        return stream_responses(state, chat_req, requested_model).await;
+    }
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+    let result = if let Some(ref pid) = pinned {
+        state.router.complete_with_provider(pid, &chat_req).await
+    } else {
+        state.router.complete_for(crate::proxy::router::SURFACE_CODEX, &chat_req).await
+    };
+    match result {
+        Ok(resp) => {
+            let responses_resp = chat_to_responses(&resp, &requested_model);
+            match serde_json::to_value(responses_resp) {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => err_response(500, format!("serialize error: {e}"), "internal_error"),
+            }
+        }
+        Err(e) => {
+            let status = e.status.unwrap_or(500);
+            err_response(status, e.message, if status >= 500 { "proxy_error" } else { "invalid_request_error" })
+        }
+    }
+}
+
+async fn stream_responses(
+    state: ProxyAppState,
+    chat_req: ChatCompletionRequest,
+    requested_model: String,
+) -> Response {
+    let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
+    let stream = if let Some(ref pid) = pinned {
+        state.router.stream_with_provider(pid, &chat_req).await
+    } else {
+        state.router.stream_for(crate::proxy::router::SURFACE_CODEX, &chat_req).await
+    };
+    let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            let status = e.status.unwrap_or(500);
+            return err_response(status, e.message, if status >= 500 { "proxy_error" } else { "invalid_request_error" });
+        }
+    };
+    let mapped = chat_chunks_to_responses_stream(stream, &requested_model);
+    let with_done = futures_util::stream::iter(
+        std::iter::empty::<String>().chain(
+            std::iter::once(String::new())
+        ).take(0)
+        .chain(std::iter::once(STREAM_DONE.to_string()))
+    );
+    let chained = futures_util::stream::select(
+        mapped.map(Ok::<String, std::io::Error>),
+        with_done.map(Ok::<String, std::io::Error>),
+    );
+    let body = axum::body::Body::from_stream(chained.map(|r| {
+        match r {
+            Ok(s) => Ok::<bytes::Bytes, std::io::Error>(s.into_bytes().into()),
+            Err(e) => Err(e),
+        }
+    }));
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .body(body)
+        .unwrap()
 }
 
 /// Bind a socket address from a host:port pair. Convenience for tests.
@@ -296,6 +424,7 @@ mod tests {
         ProxyAppState {
             router,
             auth_token: String::new(),
+            pinned_provider: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

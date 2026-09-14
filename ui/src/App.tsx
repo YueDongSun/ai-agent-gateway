@@ -1,23 +1,11 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { appCheckUpdate } from './lib/api/app';
-import { switchProvider } from './lib/api/providers';
-import type { DeeplinkAction } from './lib/api/deeplink';
-import { ProvidersPage } from './components/providers/ProvidersPage';
-import { VendorsPage } from './components/vendors/VendorsPage';
-import { ProxyPage } from './components/proxy/ProxyPage';
-import { BackupPage } from './components/backup/BackupPage';
-import { McpPage } from './components/mcp/McpPage';
-import { SkillsPage } from './components/skills/SkillsPage';
-import { SessionsPage } from './components/sessions/SessionsPage';
-import { UsagePage } from './components/usage/UsagePage';
-import { SyncPage } from './components/sync/SyncPage';
-import { DeepLinkPage } from './components/deeplink/DeepLinkPage';
-import { CodexCliPage } from './components/codexcli/CodexCliPage';
-import { SettingsPage } from './components/settings/SettingsPage';
 import { I18nCtx, useCtx } from './lib/ctx';
 import { useI18n } from './i18n/index';
 import { useTheme } from './lib/theme';
+import { APP_PAGE_ORDER, APP_PAGES } from './lib/appPages';
+import type { AppType } from './lib/api/types';
 
 interface AppInfo {
   name: string;
@@ -25,9 +13,11 @@ interface AppInfo {
   phase: string;
 }
 
-type View = 'app' | 'providers' | 'vendors' | 'proxy' | 'backup' | 'mcp' | 'skills' | 'sessions' | 'usage' | 'sync' | 'deeplink' | 'codexcli' | 'settings';
+const AppPage = lazy(() =>
+  import('./components/app/AppPage').then((m) => ({ default: m.AppPage })),
+);
 
-/* ---- Sun/Moon icons (inline SVG — no asset dependency) ---- */
+/* ---- Sun/Moon icons (inline SVG - no asset dependency) ---- */
 
 function SunIcon() {
   return (
@@ -55,11 +45,11 @@ function MoonIcon() {
 
 function AppInner() {
   const ctx = useCtx();
-  const { t, locale, setLocale, theme, themeOverride, setThemeOverride } = ctx;
+  const { t, locale, setLocale, theme, setThemeOverride } = ctx;
 
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>('providers');
+  const [view, setView] = useState<AppType>('claude_code');
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateEndpoint, setUpdateEndpoint] = useState('');
@@ -89,41 +79,6 @@ function AppInner() {
     }
   };
 
-  const handleExecuteDeeplink = async (
-    action: DeeplinkAction,
-  ): Promise<string> => {
-    switch (action.kind) {
-      case 'switchProvider': {
-        const r = await switchProvider(action.providerId, action.appType);
-        return t('deeplink.switchProvider', { name: action.providerId, count: r.written.length });
-      }
-      case 'focusProvider':
-        setView('providers');
-        return t('deeplink.focusProvider', { name: action.providerId });
-      case 'focusMcp':
-        setView('mcp');
-        return t('deeplink.focusMcp', { name: action.serverId });
-      case 'focusSkill':
-        setView('skills');
-        return t('deeplink.focusSkill', { name: action.skillId });
-      case 'showDeeplinks':
-        setView('deeplink');
-        return t('deeplink.showDeeplinks');
-      case 'unknown':
-        return t('deeplink.unknown', { reason: action.reason });
-    }
-  };
-
-  const nav = (key: string, viewId: View) => (
-    <button
-      key={viewId}
-      className={view === viewId ? 'nav-item active' : 'nav-item'}
-      onClick={() => setView(viewId)}
-    >
-      {t(key)}
-    </button>
-  );
-
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
     setThemeOverride(next);
@@ -144,112 +99,82 @@ function AppInner() {
   return (
     <div className="aag-root">
       <header className="aag-header">
-        <div className="aag-header-row">
+        <div className="aag-brand">
           <h1>{info?.name ?? t('app.brand')}</h1>
-          <nav className="aag-nav">
-            {nav('app.nav.providers', 'providers')}
-            {nav('app.nav.vendors',   'vendors')}
-            {nav('app.nav.proxy',       'proxy')}
-            {nav('app.nav.backup',      'backup')}
-            {nav('app.nav.mcp',         'mcp')}
-            {nav('app.nav.skills',      'skills')}
-            {nav('app.nav.sessions',    'sessions')}
-            {nav('app.nav.usage',       'usage')}
-            {nav('app.nav.sync',        'sync')}
-            {nav('app.nav.deeplink',    'deeplink')}
-            {nav('app.nav.codexcli',    'codexcli')}
-            {nav('app.nav.about',       'app')}
-            {nav('settings.title',      'settings')}
-          </nav>
-          <div className="header-controls">
-            <button
-              className="theme-btn"
-              onClick={toggleTheme}
-              title={t('header.theme.toggle')}
-              aria-label={t('header.theme.toggle')}
-            >
-              {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-              <span>{theme === 'dark' ? t('header.theme.light') : t('header.theme.dark')}</span>
-            </button>
-            <button
-              className="lang-btn"
-              onClick={nextLang}
-              title={t('header.lang.toggle')}
-              aria-label={t('header.lang.toggle')}
-            >
-              {locale === 'en' ? '中' : 'EN'}
-            </button>
-          </div>
+          {info && (
+            <span className="aag-sub">
+              {t('app.subtitle', { version: info.version, phase: info.phase })}
+            </span>
+          )}
         </div>
-        {info && (
-          <p className="aag-sub">
-            {t('app.subtitle', { version: info.version, phase: info.phase })}
-          </p>
-        )}
+        <nav className="app-switcher" aria-label="App switcher">
+          {APP_PAGE_ORDER.map((at) => (
+            <button
+              key={at}
+              className={view === at ? 'active' : ''}
+              onClick={() => setView(at)}
+            >
+              {APP_PAGES[at].label}
+            </button>
+          ))}
+        </nav>
+        <div className="header-controls">
+          <button
+            className="theme-btn"
+            onClick={toggleTheme}
+            title={t('header.theme.toggle')}
+            aria-label={t('header.theme.toggle')}
+          >
+            {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+            <span>{theme === 'dark' ? t('header.theme.light') : t('header.theme.dark')}</span>
+          </button>
+          <button
+            className="lang-btn"
+            onClick={nextLang}
+            title={t('header.lang.toggle')}
+            aria-label={t('header.lang.toggle')}
+          >
+            {locale === 'en' ? '中' : 'EN'}
+          </button>
+        </div>
       </header>
       <main className="aag-main">
-        {view === 'providers' ? (
-          <ProvidersPage />
-        ) : view === 'vendors' ? (
-          <VendorsPage />
-        ) : view === 'proxy' ? (
-          <ProxyPage />
-        ) : view === 'backup' ? (
-          <BackupPage />
-        ) : view === 'mcp' ? (
-          <McpPage />
-        ) : view === 'skills' ? (
-          <SkillsPage />
-        ) : view === 'sessions' ? (
-          <SessionsPage />
-        ) : view === 'usage' ? (
-          <UsagePage />
-        ) : view === 'sync' ? (
-          <SyncPage />
-        ) : view === 'deeplink' ? (
-          <DeepLinkPage onExecute={handleExecuteDeeplink} />
-        ) : view === 'codexcli' ? (
-          <CodexCliPage />
-        ) : view === 'settings' ? (
-          <SettingsPage />
-        ) : (
-          <section>
-            <h2>{t('app.nav.about')}</h2>
-            <p>
-              AAG ({t('app.brand')}) is a Tauri desktop app for managing provider
-              configuration across multiple AI coding CLIs (Claude Code, Codex,
-              Gemini CLI, OpenCode, OpenClaw, Hermes, Grok Build, Claude Desktop).
-            </p>
-            <p>
-              See <code>DESIGN.md</code> for the migration plan and{' '}
-              <code>PROGRESS.md</code> for current status.
-            </p>
-            <div className="about-update">
-              <input
-                type="text"
-                className="about-update-endpoint"
-                value={updateEndpoint}
-                onChange={(e) => setUpdateEndpoint(e.target.value)}
-                placeholder={t('app.update.placeholder')}
-                disabled={checkingUpdate}
-              />
-              <button
-                className="btn"
-                onClick={handleCheckUpdate}
-                disabled={checkingUpdate}
-              >
-                {checkingUpdate ? t('app.update.checking') : t('app.update.check')}
-              </button>
-              {updateMsg && (
-                <span className="about-update-msg">{updateMsg}</span>
-              )}
-            </div>
-          </section>
-        )}
+        <Suspense fallback={<section className="page-loading" aria-live="polite">{t('common.loading')}</section>}>
+          {APP_PAGE_ORDER.includes(view) ? (
+            <AppPage appType={view} />
+          ) : (
+            <section>
+              <h2>{info?.name ?? t('app.brand')}</h2>
+              <p>
+                AAG is a local gateway for AI coding agents. Claude chains
+                through it via cc-switch; Codex runs against it natively
+                (Responses API) in an isolated mirror CODEX_HOME.
+              </p>
+              <div className="about-update">
+                <input
+                  type="text"
+                  className="about-update-endpoint"
+                  value={updateEndpoint}
+                  onChange={(e) => setUpdateEndpoint(e.target.value)}
+                  placeholder={t('app.update.placeholder')}
+                  disabled={checkingUpdate}
+                />
+                <button
+                  className="btn"
+                  onClick={handleCheckUpdate}
+                  disabled={checkingUpdate}
+                >
+                  {checkingUpdate ? t('app.update.checking') : t('app.update.check')}
+                </button>
+                {updateMsg && (
+                  <span className="about-update-msg">{updateMsg}</span>
+                )}
+              </div>
+            </section>
+          )}
+        </Suspense>
       </main>
-      <footer className="aag-footer">
-        {t('app.footer')}
-      </footer>
+      <footer className="aag-footer">{t('app.footer')}</footer>
     </div>
   );
 }

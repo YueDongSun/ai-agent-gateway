@@ -10,8 +10,8 @@
 //! the Codex CLI from the Codex desktop app's shared config.
 
 use crate::config::{
-    backup_file, get_backups_dir, get_codex_auth_path, get_codex_config_dir_with_override,
-    get_codex_config_path, read_json_file, read_text_file, write_json_file, write_text_file,
+    backup_file, get_backups_dir, get_codex_auth_path, get_codex_config_path,
+    read_json_file, read_text_file, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -47,7 +47,12 @@ pub fn read_live() -> Result<Option<Value>, AppError> {
 ///
 /// `codex_cli_home` optionally overrides the Codex config directory (isolated
 /// CODEX_HOME for the CLI); `None` uses the default `~/.codex`.
-#[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
+///
+/// Re-enabled in Phase 16: called from `provider_switch` when
+/// `app_type == "codex"`. The mirror-install contract requires the user's
+/// native `~/.codex` (Codex Desktop) is never touched - callers must pass a
+/// `codex_cli_home` that resolves outside `~/.codex` (the UI defaults to
+/// `~/.codex-cli`).
 pub fn write_live(
     provider: &Provider,
     codex_cli_home: Option<&str>,
@@ -63,8 +68,8 @@ pub fn write_live(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::Config("Codex settings_config missing 'config' string field".into()))?;
 
-    let config_path = get_codex_config_dir_with_override(codex_cli_home).join("config.toml");
-    let auth_path = get_codex_config_dir_with_override(codex_cli_home).join("auth.json");
+    let config_path = crate::config::get_codex_mirror_dir(codex_cli_home).join("config.toml");
+    let auth_path = crate::config::get_codex_mirror_dir(codex_cli_home).join("auth.json");
     let ts = chrono::Utc::now().timestamp();
     let backup_dir = get_backups_dir()?;
 

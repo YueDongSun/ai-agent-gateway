@@ -5,6 +5,8 @@ use crate::error::AppError;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
 /// An upstream API provider used by the proxy for failover chains.
 /// Separate from the `providers` table (which holds per-agent config snapshots).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,13 @@ pub struct ProxyProvider {
     pub weight: u32,
     #[serde(rename = "circuitBreaker", default)]
     pub circuit_breaker: CircuitBreakerConfig,
+    /// Per-provider model mapping: display model -> upstream model.
+    /// Example: `{ "claude-sonnet-5": "deepseek-v4-pro" }`.
+    /// When a request arrives with a display model that's a key in this map,
+    /// the proxy replaces it with the mapped upstream model before forwarding.
+    /// Stored as a JSON object; default `{}` (no mapping).
+    #[serde(rename = "modelMapping", default)]
+    pub model_mapping: HashMap<String, String>,
 }
 
 fn default_true() -> bool { true }
@@ -68,15 +77,18 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
             "SELECT id, name, type, api_key, base_url, models, enabled,
-                    timeout_ms, weight, circuit_breaker
+                    timeout_ms, weight, circuit_breaker, model_mapping
              FROM proxy_providers ORDER BY weight DESC, id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let models_str: String = row.get(5)?;
             let cb_str: String = row.get(9)?;
+            let mm_str: String = row.get(10)?;
             let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
             let circuit_breaker: CircuitBreakerConfig =
                 serde_json::from_str(&cb_str).unwrap_or_default();
+            let model_mapping: HashMap<String, String> =
+                serde_json::from_str(&mm_str).unwrap_or_default();
             Ok(ProxyProvider {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -88,6 +100,7 @@ impl Database {
                 timeout_ms: row.get::<_, u64>(7)?,
                 weight: row.get::<_, u32>(8)?,
                 circuit_breaker,
+                model_mapping,
             })
         })?;
         let mut out = Vec::new();
@@ -102,20 +115,21 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let models = serde_json::to_string(&p.models)?;
         let cb = serde_json::to_string(&p.circuit_breaker)?;
+        let mm = serde_json::to_string(&p.model_mapping)?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO proxy_providers (
                 id, name, type, api_key, base_url, models, enabled,
-                timeout_ms, weight, circuit_breaker, created_at
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                timeout_ms, weight, circuit_breaker, model_mapping, created_at
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, type=excluded.type, api_key=excluded.api_key,
                 base_url=excluded.base_url, models=excluded.models, enabled=excluded.enabled,
                 timeout_ms=excluded.timeout_ms, weight=excluded.weight,
-                circuit_breaker=excluded.circuit_breaker",
+                circuit_breaker=excluded.circuit_breaker, model_mapping=excluded.model_mapping",
             params![
                 p.id, p.name, p.provider_type, p.api_key, p.base_url,
-                models, p.enabled, p.timeout_ms, p.weight, cb, now,
+                models, p.enabled, p.timeout_ms, p.weight, cb, mm, now,
             ],
         )?;
         Ok(())

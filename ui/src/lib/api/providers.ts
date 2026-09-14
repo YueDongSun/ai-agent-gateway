@@ -43,10 +43,19 @@ export async function switchProvider(
 }
 
 /// Reorder providers by writing a new sort_index for each id. Used by
-/// the drag handle on the Providers page.
+/// the drag handle on the provider cards.
 export async function reorderProviders(
   appType: string,
   orderedIds: string[],
 ): Promise<void> {
   await invoke('provider_reorder', { appType, orderedIds });
+}
+
+/// Toggle a provider's membership in its app's failover chain.
+export async function setProviderFailoverQueue(
+  id: string,
+  appType: string,
+  inQueue: boolean,
+): Promise<void> {
+  await invoke('provider_set_failover_queue', { id, appType, inQueue });
 }

@@ -64,6 +64,9 @@ src-tauri/wix/
 src-tauri/wix-tools/
 src-tauri/WixTools/
 src-tauri/Cargo.lock
+# Generated dev override — written by scripts/tauri-dev.mjs based on the
+# port Vite actually binds to. Safe to delete; regenerated on next `npm run tauri:dev`.
+src-tauri/tauri.dev.json
 
 # Electron/Chromium
 app/dist/

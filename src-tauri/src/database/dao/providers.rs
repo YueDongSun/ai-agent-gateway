@@ -230,6 +230,28 @@ impl Database {
         Ok(())
     }
 
+    /// Toggle the `in_failover_queue` bit on a single (id, app_type) row.
+    /// Rows with the bit off are excluded from the app's failover chain
+    /// (the per-card "join the chain" switch, cc-switch style).
+    pub fn set_in_failover_queue(
+        &self,
+        id: &str,
+        app_type: &str,
+        in_queue: bool,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let updated = conn.execute(
+            "UPDATE providers SET in_failover_queue = ?3 WHERE id = ?1 AND app_type = ?2",
+            params![id, app_type, in_queue as i64],
+        )?;
+        if updated == 0 {
+            return Err(AppError::InvalidInput(format!(
+                "provider \"{id}\" not found for app \"{app_type}\""
+            )));
+        }
+        Ok(())
+    }
+
     /// Set the active provider for an app. Clears `is_current` on all other
     /// providers in the same app_type, sets it on the target.
     pub fn set_current_provider(

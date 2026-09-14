@@ -47,6 +47,27 @@ impl Database {
         Ok(out)
     }
 
+    /// Get a single route by alias.
+    pub fn get_route(&self, alias: &str) -> Result<Option<Route>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(
+            "SELECT alias, description, hops FROM routes WHERE alias = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![alias], |row| {
+            let hops_str: String = row.get(2)?;
+            let hops: Vec<RouteHop> = serde_json::from_str(&hops_str).unwrap_or_default();
+            Ok(Route {
+                alias: row.get(0)?,
+                description: row.get(1)?,
+                hops,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Upsert a route.
     pub fn save_route(&self, r: &Route) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);

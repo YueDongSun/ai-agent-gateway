@@ -40,6 +40,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_stack_e2e() {
+        let _env_guard = crate::config::test_env_lock().lock().await;
+
         // ── 1. Isolate from the real user environment ──
         let tmp = std::env::temp_dir().join("aag-e2e-test");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -61,16 +63,17 @@ mod tests {
         assert_eq!(proxy_providers.len(), 2, "seed should create 2 mock providers");
         let routes = db.get_all_routes().expect("get_all_routes");
         let aliases: Vec<&str> = routes.iter().map(|r| r.alias.as_str()).collect();
-        // 3 demo routes + one per official Claude model (see
-        // proxy::models::OFFICIAL_MODELS — seeded so Anthropic-native clients
+        // 3 demo routes + one per official Claude model + one per default Codex model
+        // (see proxy::models::OFFICIAL_MODELS and CODEX_MODELS — seeded so clients
         // can request official ids and flow through the failover chain).
         assert_eq!(
             routes.len(),
-            3 + crate::proxy::models::OFFICIAL_MODELS.len(),
-            "seed should create demo + official-model routes, got: {aliases:?}"
+            3 + crate::proxy::models::OFFICIAL_MODELS.len() + crate::proxy::models::CODEX_MODELS.len(),
+            "seed should create demo + official-model + codex-model routes, got: {aliases:?}"
         );
         assert!(aliases.contains(&"claude-sonnet-4"), "demo route missing: {aliases:?}");
         assert!(aliases.contains(&"claude-fable-5"), "official model route missing: {aliases:?}");
+        assert!(aliases.contains(&"codex-5-6-sol"), "codex model route missing: {aliases:?}");
 
         // ── 3. Provider flow: save → current → live write ──
         let provider = Provider::new(
@@ -148,6 +151,7 @@ mod tests {
                 let state_for_try = ProxyAppState {
                     router: Arc::clone(&router),
                     auth_token: String::new(),
+                    pinned_provider: Arc::new(std::sync::Mutex::new(None)),
                 };
                 let handle = tokio::spawn(async move {
                     if let Err(e) = serve(addr, state_for_try, rx).await {

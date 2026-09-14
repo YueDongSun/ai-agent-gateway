@@ -160,6 +160,8 @@ mod tests {
 
     #[test]
     fn write_live_writes_models_and_settings() {
+        let _env_guard = crate::config::test_env_lock().blocking_lock();
+
         // Use AAG_HOME_DIR override so we don't touch the real ~/.pi.
         let tmp = std::env::temp_dir().join(format!("aag-pi-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);

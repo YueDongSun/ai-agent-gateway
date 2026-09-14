@@ -32,11 +32,26 @@ pub struct ResolvedRoute {
 pub struct Router {
     providers: HashMap<String, Arc<dyn Provider>>,
     routes: HashMap<String, Vec<RouteHop>>,
-    /// Homepage failover queue: provider ids tried in order when no
-    /// explicit route / provider matches the requested model. Each hop
-    /// passes the requested model through unchanged.
+    /// Legacy global failover queue (checked after explicit routes and
+    /// per-provider auto-routing miss). Kept for tests / compatibility.
     queue: Vec<String>,
+    /// Per-surface failover queues (Phase 17). A "surface" is an entry
+    /// endpoint family: `"claude"` (`/v1/messages`), `"codex"`
+    /// (`/v1/responses`), `"chat"` (`/v1/chat/completions`). Each app's
+    /// provider chain (from the `providers` table, `in_failover_queue = 1`,
+    /// current provider first) is tried in order when no explicit route or
+    /// auto-route matches — the requested model passes through unchanged.
+    queues: HashMap<String, Vec<String>>,
+    /// The provider id that served the most recent successful request.
+    /// Updated atomically by `complete_hops` / `stream_hops` on success.
+    /// Read by the health endpoint for UI flow visualization.
+    pub last_used: std::sync::Mutex<Option<String>>,
 }
+
+/// Entry-endpoint surfaces, each backed by its own failover chain.
+pub const SURFACE_CLAUDE: &str = "claude";
+pub const SURFACE_CODEX: &str = "codex";
+pub const SURFACE_CHAT: &str = "chat";
 
 impl Router {
     /// Build a Router from the proxy providers and routes loaded from the DB.
@@ -45,13 +60,21 @@ impl Router {
         providers: HashMap<String, Arc<dyn Provider>>,
         routes: HashMap<String, Vec<RouteHop>>,
     ) -> Self {
-        Self { providers, routes, queue: Vec::new() }
+        Self { providers, routes, queue: Vec::new(), queues: HashMap::new(), last_used: std::sync::Mutex::new(None) }
     }
 
     /// Attach the homepage failover queue (checked after explicit routes
     /// and per-provider auto-routing miss).
     pub fn with_queue(mut self, queue: Vec<String>) -> Self {
         self.queue = queue;
+        self
+    }
+
+    /// Attach the per-surface failover queues. Keys are surface ids
+    /// (`SURFACE_CLAUDE` / `SURFACE_CODEX` / `SURFACE_CHAT`); values are
+    /// ordered provider ids (chain head first).
+    pub fn with_queues(mut self, queues: HashMap<String, Vec<String>>) -> Self {
+        self.queues = queues;
         self
     }
 
@@ -85,6 +108,50 @@ impl Router {
         None
     }
 
+    /// Surface-aware resolution: same precedence as `resolve_route`, but the
+    /// last-chance chain is the surface's per-app queue instead of the global
+    /// one. `/v1/messages` falls back to the Claude chain, `/v1/responses`
+    /// to the Codex chain, `/v1/chat/completions` to the copilot+pi chain.
+    pub fn resolve_route_for(&self, surface: &str, model: &str) -> Option<Vec<RouteHop>> {
+        if let Some(hops) = self.routes.get(model) {
+            return Some(hops.clone());
+        }
+        for (pid, prov) in &self.providers {
+            if prov.enabled() && prov.models().iter().any(|m| m == model) {
+                return Some(vec![RouteHop {
+                    provider: pid.clone(),
+                    model: model.into(),
+                }]);
+            }
+        }
+        if let Some(chain) = self.queues.get(surface) {
+            if !chain.is_empty() {
+                return Some(
+                    chain
+                        .iter()
+                        .map(|pid| RouteHop {
+                            provider: pid.clone(),
+                            model: model.into(),
+                        })
+                        .collect(),
+                );
+            }
+        }
+        // Legacy global queue as the very last resort.
+        if !self.queue.is_empty() {
+            return Some(
+                self.queue
+                    .iter()
+                    .map(|pid| RouteHop {
+                        provider: pid.clone(),
+                        model: model.into(),
+                    })
+                    .collect(),
+            );
+        }
+        None
+    }
+
     /// Non-streaming completion with automatic failover. For each hop:
     /// 1. Check circuit breaker — skip if open.
     /// 2. Call provider.complete.
@@ -99,6 +166,60 @@ impl Router {
                 Some(false),
             )
         })?;
+        self.complete_hops(req, hops).await
+    }
+
+    /// Surface-aware non-streaming completion: the last-resort chain is the
+    /// entry endpoint's per-app queue (`/v1/messages` -> Claude chain,
+    /// `/v1/responses` -> Codex chain, `/v1/chat/completions` -> chat chain).
+    pub async fn complete_for(
+        &self,
+        surface: &str,
+        req: &ChatCompletionRequest,
+    ) -> Result<OAIChatResponse, ProviderError> {
+        let hops = self.resolve_route_for(surface, &req.model).ok_or_else(|| {
+            canonical::make_error(
+                format!("no route / provider for model \"{}\"", req.model),
+                Some(404),
+                Some(false),
+            )
+        })?;
+        self.complete_hops(req, hops).await
+    }
+
+    /// Force all requests through a specific provider (pinned/forced mode).
+    /// Bypasses the normal failover chain. The request's model passes through
+    /// unchanged. Used when the user toggles the force-pin ON for a provider.
+    pub async fn complete_with_provider(
+        &self,
+        provider_id: &str,
+        req: &ChatCompletionRequest,
+    ) -> Result<OAIChatResponse, ProviderError> {
+        let hops = vec![RouteHop {
+            provider: provider_id.to_string(),
+            model: req.model.clone(),
+        }];
+        self.complete_hops(req, hops).await
+    }
+
+    /// Force-stream variant of `complete_with_provider`.
+    pub async fn stream_with_provider(
+        &self,
+        provider_id: &str,
+        req: &ChatCompletionRequest,
+    ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+        let hops = vec![RouteHop {
+            provider: provider_id.to_string(),
+            model: req.model.clone(),
+        }];
+        self.stream_hops(req, hops).await
+    }
+
+    pub async fn complete_hops(
+        &self,
+        req: &ChatCompletionRequest,
+        hops: Vec<RouteHop>,
+    ) -> Result<OAIChatResponse, ProviderError> {
 
         let mut last_err: Option<ProviderError> = None;
         for hop in &hops {
@@ -123,11 +244,16 @@ impl Router {
                 stream: req.stream,
                 temperature: req.temperature,
                 max_tokens: req.max_tokens,
+                tools: req.tools.clone(),
+                tool_choice: req.tool_choice.clone(),
                 extra: req.extra.clone(),
             };
             match provider.complete(&sub_req).await {
                 Ok(resp) => {
                     provider.breaker().record_success();
+                    if let Ok(mut lu) = self.last_used.lock() {
+                        *lu = Some(provider.id().to_string());
+                    }
                     log::info!("router: OK  {} <- {}/{}", req.model, provider.id(), hop.model);
                     return Ok(resp);
                 }
@@ -177,7 +303,6 @@ pub async fn stream(
     &self,
     req: &ChatCompletionRequest,
 ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
-    use futures_util::StreamExt;
     let hops = self.resolve_route(&req.model).ok_or_else(|| {
         canonical::make_error(
             format!("no route / provider for model \"{}\"", req.model),
@@ -185,6 +310,31 @@ pub async fn stream(
             Some(false),
         )
     })?;
+    self.stream_hops(req, hops).await
+}
+
+/// Surface-aware streaming completion (see `complete_for`).
+pub async fn stream_for(
+    &self,
+    surface: &str,
+    req: &ChatCompletionRequest,
+) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+    let hops = self.resolve_route_for(surface, &req.model).ok_or_else(|| {
+        canonical::make_error(
+            format!("no route / provider for model \"{}\"", req.model),
+            Some(404),
+            Some(false),
+        )
+    })?;
+    self.stream_hops(req, hops).await
+}
+
+pub async fn stream_hops(
+    &self,
+    req: &ChatCompletionRequest,
+    hops: Vec<RouteHop>,
+) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+    use futures_util::StreamExt;
 
     let mut last_err: Option<ProviderError> = None;
     for hop in &hops {
@@ -206,6 +356,8 @@ pub async fn stream(
             stream: req.stream,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            tools: req.tools.clone(),
+            tool_choice: req.tool_choice.clone(),
             extra: req.extra.clone(),
         };
         let mut chunk_stream = match provider.stream(&sub_req) {
@@ -247,6 +399,9 @@ pub async fn stream(
             }
         };
         provider.breaker().record_success();
+        if let Ok(mut lu) = self.last_used.lock() {
+            *lu = Some(provider.id().to_string());
+        }
         log::info!("router: STREAM OK (first byte) {} <- {}/{}", req.model, provider.id(), hop.model);
         // Chain the first chunk with the rest of the stream. Mid-stream errors
         // surface to the client (no transparent failover).
@@ -383,13 +538,23 @@ mod tests {
                 crate::proxy::converter::make_stream_chunk(
                     "id",
                     &model,
-                    crate::proxy::canonical::StreamDelta { role: Some("assistant".into()), content: None },
+                    crate::proxy::canonical::StreamDelta {
+                        role: Some("assistant".into()),
+                        content: None,
+                        tool_calls: None,
+                        reasoning: None,
+                    },
                     None,
                 ),
                 crate::proxy::converter::make_stream_chunk(
                     "id",
                     &model,
-                    crate::proxy::canonical::StreamDelta { role: None, content: None },
+                    crate::proxy::canonical::StreamDelta {
+                        role: None,
+                        content: None,
+                        tool_calls: None,
+                        reasoning: None,
+                    },
                     Some("stop".into()),
                 ),
             ]);
@@ -404,6 +569,8 @@ mod tests {
             stream: true,
             temperature: None,
             max_tokens: None,
+            tools: None,
+            tool_choice: None,
             extra: Default::default(),
         }
     }
@@ -476,5 +643,143 @@ mod tests {
             chunks.last().unwrap().choices[0].finish_reason.as_deref(),
             Some("stop")
         );
+    }
+
+    // ---- Phase 17: per-surface failover chains ----
+
+    /// A provider whose responses carry its own id, so tests can tell which
+    /// surface's chain served the request.
+    struct TaggedProvider {
+        id: &'static str,
+        breaker: CircuitBreaker,
+    }
+
+    impl TaggedProvider {
+        fn new(id: &'static str) -> Self {
+            Self { id, breaker: CircuitBreaker::new(empty_cb()) }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for TaggedProvider {
+        fn id(&self) -> &str { self.id }
+        fn enabled(&self) -> bool { true }
+        fn models(&self) -> &[String] { &[] }
+        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+
+        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+            Err(canonical::make_error(
+                format!("fail:{}", self.id),
+                Some(500),
+                Some(true),
+            ))
+        }
+
+        fn stream(
+            &self,
+            req: &ChatCompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            // First TaggedProvider in a chain fails (retriable) so the next
+            // hop is tried; a provider tagged "ok" yields a chunk carrying
+            // its id in the finish_reason slot for assertion.
+            if self.id.starts_with("ok") {
+                let tag = self.id.to_string();
+                let stream = futures_util::stream::iter(vec![
+                    crate::proxy::converter::make_stream_chunk(
+                        "id",
+                        &req.model,
+                        crate::proxy::canonical::StreamDelta {
+                            role: Some("assistant".into()),
+                            content: Some(tag),
+                            tool_calls: None,
+                            reasoning: None,
+                        },
+                        None,
+                    ),
+                ]);
+                Ok(Box::pin(stream))
+            } else {
+                Err(canonical::make_error(
+                    format!("fail:{}", self.id),
+                    Some(500),
+                    Some(true),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn surface_chains_route_to_their_own_queue() {
+        // Two-hop chains (bad -> ok-<surface>) per surface; the bad head
+        // fails with a retriable error so the chain falls through to ok.
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("claude-bad".into(), Arc::new(TaggedProvider::new("claude-bad")));
+        providers.insert("ok-claude".into(), Arc::new(TaggedProvider::new("ok-claude")));
+        providers.insert("codex-bad".into(), Arc::new(TaggedProvider::new("codex-bad")));
+        providers.insert("ok-codex".into(), Arc::new(TaggedProvider::new("ok-codex")));
+        providers.insert("chat-bad".into(), Arc::new(TaggedProvider::new("chat-bad")));
+        providers.insert("ok-chat".into(), Arc::new(TaggedProvider::new("ok-chat")));
+
+        let mut queues: HashMap<String, Vec<String>> = HashMap::new();
+        queues.insert(SURFACE_CLAUDE.into(), vec!["claude-bad".into(), "ok-claude".into()]);
+        queues.insert(SURFACE_CODEX.into(), vec!["codex-bad".into(), "ok-codex".into()]);
+        queues.insert(SURFACE_CHAT.into(), vec!["chat-bad".into(), "ok-chat".into()]);
+
+        let router = Router::new(providers, HashMap::new()).with_queues(queues);
+
+        // A model with no explicit route and no auto-route: each surface's
+        // chain must serve it, failing over bad -> ok.
+        for (surface, expected_tag) in [
+            (SURFACE_CLAUDE, "ok-claude"),
+            (SURFACE_CODEX, "ok-codex"),
+            (SURFACE_CHAT, "ok-chat"),
+        ] {
+            let mut s = router
+                .stream_for(surface, &req_for("unknown-model"))
+                .await
+                .expect("stream should succeed via surface chain");
+            let first = s.next().await.expect("first chunk");
+            assert_eq!(
+                first.choices[0].delta.content.as_deref(),
+                Some(expected_tag),
+                "surface {surface} should be served by its own chain"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_route_still_wins_over_surface_chain() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("ok-chat".into(), Arc::new(TaggedProvider::new("ok-chat")));
+        providers.insert("ok-route".into(), Arc::new(TaggedProvider::new("ok-route")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "special-model".into(),
+            vec![RouteHop { provider: "ok-route".into(), model: "special-model".into() }],
+        );
+        let mut queues: HashMap<String, Vec<String>> = HashMap::new();
+        queues.insert(SURFACE_CHAT.into(), vec!["ok-chat".into()]);
+        let router = Router::new(providers, routes).with_queues(queues);
+
+        let mut s = router
+            .stream_for(SURFACE_CHAT, &req_for("special-model"))
+            .await
+            .expect("stream should succeed");
+        let first = s.next().await.expect("first chunk");
+        assert_eq!(
+            first.choices[0].delta.content.as_deref(),
+            Some("ok-route"),
+            "explicit route must win over the surface chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_chain_anywhere_yields_404() {
+        let router = Router::new(HashMap::new(), HashMap::new()).with_queues(HashMap::new());
+        let err = match router.stream_for(SURFACE_CHAT, &req_for("unknown-model")).await {
+            Ok(_) => panic!("no providers at all should 404"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, Some(404));
     }
 }

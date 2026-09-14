@@ -17,7 +17,7 @@
     "ui:dev": "npm run dev --prefix ui",
     "ui:build": "npm run build --prefix ui",
     "ui:install": "npm install --prefix ui",
-    "tauri:dev": "npm run ui:install && npx tauri dev --config src-tauri/tauri.conf.json",
+    "tauri:dev": "npm run ui:install && node scripts/tauri-dev.mjs",
     "tauri:build": "npm run ui:build && npx tauri build --config src-tauri/tauri.conf.json"
   },
   "engines": {
@@ -34,7 +34,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "^22.10.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

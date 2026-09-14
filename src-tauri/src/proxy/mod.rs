@@ -9,6 +9,7 @@ pub mod circuit_breaker;
 pub mod converter;
 pub mod models;
 pub mod providers;
+pub mod responses;
 pub mod router;
 pub mod server;
 

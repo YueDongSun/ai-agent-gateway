@@ -34,16 +34,25 @@ pub const KEY_CCSWITCH_BLOCK_ENABLED: &str = "ccswitch_block_enabled";
 /// provider out of `~/.cc-switch/cc-switch.db` into AAG. Existing AAG
 /// rows are not overwritten; manually-tuned providers can opt out via
 /// `providers.sync_locked = true` (toggled in the Providers UI).
+///
+/// **Default is OFF** — `proxy_start` treats an absent key or any
+/// value other than `"1"` as disabled. `aag-setup` clears any pre-
+/// existing `"1"` after the explicit one-shot import so future boots
+/// don't silently re-import cc-switch changes.
 pub const KEY_SYNC_WITH_CCSWITCH: &str = "sync_with_cc_switch_enabled";
 /// Well-known setting key: the most recent cc-switch detection status,
 /// stored as a JSON-encoded `CcSwitchStatus`. Lets the frontend skip the
 /// initial detect() round-trip after a relaunch when the snapshot is
 /// fresh enough.
 pub const KEY_CCSWITCH_LAST_STATUS: &str = "ccswitch_last_status_json";
+/// Well-known setting key: the pinned proxy provider id. When set, ALL
+/// requests are forced through that provider (bypassing the failover chain).
+/// Cleared by setting to empty string.
+pub const KEY_PROXY_PINNED_PROVIDER: &str = "proxy_pinned_provider";
 
 impl Database {
     /// Read a setting value. Returns `Ok(None)` if the key is absent.
-    pub(crate) fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
             .prepare("SELECT value FROM app_meta WHERE key = ?1")
@@ -56,7 +65,7 @@ impl Database {
     }
 
     /// Write (upsert) a setting value. An empty value removes the key.
-    pub(crate) fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         if value.trim().is_empty() {
             conn.execute("DELETE FROM app_meta WHERE key = ?1", [key])

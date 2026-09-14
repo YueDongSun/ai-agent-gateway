@@ -91,6 +91,17 @@ pub fn get_codex_config_dir_with_override(codex_cli_home: Option<&str>) -> PathB
     }
 }
 
+/// The AAG mirror CODEX_HOME. Unlike `get_codex_config_dir_with_override`,
+/// an unset override falls back to `~/.codex-cli` (NOT the native
+/// `~/.codex`) so AAG never writes the Codex Desktop app's config.
+/// Mirrors cc-switch's isolated-CLI pattern ("mirror install").
+pub fn get_codex_mirror_dir(codex_cli_home: Option<&str>) -> PathBuf {
+    match codex_cli_home.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => resolve_user_path(raw),
+        None => get_home_dir().join(".codex-cli"),
+    }
+}
+
 /// Return the Codex config directory (`~/.codex`).
 pub fn get_codex_config_dir() -> PathBuf {
     get_codex_config_dir_with_override(None)
@@ -248,4 +259,12 @@ pub fn backup_file(src: &Path, dst: &Path) -> Result<(), AppError> {
     }
     fs::copy(src, dst).map_err(|e| AppError::io(src, e))?;
     Ok(())
+}
+
+#[cfg(test)]
+static TEST_ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }

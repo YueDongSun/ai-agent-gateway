@@ -7,6 +7,29 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Surface any uncaught error / module-load failure in the window
+      // itself - without this a runtime crash is just a white page.
+      window.addEventListener('error', function (e) {
+        var el = document.getElementById('root');
+        if (el) {
+          el.innerHTML =
+            '<pre style="padding:16px;color:#d33;white-space:pre-wrap;font-size:13px">' +
+            'UI error: ' + (e.message || e.type) +
+            (e.filename ? '\n    at ' + e.filename + ':' + e.lineno + ':' + e.colno : '') +
+            '</pre>';
+        }
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var el = document.getElementById('root');
+        if (el) {
+          el.innerHTML =
+            '<pre style="padding:16px;color:#d33;white-space:pre-wrap;font-size:13px">' +
+            'Unhandled rejection: ' + (e.reason && (e.reason.stack || e.reason.message) || String(e.reason)) +
+            '</pre>';
+        }
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

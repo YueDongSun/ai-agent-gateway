@@ -34,7 +34,7 @@ impl Database {
                 icon_color TEXT,
                 meta TEXT NOT NULL DEFAULT '{}',
                 is_current BOOLEAN NOT NULL DEFAULT 0,
-                in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+                in_failover_queue BOOLEAN NOT NULL DEFAULT 1,
                 sync_locked BOOLEAN NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, app_type)
             )",
@@ -77,6 +77,7 @@ impl Database {
                 timeout_ms INTEGER NOT NULL DEFAULT 60000,
                 weight INTEGER NOT NULL DEFAULT 1,
                 circuit_breaker TEXT NOT NULL DEFAULT '{}',
+                model_mapping TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER
             )",
             [],
@@ -414,6 +415,91 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 14;")?;
             version = 14;
         }
+
+        // v14 -> v15: the per-app failover chain becomes universal (Phase 17,
+        // cc-switch style). Every provider row defaults to being IN its app's
+        // failover chain; the user opts rows out per card. Existing rows were
+        // created before the toggle existed, so sweep them to 1 — the chain
+        // they were already part of (claude_code) or never had (other apps)
+        // both behave correctly with the bit on.
+        if version < 15 {
+            conn.execute(
+                "UPDATE providers SET in_failover_queue = 1 WHERE in_failover_queue = 0",
+                [],
+            )?;
+            conn.execute_batch("PRAGMA user_version = 15;")?;
+            version = 15;
+        }
+
+
+        // v15 -> v16: add proxy_providers.model_mapping column for per-provider
+        // model mapping (display model -> upstream model). Stored as a JSON
+        // object `{ "claude-sonnet-5": "deepseek-v4-pro", ... }`. Used by the
+        // proxy to auto-create routes from upstream pool mappings.
+        if version < 16 {
+            let has_mm: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('proxy_providers') WHERE name = 'model_mapping'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if has_mm == 0 {
+                conn.execute(
+                    "ALTER TABLE proxy_providers ADD COLUMN model_mapping TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 16;")?;
+            version = 16;
+        }
+
+
+        // v16 -> v17: backfill proxy_providers from existing claude_code providers.
+        // Users who imported from cc-switch before the proxy_provider auto-creation
+        // was added have providers in the `providers` table but NOT in `proxy_providers`.
+        // This migration reads all claude_code providers with ANTHROPIC_BASE_URL and
+        // creates corresponding proxy_providers (id prefixed with 'ccs-') so they
+        // appear in the upstream pool on the Claude page.
+        if version < 17 {
+            // Use SQLite json_extract to parse settings_config without serde_json.
+            let mut stmt = conn.prepare(
+                "SELECT id, name, json_extract(settings_config, '$.env.ANTHROPIC_BASE_URL'),                  json_extract(settings_config, '$.env.ANTHROPIC_AUTH_TOKEN')                  FROM providers WHERE app_type = 'claude_code'"
+            )?;
+            let rows: Vec<(String, String, Option<String>, Option<String>)> =
+                stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?.filter_map(|r| r.ok()).collect();
+            for (id, name, base_url, api_key) in rows {
+                let pp_id = format!("ccs-{}", id);
+                let exists: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM proxy_providers WHERE id = ?1",
+                    [&pp_id],
+                    |r| r.get(0),
+                ).unwrap_or(0);
+                if exists > 0 { continue; }
+                let base_url = match base_url.as_deref() {
+                    Some(u) if !u.is_empty() => u,
+                    _ => continue,
+                };
+                let api_key = api_key.unwrap_or_default();
+                conn.execute(
+                    "INSERT INTO proxy_providers (id, name, type, api_key, base_url, models, enabled, timeout_ms, weight, circuit_breaker, model_mapping)
+                     VALUES (?1, ?2, 'anthropic', ?3, ?4, '[]', 1, 60000, 1, '{}', '{}')",
+                    rusqlite::params![pp_id, name, api_key, base_url],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 17;")?;
+            version = 17;
+        }
+
+        // v17 -> v18: no-op schema change. Codex model routes are seeded
+        // in `seed_proxy_if_empty` alongside the Claude routes.
+        if version < 18 {
+            conn.execute_batch("PRAGMA user_version = 18;")?;
+            version = 18;
+        }
+
 
         if version != SCHEMA_VERSION {
             return Err(AppError::Database(format!(

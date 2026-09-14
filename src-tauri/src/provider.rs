@@ -56,7 +56,7 @@ impl Provider {
             icon: None,
             icon_color: None,
             meta: None,
-            in_failover_queue: false,
+            in_failover_queue: true,
             sync_locked: false,
         }
     }

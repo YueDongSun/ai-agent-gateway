@@ -15,6 +15,9 @@ export interface ProxyProvider {
   timeoutMs: number;
   weight: number;
   circuitBreaker: CircuitBreakerConfig;
+  /** Per-provider model mapping: display model -> upstream model.
+   *  Example: { "claude-sonnet-5": "deepseek-v4-pro" } */
+  modelMapping: Record<string, string>;
 }
 
 export interface CircuitBreakerConfig {
@@ -65,6 +68,8 @@ export interface ProxyHealth {
   status: 'ok';
   providers: ProviderHealth[];
   models: string[];
+  lastUsed: string | null;
+  pinnedProvider: string | null;
 }
 
 // ----- Tauri commands (defined in src-tauri/src/lib.rs) -----
@@ -115,6 +120,43 @@ export async function saveRoute(route: Route): Promise<void> {
 
 export async function deleteRoute(alias: string): Promise<void> {
   await invoke('route_delete', { alias });
+}
+
+/// Reorder a route's hops (drag-and-drop in the failover chain editor).
+export async function reorderRouteHops(
+  alias: string,
+  orderedProviders: string[],
+): Promise<void> {
+  await invoke('route_reorder_hops', { alias, orderedProviders });
+}
+
+/// Get the currently pinned proxy provider (force-pin mode). Returns null if none.
+export async function getPinnedProvider(): Promise<string | null> {
+  return invoke<string | null>('proxy_get_pinned_provider');
+}
+
+/// Set (or clear) the pinned proxy provider. Empty string clears (restores normal failover).
+export async function setPinnedProvider(providerId: string): Promise<void> {
+  await invoke('proxy_set_pinned_provider', { providerId });
+}
+
+/// Test a proxy provider's connectivity by sending a minimal request.
+export interface TestResult {
+  success: boolean;
+  latencyMs: number;
+  model?: string;
+  reply?: string;
+  error?: string;
+  providerId: string;
+}
+
+export async function testProvider(providerId: string, testModel?: string): Promise<TestResult> {
+  return invoke<TestResult>('proxy_test_provider', { providerId, testModel: testModel ?? null });
+}
+
+/// Fetch available models from a provider's /v1/models endpoint.
+export async function fetchProviderModels(providerId: string): Promise<Array<{ id: string; owned_by?: string }>> {
+  return invoke<Array<{ id: string; owned_by?: string }>>('proxy_fetch_models', { providerId });
 }
 
 // ----- Direct HTTP fetches (call the proxy as a client would) -----
