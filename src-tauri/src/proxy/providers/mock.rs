@@ -89,7 +89,7 @@ impl Provider for MockProvider {
         })
     }
 
-    fn stream(
+    async fn stream(
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {

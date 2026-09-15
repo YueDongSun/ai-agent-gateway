@@ -74,6 +74,10 @@ impl Provider for AnthropicProvider {
             .build()
             .map_err(|e| crate::proxy::canonical::make_error(format!("http client: {e}"), None, Some(false)))?;
         let mut body = oai_req_to_anthropic_req(req);
+        // Defensive: the client may send `model: claude-fable-5[1M]` even
+        // when the route hop is unannotated. Strip the local 1M-context
+        // marker before forwarding — upstream endpoints reject the suffix.
+        body.model = crate::proxy::strip_one_m_suffix(&body.model);
         body.stream = Some(false);
         let res = client
             .post(self.endpoint())
@@ -88,7 +92,11 @@ impl Provider for AnthropicProvider {
             return Err(crate::proxy::canonical::make_error(
                 format!("{} HTTP {}: {}", self.id, status, &text.chars().take(300).collect::<String>()),
                 Some(status),
-                Some(status >= 500 || status == 429),
+                // Upstream rejection: retriable in AAG's hop model - each hop
+                // is a different provider + upstream model, so a 400/403/429
+                // from this provider says nothing about whether the next hop
+                // can serve the request.
+                Some(true),
             ));
         }
         let resp: AnthropicResponse = res
@@ -98,37 +106,54 @@ impl Provider for AnthropicProvider {
         Ok(anthropic_resp_to_oai_resp(&resp, &req.model))
     }
 
-    fn stream(
+    async fn stream(
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+        // Streaming requests get a near-unbounded total timeout (the response
+        // body may stream for many minutes); the pre-stream phase is bounded
+        // by the Router's first-byte timeout instead, so a dead upstream
+        // can't hold the chain hostage. Matches cc-switch's 24h stream cap.
         let client = reqwest::Client::builder()
-            .timeout(self.timeout)
+            .timeout(Duration::from_secs(24 * 60 * 60))
             .build()
             .map_err(|e| crate::proxy::canonical::make_error(format!("http client: {e}"), None, Some(false)))?;
         let mut body = oai_req_to_anthropic_req(req);
         body.stream = Some(true);
-        let model = req.model.clone();
-        let endpoint = self.endpoint();
-        let headers = self.headers();
+        // `oai_req_to_anthropic_req` already strips the `[1M]` marker from
+        // `body.model` (converter.rs). No need to strip again here — that
+        // would be a no-op invariant and a maintenance trap.
+        let model = crate::proxy::strip_one_m_suffix(&req.model);
         let provider_id = self.id.clone();
+        // Eager send + status check: an upstream 4xx/5xx becomes a real
+        // ProviderError with the status code, so the router can fail over
+        // immediately (one RTT) instead of timing out on an empty stream.
+        let res = client
+            .post(self.endpoint())
+            .headers(self.headers())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| crate::proxy::canonical::make_error(format!("{} request: {}", self.id, e), None, Some(true)))?;
+        let status = res.status().as_u16();
+        if status >= 400 {
+            let text = res.text().await.unwrap_or_default();
+            return Err(crate::proxy::canonical::make_error(
+                format!("{} HTTP {}: {}", self.id, status, &text.chars().take(300).collect::<String>()),
+                Some(status),
+                Some(true),
+            ));
+        }
+        // `bytes_stream()` consumes the response by value, so build the byte
+        // stream eagerly and move it into the generator (keeps `res` alive
+        // for as long as the stream lives).
+        let byte_stream = res.bytes_stream().map(move |r| {
+            r.map_err(|e| {
+                log::warn!("{} stream body: {e}", provider_id);
+                std::io::Error::new(std::io::ErrorKind::Other, e)
+            })
+        });
         let stream = async_stream::stream! {
-            let res = match client.post(&endpoint).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("{} stream request: {}", provider_id, e);
-                    return;
-                }
-            };
-            let status = res.status().as_u16();
-            if status >= 400 {
-                let text = res.text().await.unwrap_or_default();
-                log::warn!("{} stream HTTP {}: {}", provider_id, status, &text.chars().take(300).collect::<String>());
-                return;
-            }
-            let byte_stream = res.bytes_stream().map(|r| {
-                r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            });
             let sse_stream = SseDataStream::new(byte_stream);
             let oai_chunks = anthropic_stream_to_oai_chunks(sse_stream, model.clone());
             let mut oai_chunks = std::pin::pin!(oai_chunks);

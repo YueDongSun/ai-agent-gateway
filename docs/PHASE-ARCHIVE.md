@@ -1,8 +1,7 @@
 # AAG phase archive (from PROGRESS.md)
 
-> Historical phase logs through Phase 22b, retained as recorded.
-> Current status is in [PROGRESS.md](../PROGRESS.md); subsequent history is in
-> [Phase 22c-23i history](progress/phase_22_23_history.md).
+> Completed phase logs, oldest-first detail preserved verbatim.
+> Recent phases (last ~10) stay in PROGRESS.md; this file receives them when they age out.
 
 ### Phase 22b - Disable pi page (cc-switch now supports it) (2026-08-22) ✅ DONE
 

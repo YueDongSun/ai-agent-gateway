@@ -536,7 +536,6 @@ const DEFAULT_CODEX_INSTRUCTIONS: &str = "You are a helpful coding assistant. Yo
 /// No elevation, no UAC, no user-env dance, no killing the native instance.
 /// The native `~/.codex` is never written.
 #[tauri::command]
-#[cfg(target_os = "windows")]
 pub(crate) fn codex_open_desktop_window(
     db: tauri::State<'_, Database>,
 ) -> Result<serde_json::Value, String> {
@@ -656,14 +655,6 @@ start \"\" \"{exe}\" --user-data-dir=\"{electron}\"\r\n",
         "codexBinary": exe_str,
         "mirror": true,
     }))
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn codex_open_desktop_window(
-    _db: tauri::State<'_, Database>,
-) -> Result<serde_json::Value, String> {
-    Err("Opening an isolated Codex Desktop mirror is currently supported only on Windows".to_string())
 }
 
 /// Launch the Copilot CLI in an isolated terminal (injecting

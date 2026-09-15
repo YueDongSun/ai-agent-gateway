@@ -7,224 +7,299 @@
 > 4. Run verification (see `## Verification commands`).
 > 5. Update `current_phase`, append to `## Log`, set `next_action`.
 
-### Phase 21 - Fix tool-use fidelity (Claude Code actually works) (2026-08-22) ✅ DONE
+### Phase 22n - PROGRESS.md archive + upstream model count (2026-08-25) ✅ DONE
 
-**Root cause:** `/v1/messages` end-to-end lost tool semantics. The converter
-in Phase 18 was a "text flattener" — it extracted `text_of(content)` for
-every Anthropic content block and emitted one big string, dropping
-`tool_use`, `tool_result`, `image`, and `thinking` blocks. Upstream
-therefore never received `tools` definitions, so Claude Code's request
-fell through to text generation and the model regurgitated system-prompt
-examples (e.g. `<title>BAD/LOST spikes...</title>`).
+Housekeeping + one small feature:
 
-**Fix** — port the design from `cc-switch/providers/transform.rs` +
-`cc-switch/providers/streaming.rs`:
+1. **PROGRESS.md slimmed 570 → ~290 lines**: phase logs up to 22c
+   moved verbatim to `docs/PHASE-ARCHIVE.md` (with a header explaining
+   the rotation). The loop's memory stays scannable; history is not
+   lost.
+2. **UpstreamList model count**: rows with a non-empty `models` list
+   show a "N models / N 个模型" tag next to the URL (hover = full list
+   via title). Users can see which upstreams feed hop-model suggestions
+   without opening the edit modal.
 
-**Backend:**
-- `proxy/canonical.rs`: `ChatCompletionRequest` gains `tools: Option<Vec<Value>>`
-  + `tool_choice: Option<Value>`; `ChatMessage` gains `tool_calls: Option<Vec<Value>>`
-  + `tool_call_id: Option<String>`; `OAIMessage` gains `tool_calls` + `refusal`;
-  `OAIStreamChunk`/`StreamChoice` gain `#[serde(flatten)] extra`;
-  `StreamDelta` gains `tool_calls` + `reasoning`.
-- `proxy/converter.rs`: rewrites both static and streaming converters.
-  - `anthropic_req_to_oai_req`: walks each content block (text / image /
-    tool_use / tool_result), promotes `tool_use` to `message.tool_calls`,
-    promotes `tool_result` blocks into separate `role: tool` messages,
-    copies `tools` / `tool_choice` from `extra`.
-  - `oai_req_to_anthropic_req`: inverse; OpenAI `tool_calls` → Anthropic
-    `tool_use` blocks; `role: tool` messages → Anthropic `user` messages
-    with `tool_result` blocks; `tool_choice` mapped (required ↔ any,
-    function ↔ tool+name).
-  - `anthropic_resp_to_oai_resp` / `oai_resp_to_anthropic_resp`: `tool_use`
-    blocks ↔ `tool_calls` array; `stop_reason` ↔ `finish_reason`
-    (`tool_use` ↔ `tool_calls`).
-  - `oai_chunks_to_anthropic_stream` (used for `/v1/messages` responses):
-    - `HashMap<usize, ToolBlockState>` keyed by OpenAI `tool_calls.index`
-    - Allocates `anthropic_index` immediately on first sight of an
-      OpenAI index (id/name may arrive in later chunks), buffers
-      `pending_args` fragments, flushes them as `input_json_delta`
-      once the `content_block_start {type:tool_use, id, name}` fires.
-    - Late-starts blocks whose id/name never arrived at finish_reason
-      (fallback `id = "tool_call_{idx}"`, `name = "unknown_tool"`).
-    - Caches the final `message_delta` (with stop_reason + usage) until
-      stream end so duplicates never reach Claude Code (which aborts).
-    - Adjusts `input_tokens` from `prompt_tokens - cache_read - cache_creation`
-      (OpenAI bundles cache tokens into prompt).
-  - `anthropic_stream_to_oai_chunks` (used for `/v1/chat/completions`
-    responses from Anthropic upstreams): translates `tool_use` start →
-    `delta.tool_calls[0].id/name`, `input_json_delta` → `function.arguments`,
-    `message_delta {stop_reason: "tool_use"}` → `finish_reason: "tool_calls"`.
-  - `responses_to_chat` carries Responses API `tools` into canonical
-    `ChatCompletionRequest.tools`.
-- `proxy/router.rs`: `sub_req` clones `tools` + `tool_choice` (the
-  load-bearing reason the rest of the proxy — failover chains, queue,
-  pinned provider — keeps working with the new fields).
-- `proxy/providers/mock.rs`: 4 `StreamDelta` literals updated for new
-  fields.
-- `lib.rs:proxy_test_provider`: test request adds the new fields.
-- System-prompt prefix strip: Anthropic's
-  `x-anthropic-billing-header: ...` line is removed from the system
-  block (it eats prompt-cache prefix and confuses some upstreams).
+i18n: `claude.upstream.modelCount` (en+zh).
 
-**Tests (added in `proxy/converter.rs`):**
-- `roundtrip_anthropic_req_with_tools` — Anthropic → OAI → Anthropic
-  with a tool_use + tool_result, asserts both blocks survive.
-- `roundtrip_anthropic_resp_with_tool_use` — `tool_use` response block
-  → `tool_calls` array; `tool_use` stop_reason → `tool_calls` finish_reason.
-- `tool_choice_mapping_round_trip` — required ↔ any, function ↔ tool+name.
-- `streaming_oai_tool_calls_to_anthropic` — id-first, name-second,
-  arguments fragments across chunks → correct Anthropic event sequence
-  with content_block_start + input_json_delta + content_block_stop +
-  message_delta(stop_reason=tool_use).
-- `streaming_oai_text_then_tool_calls` — text block closes before
-  tool block opens.
-- `streaming_anthropic_tool_use_to_oai` — reverse direction: tool_use
-  start → tool_calls delta with id/name; input_json_delta →
-  function.arguments; finish_reason tool_use → tool_calls.
+**Verified:** ui tsc clean · vite build clean (AppPage 36.12 kB) ·
+`npm run ui:smoke` 13/13 green.
 
-**Verified:** cargo check ✅ · cargo test --lib **115/115** ✅
-(was 108/108 before; +7 new) · ui tsc ✅ · vite build ✅ (no UI
-changes; sizes identical).
+### Phase 22m - Gateway settings modal (port + auth token) (2026-08-25) ✅ DONE
 
-### Phase 20 - Fix hop model picker (cc-switch pattern) (2026-08-21) ✅ DONE
+The gateway card was read-only — changing the proxy port or API key had
+no UI surface. New ⚙ button in the card head opens a settings modal:
 
-Root cause: `ModelSuggest.accept()` called `inputRef.current.focus()` which triggered
-`onFocus={() => setOpen(true)}`, reopening the menu in the same React 18 batch —
-user saw the menu never close, thought the pick didn't land. Value actually saved,
-but invisible to the user.
+- Pre-filled from `getProxyConfig` (port + authToken; enabled bit rides
+  along untouched on save).
+- Port validated (integer 1–65535, `app.gateway.invalidPort` on bad
+  input); save via `saveProxyConfig`, then a toast reminds that a
+  gateway restart applies the new settings.
+- GatewayPanel takes an optional `onEditSettings` prop (card stays
+  self-contained; AppPage owns the modal state).
+- i18n: `app.gateway.editSettings` / `portLabel` / `invalidPort` /
+  `savedRestartHint` (en+zh).
 
-**Fix:** Rewrite `ModelSuggest.tsx` following cc-switch's `ModelInputWithFetch` pattern:
-- Menu rendered via `createPortal(document.body)` + `position: fixed` (input rect from
-  `getBoundingClientRect`) — immune to table/sticky-toolbar clipping.
-- Separate ▾ chevron button toggles menu (NOT onFocus).
-- ⤓ fetch-upstream button: calls `fetchProviderModels(providerId)`, caches results,
-  merges into `knownModels`. Only shown when hop.provider is non-empty.
-- Item click: `onMouseDown` + `preventDefault` + `accept(opt)`. NO `inputRef.focus()`.
-- Outside-close: document mousedown checks BOTH wrapRef AND portalRef.
-- Close on scroll/resize (capture listener).
-- Keyboard: ↓/↑/Enter/Escape (same as before, Enter requires highlighted item).
+Also: committed the Phase 22d–22l batch (`0aaf828`) before starting
+this slice.
 
-**Additional defensive fixes:**
-- `handleAddHop`/`handleRemoveHop`/`handleEditHop`/`handleHopDrop` converted to
-  functional `setRoutes(prev => ...)` form (guards against stale-closure edge cases).
-- CSS: `.model-suggest` changed from absolute-positioned toggles to flex row
-  (input + buttons side-by-side, no overlap); `.model-suggest-menu` z-index 9999;
-  portal menu uses inline fixed coords (no CSS position overrides needed).
-- Mock backend: `proxy_fetch_models` case returns 10 demo models (7 Anthropic + 3 Zhipu).
-- i18n: `route.fetchModels.empty`, `route.fetchModels.failed` (en + zh).
+**Verified:** ui tsc clean · vite build clean (AppPage 35.92 kB) ·
+`npm run ui:smoke` extended to 13 checks — all green, including a new
+scripted check that opens the modal, changes the port via the native
+React input setter, saves, and asserts the URL row shows :8990.
 
-**Verified:** ui tsc ✅; vite build ✅ (50 modules, CSS 19.1 KB); cargo check ✅.
+### Phase 22l - Smoke covers rename + enable toggle + keyboard reorder (2026-08-25) ✅ DONE
 
-### Phase 19 - cc-switch model mapping import + route editor polish (2026-08-21) ✅ DONE
+Extended `scripts/smoke-demo.mjs` from 9 to 12 checks, adding scripted
+CDP coverage for the three newest interactions:
 
-cc-switch stores per-tier model mapping inside `providers.settings_config.env`
-(`ANTHROPIC_DEFAULT_HAIKU/SONNET/OPUS/FABLE_MODEL` + `ANTHROPIC_MODEL`). The
-Phase 18 importer only copied provider rows; it never translated those env
-keys into AAG's `routes[].hops[].model` form. Phase 19 closes that loop end to
-end and rebuilds the route editor UX so the drag-and-drop actually works.
+1. **Route rename**: overrides `window.prompt` to auto-answer, clicks
+   Rename on the first route card, asserts the `.route-card-title`
+   alias changed (Phase 22k end-to-end).
+2. **Upstream enable toggle**: clicks the first UpstreamList switch,
+   asserts the checkbox flipped and the row got the disabled styling
+   path (Phase 22h).
+3. **Hop keyboard reorder**: focuses a drag handle, dispatches
+   ArrowDown, asserts the hop at idx 0 landed at idx 1 (Phase 22e).
+
+Fix in the CDP helper: `Runtime.evaluate` now passes `awaitPromise:
+true` — async IIFE checks were resolving to an object placeholder
+(`[object Object]`) instead of their value, failing all three checks
+on the first run.
+
+**Verified:** `npm run ui:smoke` → 12/12 green, zero exceptions.
+
+### Phase 22k - Route alias rename (2026-08-25) ✅ DONE
+
+Renaming a route previously meant delete + recreate + rebuild every hop
+by hand. Alias is the `routes` PRIMARY KEY, so rename is a single
+in-place UPDATE — hops/description ride along on the same row.
 
 **Backend:**
-- `services/import_cc_switch/mod.rs`: importer now reads each imported
-  Claude provider's `env.ANTHROPIC_DEFAULT_*_MODEL` keys and auto-seeds a
-  failover route for every official Claude model (fable-5, opus-4-8/7/6,
-  sonnet-5/4-6, haiku-4-5) using the imported provider as the head hop. If a
-  route already exists, the new provider is prepended (preserving any
-  user-tuned order); re-imports are idempotent.
-- `ImportReport.imported_routes` field added so the UI toast can report the
-  route count alongside the provider count.
-- 2 new tests: `import_seeds_routes_from_anthropic_default_models` and
-  `reimport_prepends_new_provider_to_existing_route`.
+- `Database::rename_route(from, to)` (`dao/routes.rs`): unchecked
+  transaction, `UPDATE routes SET alias=?1 WHERE alias=?2`, errors with
+  `InvalidInput` when the source is missing; a taken target fails via
+  the PK UNIQUE constraint.
+- `route_rename` command (trims/empty-checks the target, no-op when
+  unchanged), registered in `invoke_handler`.
 
 **Frontend:**
-- `AppPage.tsx`: route editor rebuilt as a real `<table>` with a sticky
-  toolbar (title + batch delete + add route + save/discard), per-route
-  collapse/expand, batch-select checkboxes, fixed column widths via
-  `<colgroup>`. Drag handle moved to its own column so children
-  `<select>`/`<input>` no longer swallow mousedown (Phase 18 bug — drag
-  only fired from the cosmetic handle anyway). Model input now uses a
-  `<datalist>` populated from `CLAUDE_MODELS + CODEX_MODELS + each upstream
-  provider's models[]`.
-- `styles.css`: new `.route-editor` / `.route-toolbar` / `.route-card` /
-  `.hop-table` / `.hop-drag-handle` / `.restart-hint` classes (CSS went
-  from 13.9 KB → 17.4 KB). The previous `.hop-row.drag-over` rule now also
-  matches `.model-catalog-row.drag-over` so the hover highlight actually
-  fires.
-- `lib/api/types.ts` + `lib/mock/backend.ts`: `ImportReport.importedRoutes`
-  typed end-to-end.
-- `i18n/{en,zh}.ts`: 9 new keys (`route.deleteSelected`,
-  `route.deleteSelectedConfirm`, `route.selectForBatch`, `route.hopCount`,
-  `route.noHops`, `route.expand`, `route.collapse`,
-  `chain.importCcSwitch.routes`). Import toast now reads "Imported N ·
-  Skipped M · routes auto-seeded: K" when applicable.
+- `renameRoute()` API wrapper; mock backend `route_rename` case.
+- AppPage `handleRenameRoute`: prompt → duplicate check → backend
+  rename → patch BOTH local routes and `baselineRef` (dirty flag stays
+  truthful for unsaved hop edits, which survive the rename).
+- RouteEditor route-card head gains a Rename button.
+- i18n: `route.rename`, `route.rename.prompt`, `route.renamed` (en+zh).
 
-**Verified:** cargo test --lib 108/108 (+2 new); ui tsc clean; vite build
-clean (49 modules, CSS 13.9 KB → 17.4 KB); Node typecheck + 18/18 tests
-pass.
+**Verified:** cargo test --lib 122/122 · ui tsc clean · vite build clean
+· `npm run ui:smoke` 9/9 green.
 
-### Phase 18 - Unified failover route editor + Codex model mapping (2026-08-20) ✅ DONE
+### Phase 22j - One-command browser smoke (`npm run ui:smoke`) (2026-08-25) ✅ DONE
 
-Replaced the fragmented model mapping systems (unified editor, per-provider modelMapping,
-model catalog in modal) with a single **route-based failover editor** shared by Claude and
-Codex pages. Each route = client-facing model name → ordered hops (provider + upstream model).
+Codified the Phase 22i CDP debugging into a permanent script:
+`scripts/smoke-demo.mjs` (root `package.json` → `ui:smoke`). Zero new
+deps — native fetch + WebSocket (Node ≥20).
 
-**Backend:**
-- `proxy/models.rs`: added `CODEX_MODELS` constant (codex-5-6-sol, codex-5-6-luna, codex-5-6-terra, codex-5-5).
-- `database/schema.rs`: schema v18 (no-op stamp; Codex routes seeded in `seed_proxy_if_empty`).
-- `database/seed.rs`: `seed_proxy_if_empty` now seeds 4 default Codex routes alongside Claude official routes.
-- `database/dao/routes.rs`: added `get_route(alias)` method for single-route lookups.
-- `services/import_cc_switch/mod.rs`: import now auto-creates failover routes for all official Claude models using imported providers as hops.
-- `e2e.rs`: updated route count assertion to include Codex models (105/105 tests pass).
+What it does, end to end (~15s):
+1. Finds Edge/Chrome in standard paths.
+2. Reuses a vite dev server on :1420 if one is answering, else spawns
+   `npm run dev --prefix ui` (20s startup budget).
+3. Launches headless `--user-data-dir` browser with CDP on :9223
+   (isolated profile — never touches the user's browser).
+4. Navigates to the demo page and asserts: no "UI error" crash screen,
+   header + Claude page landmarks, hop drag handles rendered.
+5. Clicks Start → asserts the running pill; asserts the route-toolbar
+   restart button appears only while running (Phase 22e wiring).
+6. Switches to the Codex tab → asserts the mirror CODEX_HOME row.
+7. Fails on ANY uncaught Runtime.exceptionThrown (this is the check
+   that would have caught the Phase 22i TDZ white-screen).
 
-**Frontend:**
-- `appPages.ts`: replaced dead `CODEX_MODELS` with new constants (`codex-5-6-sol` etc.) + `CODEX_DISPLAY` map.
-- `AppPage.tsx`: removed unified model mapping editor (`editingMapping`/`handleSaveMapping`/`loadMappingFromProviders`); removed model catalog from Codex provider modal; removed model mapping from proxy provider modal; added route CRUD state + handlers (`handleAddRoute`/`handleDeleteRoute`/`handleAddHop`/`handleRemoveHop`/`handleEditHop`/`handleHopDrop`/`handleSaveRoutes`); added route editor UI on both Claude (inside upstream pool section) and Codex (standalone card) pages with drag-reorderable hops.
-- `i18n/en.ts` + `zh.ts`: added `route.*` keys for the route editor.
-- `mock/backend.ts`: added Claude + Codex route seed data.
+`--keep` leaves vite + the browser up for manual inspection. Exit 0/1.
 
-**Verified:** cargo check clean; cargo test --lib 105/105; ui tsc clean; vite build clean (49 modules).
+**Verified:** ran once from repo root — 9/9 checks pass, zero
+exceptions. This is now the post-refactor gate for every UI round.
 
-### Phase 17 - Per-app provider chains (cc-switch style) ✅ DONE (2026-08-19)
+### Phase 22i - Browser smoke test catches white-screen TDZ crash (2026-08-25) ✅ DONE
 
-All 4 apps (Claude Code, Codex, Copilot CLI, pi) now have independent, drag-reorderable
-provider chains with per-card failover toggle, analogous to cc-switch's universal card list.
+Ran the first real browser smoke (vite dev + headless Edge via CDP:
+navigate, console/exception capture, DOM text snapshot, scripted
+clicks). **It caught a production-grade bug that tsc/vite build both
+miss:**
 
-**Backend:**
-- Schema v15 migration: `in_failover_queue` default flipped to 1. `DAO::set_in_failover_queue` added.
-- `provider_set_failover_queue` Tauri command (per-card toggle).
-- `provider_switch` expanded: Codex writes mirror CODEX_HOME, Copilot merges settings.json, pi upserts models.json+settings.json, claude_code stays write-less.
-- `queue_endpoint_of` extracts upstream URL/key from all 4 app shapes.
-- `start_proxy_impl` builds per-app queue-<id> proxy providers for all 4 apps; Router gets `with_queues` + `complete_for`/`stream_for`.
-- `server.rs`: `/v1/messages` -> Claude chain, `/v1/responses` -> Codex chain, `/v1/chat/completions` -> Copilot+pi chain.
-- 3 new router tests + TOML base_url parsing fix.
+**`ReferenceError: Cannot access 'breakerOf' before initialization`**
+— the per-card Context refactor moved `proxyPoolValue`'s `useMemo`
+above its handler dependencies (`breakerOf` / `breakerOfClass`
+`handleTestProvider` / `clearTestResult`, all `const` arrow functions
+declared hundreds of lines later). The memo factory runs at first
+render → TDZ → AppPage crashes on mount → React unmount tears the tree
+down while the index.html error handler has already overwritten
+root.innerHTML → secondary `removeChild` NotFoundError. White screen in
+demo AND in the packaged Tauri app.
 
-**Frontend:**
-- New `lib/appPages.ts` per-app config (fields, buildConfig, extractForm, cardUrl, surface, launchers).
-- New `components/app/AppPage.tsx`: gateway card + provider chain (drag-reorder, CURRENT, +chain/-chain toggle, Enable) + cc-switch import (Claude) + Codex launchers.
-- `App.tsx`: AppSwitcher iterates `APP_PAGE_ORDER` (claude_code/codex/copilot/pi).
-- `setProviderFailoverQueue` wrapper + CSS `.drag-handle`/`.tag-paused`/`.drag-over` + i18n keys + mock backend with all 4 apps.
+**Fix:** moved the `proxyPoolValue` useMemo after `clearTestResult`
+(just before return), with a comment at both sites explaining the TDZ
+constraint.
 
-**Verified:** tsc clean; vite build; Node 18/18; Rust 105/105; headless Edge confirms 4 tabs.
-### Phase 16 - Two-page refactor: Claude-as-upstream + Codex mirror install (2026-08-19) ✅ DONE
+**Post-fix smoke (CDP, 0 exceptions):**
+- Claude page fully renders: gateway card, upstream pool flow nodes,
+  2 seeded routes with hop tables, upstream list.
+- Start button → "● running" pill; route toolbar shows the new
+  "重启代理以生效" button only while running (Phase 22e wiring works).
+- Codex tab switch renders mirror CODEX_HOME row + codex routes;
+  tab-switch route cache path clean.
 
-Full-scope refactor per user direction ("主体只需要留agent工具+下面对应的provider").
+**Verified:** ui tsc clean; vite build clean (AppPage chunk 33.79 kB).
 
-**Backend:**
-- `POST /v1/responses` (OpenAI Responses API) added to the proxy (`proxy/responses.rs` types + `converter.rs` conversions + `server.rs` route). Both streaming (named SSE events: response.created / output_item.added / output_text.delta / output_item.done / response.completed + `data: [DONE]`) and non-streaming. Codex CLI/Desktop speak this natively. +5 tests.
-- `provider_switch` live-write split: `codex` re-writes live config via `codex::write_live` into the **mirror** CODEX_HOME; `claude_code` never writes (cc-switch owns `~/.claude/settings.json` - AAG is its upstream).
-- `config::get_codex_mirror_dir` - unset `codex_cli_home` now defaults to `~/.codex-cli` (NOT the native `~/.codex`), enforcing the mirror-install contract across provider_switch / codex_open_cli_terminal / codex_open_desktop_window / codex_cli_status.
-- New commands: `codex_open_desktop_window` (launches a NEW Codex Desktop process with `CODEX_HOME=<mirror>` injected; existing desktop instance unaffected), `route_reorder_hops` (drag-reorder persistence for the failover chain editor).
-- ~35 dead commands unregistered from `invoke_handler` (deeplink_*, backup_*, mcp_*, skill_*, session_*, usage_*, sync_*, vendor_*, detect/set/get cc-switch coexistence, sync_with_ccswitch, provider_sync_locked). Rust fn bodies + DAOs retained (library-level utilities).
+### Phase 22h - Upstream enable/disable switch (2026-08-25) ✅ DONE
 
-**Frontend (6,751 -> ~1,300 LOC):**
-- 12-page nav replaced by an AppSwitcher segmented control with 2 pages: **Claude** (endpoint copy-card for cc-switch + two-pane failover editor: upstream pool <-> routes with drag-reorderable hops + one-click "Import from cc-switch") and **Codex** (gateway status card + provider list with Switch writing the mirror + launchers: Codex Desktop (mirror) / Codex CLI terminal / Copilot CLI terminal).
-- Deleted: Providers/Proxy/Vendors/CodexCli/Backup/MCP/Skills/Sessions/Usage/Sync/DeepLink/Settings pages, `providerForm.ts`, `jsonHighlight.ts`, `models.ts`, 9 dead `lib/api/*` files.
-- `styles.css` 1,911 -> ~700 LOC, cc-switch design language: 64px sticky header, systemBlue (#0A84FF dark / #2563EB light), emerald-500 running pill, rounded-xl cards, segmented control.
-- i18n catalogs rewritten (en/zh) around `claude.*` / `codex.*` namespaces.
-- Mock backend rewritten to the new command surface (mocks `codex_open_desktop_window` + `route_reorder_hops`; cc-switch coexistence hooks removed).
+Audit finding: `ProxyProvider.enabled` is load-bearing (the Rust router
+skips disabled providers — `router.rs:119/150/276/396`, and
+`commands/proxy.rs:132` refuses to test them), but the UI had **no way
+to set it false**, and worse, `handleSaveProxy` hardcoded
+`enabled: true`, silently re-enabling a deliberately disabled provider
+on any edit.
 
-**Verified:** cargo check clean; cargo test --lib 102/102 (was 97; +5 Responses tests); ui tsc clean; vite build clean (49 modules, CSS 37KB -> 10KB); Node legacy tree typecheck + 18/18 tests pass; vite dev serves.
+**Fix:**
+- `handleSaveProxy` preserves `editingProxy.enabled` instead of forcing
+  true (new rows default to enabled).
+- New `handleToggleEnabled(id, enabled)` in AppPage (full-row save +
+  refresh), exposed via ProxyPoolState as `onToggleEnabled`.
+- UpstreamList rows gain a toggle switch (persisted immediately) + a
+  DISABLED tag + `.provider-row.disabled` dimmed/strikethrough styling.
+  The failover flow viz keeps showing only enabled nodes by design;
+  the list is where disabled ones stay visible.
+
+i18n: `claude.upstream.disabledTag` + `claude.upstream.enabled.help`
+(en+zh). CSS: `.provider-row.disabled` (+8 lines).
+
+**Verified:** ui tsc clean; vite build clean (CSS 20.47→20.65 kB,
+AppPage chunk 33.79 kB). No backend changes.
+
+### Phase 22g - Port-conflict UX on gateway start (2026-08-25) ✅ DONE
+
+Audited the backend's port handling first: `bind_with_fallback`
+(`commands/proxy.rs`) already sweeps ports +0..+5 with a `/health`
+ownership probe and returns a joined per-port error list — no backend
+change needed. The gap was presentation:
+
+1. **Start failure**: `handleStart` dumped the raw 6-port error string
+   into the error banner. Errors matching `no free port` now render a
+   human summary ("every nearby port is taken — free a port or change
+   the base URL") with the raw detail appended (`app.gateway.portConflict`).
+2. **Silent port fallback**: when the backend moves to a fallback port,
+   `startProxy`'s message carries "port N was in use; saved as the new
+   default" — it was dropped. `handleStart` now regexes that out and
+   flashes `app.gateway.portFallback` so users know why the URL row
+   changed.
+
+i18n: `app.gateway.portFallback` + `app.gateway.portConflict` (en+zh).
+
+**Verified:** cargo test --lib 122/122 (baseline); ui tsc clean; vite
+build clean (AppPage chunk 33.19 kB).
+
+### Phase 22f - Live health polling + upstream model list editor (2026-08-25) ✅ DONE
+
+Two fixes in the Claude/Codex upstream-pool surface:
+
+1. **Live breaker states**: `health` was fetched once at mount/refresh —
+   breaker open/close transitions never reached the pool pills while the
+   proxy ran. AppPage now polls `GET /health` every 10s via a dedicated
+   effect (gated on `running` + pool-bearing pages, cleanup on
+   stop/unmount/tab switch). Mock backend already intercepts `/health`,
+   so demo mode stays live too.
+2. **Upstream model list editor + silent-wipe fix**: `handleSaveProxy`
+   hardcoded `models: []` — editing any provider through the modal
+   silently wiped its model list (which feeds the route editor's hop
+   suggestions and knownModels). The proxy modal now has a Models
+   textarea (comma/newline separated), pre-filled from the provider on
+   edit and parsed back on save.
+
+i18n: `claude.upstream.modal.models` (en+zh).
+
+**Verified:** ui tsc clean; vite build clean (AppPage chunk 33.02 kB).
+No backend changes.
+
+### Phase 22e - Restart-from-route-editor + keyboard hop reorder (2026-08-25) ✅ DONE
+
+Two UX gaps closed in the route editor:
+
+1. **One-click apply**: `route.restartHint` was text-only — users had to
+   scroll up to the gateway card and Stop/Start manually. The route
+   toolbar now shows a "Restart proxy to apply" button (only while the
+   gateway is running). `handleRestartProxy` in AppPage does
+   stopProxy (tolerant of not-running) → startProxy → refresh →
+   `app.gateway.restarted` toast; busy state `restart` disables it.
+   Wired through RoutesState (`proxyRunning` / `restartBusy` /
+   `onRestartProxy`) so RouteEditor stays context-only.
+2. **Keyboard hop reorder**: the ⋮⋮ drag handle had `role="button"` +
+   tabIndex but no key handling (fake accessibility).
+   `handleHopKeyDown` maps ↑/↓ (step), Home/End (to ends) onto
+   `applyHopMove`, then refocuses the moved row's handle via
+   `requestAnimationFrame` + `CSS.escape`d selector so ↑/↓ repeat
+   cleanly. Handle tooltips updated to mention the keys (en+zh).
+
+i18n: `route.restartNow`, `app.gateway.restarted` (en+zh);
+`route.hopDragHint` mentions keyboard support.
+
+**Verified:** ui tsc clean; vite build clean (AppPage chunk 32.48 kB).
+No backend changes (proxy_start/stop already existed; mock backend covers
+them).
+
+### Phase 22d - Truthful route-editor persistence (staged add/remove + reconcile-save) (2026-08-25) ✅ DONE
+
+Four real defects in the route editor's persistence semantics, all fixed
+in `AppPage.tsx`:
+
+1. **Dirty flag lied**: `handleAddRoute` persisted immediately
+   (`saveRoute` + full reload) but never touched `baselineRef`, so the
+   toolbar showed "Unsaved changes" for already-persisted state.
+2. **Silent edit loss**: add/delete/batch-delete reloaded ALL routes from
+   the backend (`setRoutes(await listRoutes())`), wiping unsaved hop
+   edits on unrelated routes.
+3. **Duplicate alias silently overwrote** an existing route's hops
+   (`saveRoute` upserts by alias).
+4. **Full serial save**: Save wrote every route (including untouched
+   ones) one IPC call each.
+
+New model — **stage locally, reconcile on Save**:
+- Add / delete / batch-delete now mutate local state only (`setRoutes`),
+  so the dirty indicator is truthful and Discard restores cleanly.
+- Duplicate-alias guard on add (`route.exists` toast, en+zh).
+- `handleSaveRoutes` reconciles against the baseline: saves only new-or-
+  changed routes (`JSON.stringify` diff), deletes routes removed while
+  editing (`baselineRef` − current), skips untouched ones.
+- Newly added routes auto-expand so hops can be added right away.
+
+**Verified:** ui tsc clean; vite build clean (AppPage chunk 31.29→31.61 kB).
+No backend changes; mock backend already covered route_save/route_delete.
+cargo test --lib 122/122 (baseline unchanged).
+
+### Phase 22c - Fix re-import hop filling + pointer-based hop drag (2026-08-22) ✅ DONE
+
+**Backend** (`services/import_cc_switch/mod.rs`): route inputs are now
+collected at the end of the loop regardless of whether the provider was newly
+imported or already present — so a re-import against an existing DB (providers
+that predate the route builder) fills the hop models from cc-switch's tier
+mapping instead of leaving them empty. Locked rows (sync_locked) still
+excluded. New test `reimport_fills_hops_for_existing_providers`.
+
+**Frontend** (`AppPage.tsx`): hop drag reimplemented with **pointer events**
+(pointerdown/move/up + `elementFromPoint`) instead of HTML5 DnD, which is
+unreliable in Tauri's WebView2. `hopRowAt()` resolves the target row under
+the pointer; `applyHopMove` reorders in state. Removed the dead HTML5
+`handleHopDrop`/`routeDragIdx` path. `.hop-row` rows carry
+`data-route-alias`/`data-hop-idx` for hit-testing.
+
+**Mock backend** (`lib/mock/backend.ts`): added missing
+`proxy_get_pinned_provider`/`proxy_set_pinned_provider` (their absence made
+`refresh()`'s `Promise.all` reject and silently blank the upstream pool in
+demo mode). Added missing `claude.upstream.listTitle` i18n key (en/zh).
+
+**Verified:** cargo test --lib 118/118; ui tsc + vite build clean; pointer
+drag verified in-browser (hop swap works).
+
 > 6. If verification fails, set `status: blocked` and describe the blocker - do NOT advance.
 
 ## Status: ready
-## Current phase: 21
-## Next action: Phase 21 COMPLETE. Configure Claude Code to point at AAG (`ANTHROPIC_BASE_URL=http://127.0.0.1:8989`, `x-api-key` passthrough) and start a real session with tool calls (Read / Bash / Edit). Verify: Tauri dev log shows `router: OK claude-opus-4-8 <- <provider>/<model>`; no more `tags` output; tool_use blocks visible in client UI.
+## Current phase: 22n
+## Next action: Phase 22n COMPLETE. Next slice candidates: smoke check for gateway modal port-validation error path; audit UpstreamPool empty-vs-disabled flow rendering; consider proxy_config host editing (modal covers port/key only).

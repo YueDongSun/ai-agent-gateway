@@ -23,12 +23,14 @@ import {
   listRoutes,
   saveRoute,
   deleteRoute,
-  reorderRouteHops,
+  renameRoute,
+  saveProxyConfig,
   fetchProviderModels,
   type ProxyProvider,
   type ProxyHealth,
   type TestResult,
   type Route,
+  type ProxyConfig,
 } from '../../lib/api/proxy';
 import { importCcSwitchProviders } from '../../lib/api/import';
 import {
@@ -42,6 +44,14 @@ import { APP_PAGES, CLAUDE_MODELS, CODEX_MODELS, type AppPageConfig } from '../.
 import type { AppType, Provider } from '../../lib/api/types';
 import { useT } from '../../lib/ctx';
 import { ModelSuggest } from '../ModelSuggest';
+import { TestIcon } from '../Icons';
+import { Launchers } from './Launchers';
+import { GatewayPanel } from './GatewayPanel';
+import { ProviderChain } from './ProviderChain';
+import { UpstreamList } from './UpstreamList';
+import { UpstreamPool } from './UpstreamPool';
+import { ProxyPoolProvider, RoutesProvider, type ProxyPoolState, type RoutesState } from './state';
+import { RouteEditor } from './RouteEditor';
 
 interface FormState {
   id: string;
@@ -104,13 +114,23 @@ export function AppPage({ appType }: { appType: AppType }) {
     () => JSON.stringify(routes) !== JSON.stringify(baselineRef.current),
     [routes],
   );
-  /** Proxy provider edit modal (Claude upstream pool). */
+  /** Proxy provider edit modal (Claude upstream pool). `models` is the raw
+   *  textarea text (one id per line / comma separated) — parsed on save. */
   const [showProxyModal, setShowProxyModal] = useState(false);
+  /** Gateway settings modal (port + auth token). */
+  const [showGatewayModal, setShowGatewayModal] = useState(false);
+  const [gatewayForm, setGatewayForm] = useState({ port: '', authToken: '' });
+  /** Config snapshot for the gateway modal (enabled bit rides along). */
+  const gatewayCfgRef = useRef<ProxyConfig | null>(null);
   const [editingProxy, setEditingProxy] = useState<ProxyProvider | null>(null);
-  const [proxyForm, setProxyForm] = useState({ id: '', name: '', type: 'anthropic', baseURL: '', apiKey: '' });
-  /** Drag-reorder state. */
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [overIdx, setOverIdx] = useState<number | null>(null);
+  const [proxyForm, setProxyForm] = useState({
+    id: '',
+    name: '',
+    type: 'anthropic',
+    baseURL: '',
+    apiKey: '',
+    models: '',
+  });
   /** Route editor: aliases selected for batch delete. */
   const [selectedAliases, setSelectedAliases] = useState<Set<string>>(new Set());
   /** Route editor: aliases whose hop list is collapsed. */
@@ -188,6 +208,34 @@ export function AppPage({ appType }: { appType: AppType }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appType]);
 
+  /** Poll proxy /health while the gateway runs so breaker states in the
+   *  upstream pool stay live (they'd otherwise freeze at mount-time data).
+   *  Only for pages that show the pool (Claude + Codex). */
+  useEffect(() => {
+    const pollsHealth =
+      (appType === 'claude_code' || appType === 'codex') && running;
+    if (!pollsHealth) return;
+    let alive = true;
+    const id = window.setInterval(async () => {
+      try {
+        const pc = await getProxyConfig();
+        const h = await fetchProxyHealth(pc);
+        if (alive) setHealth(h);
+      } catch {
+        if (alive) setHealth(null);
+      }
+    }, 10_000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [appType, running]);
+
+  /** Memoized pool value is defined further down, after its handler
+   *  dependencies (breakerOf / breakerOfClass / handleTestProvider /
+   *  clearTestResult) — a `const` useMemo above those declarations hits
+   *  the temporal dead zone at first render (white-screen crash). */
+
   const copy = async (text: string, key: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -201,8 +249,35 @@ export function AppPage({ appType }: { appType: AppType }) {
   const handleStart = async () => {
     setBusy('start');
     try {
+      const msg = await startProxy();
+      // Surface the backend's port-fallback note ("port 8989 was in use;
+      // saved as the new default") — the gateway URL row updates too, but
+      // the toast explains why it changed.
+      const fallback = msg.match(/port (\d+) was in use/);
+      if (fallback) {
+        flash(t('app.gateway.portFallback', { port: fallback[1] }));
+      }
+      await refresh();
+    } catch (e) {
+      const raw = String(e);
+      setError(
+        raw.includes('no free port')
+          ? t('app.gateway.portConflict', { message: raw })
+          : raw,
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Stop + start the local proxy (routes/providers only reload at start). */
+  const handleRestartProxy = async () => {
+    setBusy('restart');
+    try {
+      try { await stopProxy(); } catch { /* wasn't running */ }
       await startProxy();
       await refresh();
+      flash(t('app.gateway.restarted'));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -222,12 +297,44 @@ export function AppPage({ appType }: { appType: AppType }) {
     }
   };
 
+  // ---- Gateway settings (port + auth token) ----
+
+  const openGatewayModal = async () => {
+    try {
+      const cfg = await getProxyConfig();
+      gatewayCfgRef.current = cfg;
+      setGatewayForm({ port: String(cfg.port), authToken: cfg.authToken });
+      setShowGatewayModal(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleSaveGateway = async () => {
+    const base = gatewayCfgRef.current;
+    if (!base) return;
+    const port = Number(gatewayForm.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setError(t('app.gateway.invalidPort'));
+      return;
+    }
+    try {
+      await saveProxyConfig({ ...base, port, authToken: gatewayForm.authToken.trim() });
+      setShowGatewayModal(false);
+      flash(t('app.gateway.savedRestartHint'));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleImport = async () => {
     setImporting(true);
     setError(null);
     try {
       const report = await importCcSwitchProviders();
-      if (report.imported.length === 0 && report.skippedExisting.length === 0) {
+      const noKeyCount = report.skippedNoKey?.length ?? 0;
+      if (report.imported.length === 0 && report.skippedExisting.length === 0 && noKeyCount === 0) {
         flash(t('chain.importCcSwitch.empty'));
       } else {
         // importedRoutes may be empty for non-Claude imports — only
@@ -241,7 +348,8 @@ export function AppPage({ appType }: { appType: AppType }) {
             skipped: String(report.skippedExisting.length),
             total: String(report.totalInSource),
           }) +
-            (routeCount > 0 ? ` · ${t('chain.importCcSwitch.routes', { n: String(routeCount) })}` : ''),
+            (routeCount > 0 ? ` · ${t('chain.importCcSwitch.routes', { n: String(routeCount) })}` : '') +
+            (noKeyCount > 0 ? ` · ${t('chain.importCcSwitch.noKey', { n: String(noKeyCount) })}` : ''),
         );
       }
       await refresh();
@@ -325,25 +433,6 @@ export function AppPage({ appType }: { appType: AppType }) {
     }
   };
 
-  const dropOn = async (targetIdx: number) => {
-    if (dragIdx === null || dragIdx === targetIdx) {
-      setDragIdx(null);
-      setOverIdx(null);
-      return;
-    }
-    const ids = providers.map((p) => p.id);
-    const [moved] = ids.splice(dragIdx, 1);
-    ids.splice(targetIdx, 0, moved);
-    setDragIdx(null);
-    setOverIdx(null);
-    try {
-      await reorderProviders(appType, ids);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   const handleOpenDesktop = async () => {
     setBusy('desktop');
     try {
@@ -389,10 +478,17 @@ export function AppPage({ appType }: { appType: AppType }) {
   const openProxyModal = (p?: ProxyProvider) => {
     if (p) {
       setEditingProxy(p);
-      setProxyForm({ id: p.id, name: p.name, type: p.type, baseURL: p.baseURL, apiKey: p.apiKey });
+      setProxyForm({
+        id: p.id,
+        name: p.name,
+        type: p.type,
+        baseURL: p.baseURL,
+        apiKey: p.apiKey,
+        models: (p.models ?? []).join(', '),
+      });
     } else {
       setEditingProxy(null);
-      setProxyForm({ id: '', name: '', type: 'anthropic', baseURL: '', apiKey: '' });
+      setProxyForm({ id: '', name: '', type: 'anthropic', baseURL: '', apiKey: '', models: '' });
     }
     setShowProxyModal(true);
   };
@@ -405,8 +501,15 @@ export function AppPage({ appType }: { appType: AppType }) {
       type: proxyForm.type,
       apiKey: proxyForm.apiKey.trim(),
       baseURL: proxyForm.baseURL.trim(),
-      models: [],
-      enabled: true,
+      // Preserve the model list: parse the textarea (comma/newline separated)
+      // instead of hardcoding [] — editing used to silently wipe it.
+      models: proxyForm.models
+        .split(/[,\n]/)
+        .map((m) => m.trim())
+        .filter(Boolean),
+      // Preserve the row's enabled bit — hardcoding true used to silently
+      // re-enable a deliberately disabled provider on edit.
+      enabled: editingProxy?.enabled ?? true,
       timeoutMs: editingProxy?.timeoutMs ?? 60000,
       weight: editingProxy?.weight ?? 1,
       circuitBreaker: editingProxy?.circuitBreaker ?? { failureThreshold: 3, cooldownMs: 5000, halfOpenRetries: 1, successThreshold: 2 },
@@ -438,6 +541,17 @@ export function AppPage({ appType }: { appType: AppType }) {
     } catch (e) { setError(String(e)); }
   };
 
+  /** Enable/disable an upstream provider (persisted immediately; the
+   *  proxy router skips disabled providers on its next rebuild). */
+  const handleToggleEnabled = async (id: string, enabled: boolean) => {
+    const target = proxyProviders.find((pp) => pp.id === id);
+    if (!target) return;
+    try {
+      await saveProxyProvider({ ...target, enabled });
+      await refresh();
+    } catch (e) { setError(String(e)); }
+  };
+
   /** Get breaker state for a proxy provider from the health data. */
   const breakerOf = (id: string): string | null => {
     if (!health) return null;
@@ -463,20 +577,57 @@ export function AppPage({ appType }: { appType: AppType }) {
     return routes.filter((r) => !r.alias.startsWith('codex-'));
   }, [routes, appType]);
 
-  const handleAddRoute = async () => {
+  /** Stage a new empty route locally. Persisted together with everything
+   *  else on Save — keeps the dirty indicator truthful and avoids the old
+   *  immediate-reload wiping unsaved hop edits on other routes. */
+  const handleAddRoute = () => {
     const alias = window.prompt(t('route.add') + ' — alias (e.g. claude-sonnet-5):');
-    if (!alias?.trim()) return;
-    try {
-      await saveRoute({ alias: alias.trim(), description: '', hops: [] });
-      setRoutes(await listRoutes());
-    } catch (e) { setError(String(e)); }
+    const id = alias?.trim();
+    if (!id) return;
+    if (routes.some((r) => r.alias === id)) {
+      flash(t('route.exists', { alias: id }));
+      return;
+    }
+    setRoutes((prev) => [...prev, { alias: id, description: '', hops: [] }]);
+    // Ensure the new route is expanded so hops can be added right away.
+    setCollapsedRoutes((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   };
 
-  const handleDeleteRoute = async (alias: string) => {
+  /** Stage a route removal locally (persisted on Save; Discard restores). */
+  const handleDeleteRoute = (alias: string) => {
     if (!window.confirm(t('route.delete.confirm', { alias }))) return;
+    setRoutes((prev) => prev.filter((r) => r.alias !== alias));
+    setSelectedAliases((prev) => {
+      const next = new Set(prev);
+      next.delete(alias);
+      return next;
+    });
+  };
+
+  /** Rename a route's alias in place. Persisted immediately (single-key
+   *  atomic op) — unlike add/remove, which stage until Save. Unsaved hop
+   *  edits on the renamed route are preserved by renaming in local state
+   *  first, then patching the backend row and re-basing the baseline. */
+  const handleRenameRoute = async (alias: string) => {
+    const next = window.prompt(t('route.rename.prompt', { alias }))?.trim();
+    if (!next || next === alias) return;
+    if (routes.some((r) => r.alias === next)) {
+      flash(t('route.exists', { alias: next }));
+      return;
+    }
     try {
-      await deleteRoute(alias);
-      setRoutes(await listRoutes());
+      await renameRoute(alias, next);
+      // Patch local state + baseline so the dirty flag stays truthful.
+      const patch = (rs: Route[]) =>
+        rs.map((r) => (r.alias === alias ? { ...r, alias: next } : r));
+      setRoutes(patch);
+      baselineRef.current = patch(baselineRef.current);
+      delete routeCacheRef.current[alias];
+      flash(t('route.renamed', { from: alias, to: next }));
     } catch (e) { setError(String(e)); }
   };
 
@@ -504,31 +655,104 @@ export function AppPage({ appType }: { appType: AppType }) {
     ));
   };
 
-  const [routeDragIdx, setRouteDragIdx] = useState<{ alias: string; idx: number } | null>(null);
   const [routeOverIdx, setRouteOverIdx] = useState<{ alias: string; idx: number } | null>(null);
+  /** Pointer-based drag (more reliable than HTML5 DnD in WebView2). */
+  const [pointerDrag, setPointerDrag] = useState<{ alias: string; fromIdx: number } | null>(null);
 
-  const handleHopDrop = (alias: string, targetIdx: number) => {
-    if (!routeDragIdx || routeDragIdx.alias !== alias || routeDragIdx.idx === targetIdx) {
-      setRouteDragIdx(null);
-      setRouteOverIdx(null);
-      return;
-    }
-    const dragIdx = routeDragIdx.idx;
+  /** Reorder a hop by moving it from `fromIdx` to `toIdx` (pointer drag). */
+  const applyHopMove = (alias: string, fromIdx: number, toIdx: number) => {
+    if (fromIdx === toIdx) return;
     setRoutes((prev) => prev.map((r) => {
       if (r.alias !== alias) return r;
       const hops = [...r.hops];
-      const [moved] = hops.splice(dragIdx, 1);
-      hops.splice(targetIdx, 0, moved);
+      const [moved] = hops.splice(fromIdx, 1);
+      hops.splice(toIdx, 0, moved);
       return { ...r, hops };
     }));
-    setRouteDragIdx(null);
+  };
+
+  /** Keyboard reorder for the hop drag handle (↑/↓ move, Home/End to ends).
+   *  Mirrors the pointer-drag path so the handle isn't fake-accessible. */
+  const handleHopKeyDown = (
+    alias: string,
+    idx: number,
+    e: React.KeyboardEvent,
+    hopCount: number,
+  ) => {
+    let toIdx: number | null = null;
+    if (e.key === 'ArrowUp') toIdx = Math.max(0, idx - 1);
+    else if (e.key === 'ArrowDown') toIdx = Math.min(hopCount - 1, idx + 1);
+    else if (e.key === 'Home') toIdx = 0;
+    else if (e.key === 'End') toIdx = hopCount - 1;
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+    applyHopMove(alias, idx, toIdx);
+    // Keep focus on the moved handle (same visual position) so ↑/↓ repeat.
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(
+          `.hop-row[data-route-alias="${CSS.escape(alias)}"][data-hop-idx="${toIdx}"] .hop-drag-handle`,
+        )
+        ?.focus();
+    });
+  };
+
+  /** Resolve the hop row under a pointer position, or null. */
+  const hopRowAt = (x: number, y: number): { alias: string; idx: number } | null => {
+    const el = document.elementFromPoint(x, y);
+    const row = el?.closest?.('.hop-row') as HTMLElement | null;
+    if (!row) return null;
+    const alias = row.dataset.routeAlias;
+    const idx = Number(row.dataset.hopIdx);
+    if (!alias || Number.isNaN(idx)) return null;
+    return { alias, idx };
+  };
+
+  const handlePointerDown = (alias: string, fromIdx: number, e: React.PointerEvent) => {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    setPointerDrag({ alias, fromIdx });
+    setRouteOverIdx({ alias, idx: fromIdx });
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!pointerDrag) return;
+    const target = hopRowAt(e.clientX, e.clientY);
+    if (target && target.alias === pointerDrag.alias) {
+      setRouteOverIdx({ alias: target.alias, idx: target.idx });
+    } else if (routeOverIdx) {
+      setRouteOverIdx(null);
+    }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (!pointerDrag) return;
+    const target = hopRowAt(e.clientX, e.clientY);
+    const toIdx = target && target.alias === pointerDrag.alias ? target.idx : pointerDrag.fromIdx;
+    applyHopMove(pointerDrag.alias, pointerDrag.fromIdx, toIdx);
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    setPointerDrag(null);
     setRouteOverIdx(null);
   };
 
+  /** Reconcile the editor state with the backend: save routes that are new
+   *  or differ from the baseline, delete routes that were removed while
+   *  editing (add/remove stage locally), skip untouched routes. */
   const handleSaveRoutes = async () => {
     try {
-      for (const r of routes) {
+      const baselineByAlias = new Map(baselineRef.current.map((r) => [r.alias, r]));
+      const currentAliases = new Set(routes.map((r) => r.alias));
+      const toSave = routes.filter((r) => {
+        const base = baselineByAlias.get(r.alias);
+        return !base || JSON.stringify(base) !== JSON.stringify(r);
+      });
+      const toDelete = baselineRef.current.filter((r) => !currentAliases.has(r.alias));
+      for (const r of toSave) {
         await saveRoute(r);
+      }
+      for (const r of toDelete) {
+        await deleteRoute(r.alias);
       }
       // Update baseline and clear cache — edits are now persisted.
       baselineRef.current = routes;
@@ -560,20 +784,16 @@ export function AppPage({ appType }: { appType: AppType }) {
     });
   };
 
-  /** Delete every route currently in `selectedAliases`. */
-  const handleDeleteSelectedRoutes = async () => {
+  /** Stage removal of every route in `selectedAliases` (persisted on Save). */
+  const handleDeleteSelectedRoutes = () => {
     const aliases = Array.from(selectedAliases);
     if (aliases.length === 0) return;
     if (!window.confirm(t('route.deleteSelectedConfirm', { n: String(aliases.length) }))) {
       return;
     }
-    try {
-      for (const a of aliases) {
-        await deleteRoute(a);
-      }
-      setSelectedAliases(new Set());
-      setRoutes(await listRoutes());
-    } catch (e) { setError(String(e)); }
+    const doomed = new Set(aliases);
+    setRoutes((prev) => prev.filter((r) => !doomed.has(r.alias)));
+    setSelectedAliases(new Set());
   };
 
   /** Toggle a route's hop list visibility. */
@@ -621,6 +841,62 @@ export function AppPage({ appType }: { appType: AppType }) {
     return Array.from(set);
   }, [proxyProviders, fetchedModels]);
 
+  /** Memoized routes slice for the RouteEditor context. Only changes when
+   * one of its fields actually changes; the many handlers are stable
+   * closures over the state setters so they don't churn the memo. */
+  const routesValue = useMemo<RoutesState>(
+    () => ({
+      routes,
+      isRouteDirty,
+      filteredRoutes,
+      selectedAliases,
+      collapsedRoutes,
+      knownModels,
+      fetchedModels,
+      fetchingId,
+      proxyProviders: proxyProviders.map((pp) => ({ id: pp.id, name: pp.name })),
+      toggleRouteSelection,
+      toggleRouteCollapse,
+      handleDeleteSelectedRoutes,
+      handleAddRoute,
+      handleDeleteRoute,
+      handleRenameRoute,
+      handleAddHop,
+      handleRemoveHop,
+      handleEditHop,
+      handleFetchModels,
+      handleSaveRoutes,
+      handleDiscardRoutes,
+      hopRowAt,
+      handlePointerDown,
+      handlePointerMove,
+      handlePointerUp,
+      handleHopKeyDown,
+      routeOverIdx,
+      pointerDrag,
+      proxyRunning: running,
+      restartBusy: busy === 'restart',
+      onRestartProxy: handleRestartProxy,
+      routeCacheRef,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      routes,
+      isRouteDirty,
+      filteredRoutes,
+      selectedAliases,
+      collapsedRoutes,
+      knownModels,
+      fetchedModels,
+      fetchingId,
+      proxyProviders,
+      routeOverIdx,
+      pointerDrag,
+      running,
+      busy,
+    ],
+  );
+
   /** Test a proxy provider's connectivity. */
   const handleTestProvider = async (providerId: string) => {
     setTestingId(providerId);
@@ -646,6 +922,28 @@ export function AppPage({ appType }: { appType: AppType }) {
     });
   };
 
+  /** Memoized pool value - only changes when one of the 6 slice fields
+   * actually changes, so consumers don't re-render on unrelated AppPage
+   * state churn (busy, error, notice, ...). Must stay AFTER the handler
+   * declarations above — see the TDZ note near the top of the file. */
+  const proxyPoolValue = useMemo<ProxyPoolState>(
+    () => ({
+      providers: proxyProviders,
+      pinnedId,
+      health,
+      testResults,
+      testingId,
+      breakerOf,
+      breakerOfClass,
+      onTestProvider: handleTestProvider,
+      onClearTestResult: clearTestResult,
+      onTogglePin: handleTogglePin,
+      onToggleEnabled: handleToggleEnabled,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [proxyProviders, pinnedId, health, testResults, testingId],
+  );
+
   return (
     <section className="page">
       <div className="page-header">
@@ -654,18 +952,13 @@ export function AppPage({ appType }: { appType: AppType }) {
           <p className="muted">{t(surfaceKey)}</p>
         </div>
         <div className="header-actions">
+          {/* Round 1: Start/Stop moved into the gateway card head (see below)
+           * so the gateway panel becomes a self-contained control surface.
+           * Only the "Import from cc-switch" action remains in the page
+           * header — it's not about the live gateway. */}
           {cfg.ccSwitchUpstream && (
             <button className="btn" onClick={handleImport} disabled={importing}>
               {importing ? '…' : t('chain.importCcSwitch')}
-            </button>
-          )}
-          {running ? (
-            <button className="btn" onClick={handleStop} disabled={busy === 'stop'}>
-              {t('app.gateway.stop')}
-            </button>
-          ) : (
-            <button className="btn primary" onClick={handleStart} disabled={busy === 'start'}>
-              {t('app.gateway.start')}
             </button>
           )}
         </div>
@@ -674,588 +967,88 @@ export function AppPage({ appType }: { appType: AppType }) {
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="notice-banner">{notice}</div>}
 
-      {/* Gateway status card */}
-      {cfg.showGatewayCard && (
-        <div className="card endpoint-card">
-          <div className="card-head">
-            <h3>{t('app.gateway.title')}</h3>
-            <span className={running ? 'pill on' : 'pill off'}>
-              {running ? t('app.gateway.running') : t('app.gateway.stopped')}
-            </span>
-          </div>
-          <div className="endpoint-row">
-            <span className="endpoint-label">{t('app.gateway.url')}</span>
-            <code className="endpoint-value">{gatewayUrl || '…'}</code>
-            <button className="btn small" onClick={() => copy(gatewayUrl, 'url')}>
-              {copied === 'url' ? '✓' : t('app.gateway.copy')}
-            </button>
-          </div>
-          <div className="endpoint-row">
-            <span className="endpoint-label">{t('app.gateway.apiKey')}</span>
-            <code className="endpoint-value">{authToken || t('app.gateway.noKey')}</code>
-            <button className="btn small" onClick={() => copy(authToken, 'key')}>
-              {copied === 'key' ? '✓' : t('app.gateway.copy')}
-            </button>
-          </div>
-          {cfg.ccSwitchUpstream && (
-            <p className="muted small">{t('app.gateway.ccswitchHint')}</p>
-          )}
-          {cfg.launchers === 'codex' && (
-            <div className="endpoint-row">
-              <span className="endpoint-label">{t('codex.mirror.home')}</span>
-              <code className="endpoint-value">{cliStatus?.configDir ?? '~/.codex-cli'}</code>
-              <span className={cliStatus?.initialized ? 'pill on' : 'pill off'}>
-                {cliStatus?.initialized ? '✓' : t('codex.mirror.notInitialized')}
-              </span>
-            </div>
-          )}
-        </div>
+      <GatewayPanel
+        cfg={cfg}
+        running={running}
+        gatewayUrl={gatewayUrl}
+        authToken={authToken}
+        cliStatus={cliStatus}
+        copied={copied}
+        busy={busy}
+        onCopy={copy}
+        onStart={handleStart}
+        onStop={handleStop}
+        onEditSettings={openGatewayModal}
+      />
+
+      {/* Upstream Providers pool + Upstream List share the ProxyPoolContext
+       * (providers, pin, breaker, test results) so both cards read from one
+       * slice instead of plumbing 6 props each. */}
+      {(appType === 'claude_code' || appType === 'codex') && (
+        <ProxyPoolProvider value={proxyPoolValue}>
+          <UpstreamPool
+            onRefresh={() => refresh()}
+            onAddProvider={() => openProxyModal()}
+          />
+        </ProxyPoolProvider>
       )}
 
-      {/* Upstream Providers pool (Claude + Codex) — proxy_providers with flow viz + force-pin */}
+
+      {/* Failover Route editor - consumes RoutesContext (state + handlers
+       * owned by AppPage so the tab-switch cache refs survive remounts). */}
       {(appType === 'claude_code' || appType === 'codex') && (
-        <div className="card">
-          <div className="card-head">
-            <h3>{t('claude.upstream.title')}</h3>
-            <div className="header-actions">
-              <button className="btn small" onClick={() => refresh()}>
-                {t('common.refresh')}
-              </button>
-              <button className="btn small" onClick={() => openProxyModal()}>
-                {t('claude.upstream.add')}
-              </button>
-            </div>
-          </div>
-          <p className="muted small">{t('claude.upstream.desc')}</p>
-          {proxyProviders.length === 0 ? (
-            <p className="muted">{t('claude.upstream.empty')}</p>
-          ) : (
-            <>
-              {/* Failover flow visualization */}
-              <div className="failover-flow">
-                {proxyProviders
-                  .filter((pp) => pp.enabled)
-                  .map((pp, i, arr) => {
-                    const bs = breakerOf(pp.id);
-                    const isActive = health?.lastUsed === pp.id;
-                    const isPinned = pinnedId === pp.id;
-                    const isBroken = bs === 'open';
-                    const nodeClass = [
-                      'flow-node',
-                      isPinned ? 'pinned' : isActive ? 'active' : '',
-                      isBroken ? 'broken' : '',
-                    ].filter(Boolean).join(' ');
-                    return (
-                      <div key={pp.id}>
-                        {i > 0 && <div className="flow-arrow">↓</div>}
-                        <div className={nodeClass}>
-                          <span className="flow-node-id">
-                            {pp.name || pp.id}
-                          </span>
-                          <span className="flow-node-url">{pp.baseURL || '—'}</span>
-                          <div className="flow-node-status">
-                            {bs && <span className={`breaker-dot ${breakerOfClass(bs)}`} title={bs} />}
-                            {isActive && <span className="tag tag-current">{t('claude.upstream.activeTag')}</span>}
-                            {isPinned && <span className="tag tag-pinned">{t('claude.upstream.pinnedTag')}</span>}
-                            <button
-                              className={`btn small ${testResults[pp.id]?.success ? 'test-ok' : testResults[pp.id] ? 'test-fail' : ''}`}
-                              disabled={testingId === pp.id}
-                              onClick={() => handleTestProvider(pp.id)}
-                              title={t('claude.upstream.test.help')}
-                            >
-                              {testingId === pp.id ? '…' : t('claude.upstream.test')}
-                            </button>
-                            <label className="toggle-switch" title={t('claude.upstream.pin.help')}>
-                              <input
-                                type="checkbox"
-                                checked={isPinned}
-                                onChange={() => handleTogglePin(pp.id)}
-                              />
-                              <span className="toggle-slider" />
-                            </label>
-                          </div>
-                        </div>
-                        {/* Test result */}
-                        {testResults[pp.id] && (
-                          <div className={testResults[pp.id].success ? 'test-result ok' : 'test-result fail'}>
-                            {testResults[pp.id].success ? (
-                              <span>
-                                ✓ {t('claude.upstream.test.ok', {
-                                  latency: String(testResults[pp.id].latencyMs),
-                                  model: testResults[pp.id].model ?? '',
-                                })}
-                              </span>
-                            ) : (
-                              <span>✗ {t('claude.upstream.test.fail', { error: testResults[pp.id].error ?? '' })}</span>
-                            )}
-                            <button className="hop-remove" onClick={() => clearTestResult(pp.id)}>×</button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
-            </>
-          )}
-        </div>
+        <RoutesProvider value={routesValue}>
+          <RouteEditor />
+        </RoutesProvider>
       )}
 
-      {/* Failover Route editor — top-level card (was nested inside the
-       * upstream pool card, losing ~80px to double padding).
-       *
-       * Layout:
-       *  - Sticky toolbar at the top of the section: title + global
-       *    batch delete + add route + save / discard. Lets the user
-       *    perform mutations without scrolling.
-       *  - Each route is rendered as a `.route-card` with a header row
-       *    (alias, hop count, collapse toggle, per-route add/delete).
-       *  - Hops are real `<table class="hop-table">` rows: order # /
-       *    drag handle / provider select / model suggest / remove.
-       *  - Drag-and-drop only fires from the handle column (not the
-       *    whole row) so children <select>/<input> don't swallow the
-       *    mousedown — that's the previous design's bug.
-       *  - A `.restart-hint` banner sits at the bottom (centered +
-       *    accent-bordered) to remind the user to restart the proxy. */}
-      {(appType === 'claude_code' || appType === 'codex') && (
-        <div className="card route-editor">
-          <div className="route-toolbar">
-            <h4 className="route-toolbar-title">{t('route.title')}</h4>
-            <div className="route-toolbar-actions">
-              {selectedAliases.size > 0 && (
-                <button
-                  className="btn small danger"
-                  onClick={() => handleDeleteSelectedRoutes()}
-                >
-                  {t('route.deleteSelected', { n: String(selectedAliases.size) })}
-                </button>
-              )}
-              <button className="btn small" onClick={handleAddRoute}>
-                {t('route.add')}
-              </button>
-              {isRouteDirty && (
-                <button className="btn small" onClick={handleDiscardRoutes}>
-                  {t('route.discard')}
-                </button>
-              )}
-              <button
-                className={`btn small ${isRouteDirty ? 'primary' : ''}`}
-                onClick={handleSaveRoutes}
-              >
-                {isRouteDirty ? `${t('common.save')} •` : t('common.save')}
-              </button>
-              {isRouteDirty && (
-                <span className="route-dirty">{t('route.dirty')}</span>
-              )}
-            </div>
-          </div>
-          <p className="muted small route-desc">{t('route.desc')}</p>
-          {filteredRoutes.length === 0 ? (
-            <p className="muted route-empty">{t('route.empty')}</p>
-          ) : (
-            <div className="route-list">
-              {filteredRoutes.map((route) => {
-                const collapsed = collapsedRoutes.has(route.alias);
-                const isSelected = selectedAliases.has(route.alias);
-                return (
-                  <div
-                    key={route.alias}
-                    className={`route-card ${isSelected ? 'selected' : ''}`}
-                  >
-                    <div className="route-card-head">
-                      <label className="route-select">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleRouteSelection(route.alias)}
-                          title={t('route.selectForBatch')}
-                        />
-                      </label>
-                      <div className="route-card-title">
-                        <strong>{route.alias}</strong>
-                        <span className="muted small">
-                          — {t('route.clientsRequest')}
-                        </span>
-                        <span className="route-hop-count">
-                          {t('route.hopCount', { n: String(route.hops.length) })}
-                        </span>
-                      </div>
-                      <div className="route-card-actions">
-                        <button
-                          className="btn small"
-                          onClick={() => handleAddHop(route.alias)}
-                          title={t('route.addHop')}
-                        >
-                          {t('route.addHop')}
-                        </button>
-                        <button
-                          className="btn small danger"
-                          onClick={() => handleDeleteRoute(route.alias)}
-                          title={t('common.delete')}
-                        >
-                          {t('common.delete')}
-                        </button>
-                        <button
-                          className="btn small icon"
-                          onClick={() => toggleRouteCollapse(route.alias)}
-                          title={
-                            collapsed ? t('route.expand') : t('route.collapse')
-                          }
-                        >
-                          {collapsed ? '▸' : '▾'}
-                        </button>
-                      </div>
-                    </div>
-                    {!collapsed && route.description && (
-                      <p className="muted small route-card-desc">
-                        {route.description}
-                      </p>
-                    )}
-                    {!collapsed && (
-                      <>
-                        {route.hops.length === 0 ? (
-                          <p className="muted small route-no-hops">
-                            {t('route.noHops')}
-                          </p>
-                        ) : (
-                          <table className="hop-table">
-                            <colgroup>
-                              <col className="hop-col-idx" />
-                              <col className="hop-col-drag" />
-                              <col className="hop-col-provider" />
-                              <col className="hop-col-model" />
-                              <col className="hop-col-remove" />
-                            </colgroup>
-                            <thead>
-                              <tr>
-                                <th>#</th>
-                                <th />
-                                <th>{t('route.hopProvider')}</th>
-                                <th>{t('route.hopModel')}</th>
-                                <th />
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {route.hops.map((hop, i) => {
-                                const isDragOver =
-                                  routeOverIdx?.alias === route.alias &&
-                                  routeOverIdx?.idx === i;
-                                const isDragging =
-                                  routeDragIdx?.alias === route.alias &&
-                                  routeDragIdx?.idx === i;
-                                return (
-                                  <tr
-                                    key={i}
-                                    className={[
-                                      'hop-row',
-                                      isDragOver ? 'drag-over' : '',
-                                      isDragging ? 'dragging' : '',
-                                    ].filter(Boolean).join(' ')}
-                                    onDragOver={(e) => {
-                                      e.preventDefault();
-                                      setRouteOverIdx({
-                                        alias: route.alias,
-                                        idx: i,
-                                      });
-                                    }}
-                                    onDragLeave={() => setRouteOverIdx(null)}
-                                    onDrop={(e) => {
-                                      e.preventDefault();
-                                      handleHopDrop(route.alias, i);
-                                    }}
-                                  >
-                                    <td className="hop-idx">{i + 1}</td>
-                                    <td className="hop-drag-cell">
-                                      <span
-                                        className="hop-drag-handle"
-                                        draggable
-                                        role="button"
-                                        tabIndex={0}
-                                        aria-label={t('route.hopDragHint')}
-                                        title={t('route.hopDragHint')}
-                                        onDragStart={(e) => {
-                                          // dataTransfer required by Firefox
-                                          e.dataTransfer.effectAllowed = 'move';
-                                          e.dataTransfer.setData(
-                                            'text/plain',
-                                            String(i),
-                                          );
-                                          setRouteDragIdx({
-                                            alias: route.alias,
-                                            idx: i,
-                                          });
-                                        }}
-                                        onDragEnd={() => {
-                                          setRouteDragIdx(null);
-                                          setRouteOverIdx(null);
-                                        }}
-                                      >
-                                        ⋮⋮
-                                      </span>
-                                    </td>
-                                    <td className="hop-provider-cell">
-                                      <select
-                                        className="input"
-                                        value={hop.provider}
-                                        onChange={(e) =>
-                                          handleEditHop(
-                                            route.alias,
-                                            i,
-                                            'provider',
-                                            e.target.value,
-                                          )
-                                        }
-                                      >
-                                        <option value="">
-                                          {t('route.hopProvider')}
-                                        </option>
-                                        {proxyProviders.map((pp) => (
-                                          <option key={pp.id} value={pp.id}>
-                                            {pp.name || pp.id}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </td>
-                                    <td className="hop-model-cell">
-                                      <ModelSuggest
-                                        value={hop.model}
-                                        options={knownModels}
-                                        placeholder={t('route.hopModel')}
-                                        ariaLabel={t('route.hopModel')}
-                                        onChange={(v) =>
-                                          handleEditHop(route.alias, i, 'model', v)
-                                        }
-                                        onFetch={
-                                          hop.provider
-                                            ? () => handleFetchModels(hop.provider)
-                                            : undefined
-                                        }
-                                        fetching={fetchingId === hop.provider}
-                                      />
-                                    </td>
-                                    <td className="hop-remove-cell">
-                                      <button
-                                        className="btn small danger icon"
-                                        onClick={() =>
-                                          handleRemoveHop(route.alias, i)
-                                        }
-                                        title={t('common.delete')}
-                                        aria-label={t('common.delete')}
-                                      >
-                                        ×
-                                      </button>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        )}
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <p className="restart-hint">{t('route.restartHint')}</p>
-        </div>
-      )}
 
-      {/* Editable provider list — its own card, full page width. */}
+      {/* Editable provider list - its own card, full page width. Same
+       * ProxyPoolContext as the upstream pool above. */}
       {(appType === 'claude_code' || appType === 'codex') && (
-        <div className="card">
-          <div className="card-head">
-            <h3>{t('claude.upstream.listTitle')}</h3>
-            <div className="header-actions">
-              <button className="btn small" onClick={() => openProxyModal()}>
-                {t('claude.upstream.add')}
-              </button>
-            </div>
-          </div>
-          <ul className="provider-list">
-            {proxyProviders.map((pp) => {
-              const bs = breakerOf(pp.id);
-              const isPinned = pinnedId === pp.id;
-              return (
-                <li
-                  key={pp.id}
-                  className={isPinned ? 'provider-row pinned' : 'provider-row'}
-                >
-                  <div className="provider-info">
-                    <span className="provider-name">
-                      {isPinned && <span className="tag tag-pinned">{t('claude.upstream.pinnedTag')}</span>}
-                      {pp.name || pp.id}
-                      {bs && <span className={`breaker-dot ${breakerOfClass(bs)}`} title={bs} />}
-                    </span>
-                    <span className="provider-url">
-                      {pp.baseURL || '—'} · {pp.type}
-                    </span>
-                    {/* Show actual model mappings on the card */}
-                    {Object.entries(pp.modelMapping ?? {}).length > 0 && (
-                      <div className="provider-mappings">
-                        {Object.entries(pp.modelMapping ?? {}).map(([display, upstream]) => (
-                          <span key={display} className="mapping-tag">
-                            {display} → {upstream}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="provider-actions">
-                    <button className="btn small" onClick={() => openProxyModal(pp)}>
-                      {t('common.edit')}
-                    </button>
-                    <button className="btn small danger" onClick={() => handleDeleteProxy(pp.id)}>
-                      {t('common.delete')}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        <ProxyPoolProvider value={proxyPoolValue}>
+          <UpstreamList
+            onAdd={() => openProxyModal()}
+            onEdit={openProxyModal}
+            onDelete={handleDeleteProxy}
+          />
+        </ProxyPoolProvider>
       )}
 
       {/* Provider chain — hidden for Claude (upstream pool replaces it) */}
       {appType !== 'claude_code' && (
-      <div className="card chain-card">
-        <div className="card-head">
-          <h3>{t('chain.title')}</h3>
-          <button className="btn small" onClick={() => openModal()}>
-            {t('chain.add')}
-          </button>
-        </div>
-        <p className="muted small">{t('chain.desc')}</p>
-        {providers.length === 0 ? (
-          <p className="muted">{t('chain.empty')}</p>
-        ) : (
-          <ul className="provider-list">
-            {providers.map((p, i) => {
-              const pcfg = p.settingsConfig as Record<string, unknown>;
-              const isCurrent = p.id === current;
-              const url = cfg.cardUrl(pcfg);
-              return (
-                <li
-                  key={p.id}
-                  className={
-                    isCurrent
-                      ? 'provider-row current'
-                      : overIdx === i
-                        ? 'provider-row drag-over'
-                        : 'provider-row'
-                  }
-                  draggable
-                  onDragStart={() => setDragIdx(i)}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setOverIdx(i);
-                  }}
-                  onDragLeave={() => setOverIdx(null)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    void dropOn(i);
-                  }}
-                  onDragEnd={() => {
-                    setDragIdx(null);
-                    setOverIdx(null);
-                  }}
-                >
-                  <span className="drag-handle" title={t('chain.dragHint')}>⋮⋮</span>
-                  <div className="provider-info">
-                    <span className="provider-name">
-                      {p.name || p.id}
-                      {isCurrent && <span className="tag tag-current">{t('chain.current')}</span>}
-                      {!p.inFailoverQueue && (
-                        <span className="tag tag-paused">{t('chain.out')}</span>
-                      )}
-                    </span>
-                    <span className="provider-url">
-                      {url || '—'}
-                      {cfg.cardMeta(pcfg) ? ` · ${cfg.cardMeta(pcfg)}` : ''}
-                    </span>
-                  </div>
-                  <div className="provider-actions">
-                    <button
-                      className={p.inFailoverQueue ? 'btn small' : 'btn small primary'}
-                      title={t('chain.toggle.help')}
-                      onClick={() => handleToggleQueue(p)}
-                    >
-                      {p.inFailoverQueue ? t('chain.toggle.out') : t('chain.toggle.in')}
-                    </button>
-                    <button
-                      className="btn small primary"
-                      disabled={isCurrent || busy === `switch-${p.id}`}
-                      onClick={() => handleSwitch(p.id)}
-                    >
-                      {busy === `switch-${p.id}`
-                        ? '…'
-                        : isCurrent
-                          ? t('chain.inUse')
-                          : t('chain.enable')}
-                    </button>
-                    <button className="btn small" onClick={() => openModal(p)}>
-                      {t('common.edit')}
-                    </button>
-                    <button className="btn small danger" onClick={() => handleDelete(p.id)}>
-                      {t('common.delete')}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
+        <ProviderChain
+          cfg={cfg}
+          providers={providers}
+          current={current}
+          busy={busy}
+          onAdd={() => openModal()}
+          onEdit={openModal}
+          onDelete={handleDelete}
+          onSwitch={handleSwitch}
+          onToggleQueue={handleToggleQueue}
+          onReorder={async (fromIdx, toIdx) => {
+            if (fromIdx === toIdx) return;
+            const ids = providers.map((p) => p.id);
+            const [moved] = ids.splice(fromIdx, 1);
+            ids.splice(toIdx, 0, moved);
+            try {
+              await reorderProviders(appType, ids);
+              await refresh();
+            } catch (e) {
+              setError(String(e));
+            }
+          }}
+        />
       )}
 
-      {/* Launchers (Codex — Desktop + CLI only) */}
-      {cfg.launchers === 'codex' && (
-        <div className="card">
-          <div className="card-head">
-            <h3>{t('codex.open.title')}</h3>
-          </div>
-          <div className="launcher-grid">
-            <div className="launcher">
-              <div className="launcher-text">
-                <strong>{t('codex.open.desktop')}</strong>
-                <span className="muted small">{t('codex.open.desktop.help')}</span>
-              </div>
-              <button className="btn primary" onClick={handleOpenDesktop} disabled={busy === 'desktop'}>
-                {busy === 'desktop' ? '…' : t('codex.open.desktop')}
-              </button>
-            </div>
-            <div className="launcher">
-              <div className="launcher-text">
-                <strong>{t('codex.open.cli')}</strong>
-                <span className="muted small">{t('codex.open.cli.help')}</span>
-              </div>
-              <button className="btn" onClick={handleOpenCli} disabled={busy === 'cli'}>
-                {busy === 'cli' ? '…' : t('codex.open.cli')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Launchers (Copilot — CLI only) */}
-      {cfg.launchers === 'copilot' && (
-        <div className="card">
-          <div className="card-head">
-            <h3>{t('copilot.open.title')}</h3>
-          </div>
-          <div className="launcher-grid">
-            <div className="launcher">
-              <div className="launcher-text">
-                <strong>{t('copilot.open.cli')}</strong>
-                <span className="muted small">{t('copilot.open.cli.help')}</span>
-              </div>
-              <button className="btn primary" onClick={handleOpenCopilot} disabled={busy === 'copilot'}>
-                {busy === 'copilot' ? '…' : t('copilot.open.cli')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Launchers
+        cfg={cfg}
+        busy={busy}
+        onOpenDesktop={handleOpenDesktop}
+        onOpenCli={handleOpenCli}
+        onOpenCopilot={handleOpenCopilot}
+      />
 
       {/* Add/edit modal */}
       {showModal && (
@@ -1354,11 +1147,59 @@ export function AppPage({ appType }: { appType: AppType }) {
               <input className="input" type="password" value={proxyForm.apiKey}
                 onChange={(e) => setProxyForm({ ...proxyForm, apiKey: e.target.value })} />
             </label>
+            <label>
+              {t('claude.upstream.modal.models')}
+              <textarea
+                className="input"
+                rows={3}
+                placeholder="model-a, model-b&#10;model-c"
+                value={proxyForm.models}
+                onChange={(e) => setProxyForm({ ...proxyForm, models: e.target.value })}
+              />
+            </label>
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowProxyModal(false)}>
                 {t('common.cancel')}
               </button>
               <button className="btn primary" onClick={handleSaveProxy}>
+                {t('common.save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Gateway settings modal (port + auth token) */}
+      {showGatewayModal && (
+        <div className="modal-backdrop" onClick={() => setShowGatewayModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>{t('app.gateway.editSettings')}</h3>
+            <label>
+              {t('app.gateway.portLabel')}
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={65535}
+                value={gatewayForm.port}
+                onChange={(e) => setGatewayForm({ ...gatewayForm, port: e.target.value })}
+              />
+            </label>
+            <label>
+              {t('app.gateway.apiKey')}
+              <input
+                className="input"
+                type="text"
+                value={gatewayForm.authToken}
+                placeholder="(empty = accept any key)"
+                onChange={(e) => setGatewayForm({ ...gatewayForm, authToken: e.target.value })}
+              />
+            </label>
+            <p className="muted small">{t('app.gateway.savedRestartHint')}</p>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setShowGatewayModal(false)}>
+                {t('common.cancel')}
+              </button>
+              <button className="btn primary" onClick={handleSaveGateway}>
                 {t('common.save')}
               </button>
             </div>

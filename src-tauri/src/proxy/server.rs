@@ -35,6 +35,13 @@ pub struct ProxyAppState {
     pub router: Arc<Router>,
     pub auth_token: String,
     pub pinned_provider: Arc<std::sync::Mutex<Option<String>>>,
+    /// Used to record the failover winner (the provider that actually served
+    /// a request) as the new `is_current` provider for the app, mirroring
+    /// cc-switch's `hot_switch_provider` behaviour. `None` skips persistence
+    /// (e.g. unit-test path that builds a state directly).
+    /// Review fix: was `Option<Arc<Database>>` — redundant since `Database`
+    /// already derives `Clone` over an internal `Arc<Mutex<Connection>>`.
+    pub db: Option<crate::database::Database>,
 }
 
 /// What the proxy ended up listening on. `port` is the actually-bound port
@@ -95,6 +102,85 @@ fn build_router(state: ProxyAppState) -> AxumRouter {
         .with_state(state)
 }
 
+/// Persist the failover winner as the new current provider for an app.
+/// Mirrors cc-switch's `hot_switch_provider` behaviour: when a request
+/// succeeds on a non-pinned, non-mock provider, mark it as `is_current` in
+/// the `providers` table so the next `proxy_start` puts it at the head of
+/// the failover queue.
+///
+/// The router's `last_used` id is a proxy_provider id, not a providers.id:
+///   - `queue-XXX`   — auto-built queue proxy_provider wrapping providers.id=XXX.
+///                     Strip the prefix and use XXX directly.
+///   - `ccs-XXX`     — imported from cc-switch; the providers row was added
+///                     by the importer with id=XXX. Same strip-then-set.
+///   - `mock-*`      — synthetic, never persists (no providers row).
+///   - anything else — proxy_provider id doesn't map to a providers row;
+///                     log and skip.
+///
+/// Review fix: `pinned` is pre-computed by the caller (which already locks
+/// `pinned_provider` to decide between `*_with_provider` and the surface
+/// path), so this helper no longer re-locks the same Mutex. Saves a
+/// `pthread_mutex_lock` per request and removes a subtle ordering hazard
+/// (helper lock vs caller lock).
+fn persist_failover_winner(state: &ProxyAppState, app_type: &str, pinned: bool) {
+    if app_type == "antigravity" {
+        // detect-only — no on-disk provider rows for it.
+        return;
+    }
+    if pinned {
+        // Honour the user's deliberate pin: if a provider is pinned we don't
+        // auto-switch the underlying "current" marker — the pinned choice wins.
+        return;
+    }
+    let db = match state.db.as_ref() {
+        Some(db) => db,
+        None => return,
+    };
+    // Read the winner that last served `app_type`. The router tracks
+    // `last_used` keyed by app type, so a concurrent codex request can no
+    // longer overwrite a claude_code winner mid-flight (round-1 review fix).
+    let last_id = match state.router.last_used.lock() {
+        Ok(g) => match g.get(app_type).cloned() {
+            Some(id) => id,
+            None => return,
+        },
+        Err(_) => return,
+    };
+    // Strip the proxy_provider-id prefix to get the providers row id.
+    let stripped = if let Some(rest) = last_id.strip_prefix("queue-") {
+        rest.to_string()
+    } else if let Some(rest) = last_id.strip_prefix("ccs-") {
+        rest.to_string()
+    } else {
+        log::debug!(
+            "proxy: skip persist current={}: id \"{}\" is not a queue-*/ccs-* id",
+            app_type, last_id
+        );
+        return;
+    };
+    // Read current — if it's already this provider, skip the UPDATE to avoid
+    // pointless write contention.
+    let current = match db.get_current_provider(app_type) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("proxy: persist read current failed: {e}");
+            return;
+        }
+    };
+    if current.as_deref() == Some(stripped.as_str()) {
+        return;
+    }
+    if let Err(e) = db.set_current_provider(&stripped, app_type) {
+        // Provider may have been deleted out from under us; not fatal.
+        log::warn!("proxy: persist failover winner {} -> {} failed: {e}", app_type, stripped);
+        return;
+    }
+    log::info!(
+        "proxy: failover winner persisted: {app_type} current = {stripped} (was {})",
+        current.as_deref().unwrap_or("<none>")
+    );
+}
+
 /// Check Bearer / x-api-key auth. Returns Ok(()) if auth disabled or matches.
 fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
     if expected.is_empty() {
@@ -121,13 +207,23 @@ fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
 }
 
 async fn health(State(state): State<ProxyAppState>) -> impl IntoResponse {
-    let last_used = state.router.last_used.lock().ok().and_then(|g| g.clone());
+    // Per-app winner map. The UI (AppPage + header flow viz) reads each
+    // app's value independently. Returning the full map avoids the
+    // earlier `g.values().max().cloned()` hack that picked the
+    // lexicographically largest provider id across all apps.
+    let last_used = state
+        .router
+        .last_used
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default();
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     Json(json!({
         "status": "ok",
         "providers": state.router.health(),
         "models": state.router.list_models(),
-        "lastUsed": last_used,
+        "lastWinners": last_used,
         "pinnedProvider": pinned,
     }))
 }
@@ -182,15 +278,18 @@ async fn chat_completions(
     }
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     let result = if let Some(ref pid) = pinned {
-        state.router.complete_with_provider(pid, &req).await
+        state.router.complete_with_provider(crate::proxy::router::SURFACE_CHAT, "copilot", pid, &req).await
     } else {
-        state.router.complete_for(crate::proxy::router::SURFACE_CHAT, &req).await
+        state.router.complete_for(crate::proxy::router::SURFACE_CHAT, "copilot", &req).await
     };
     match result {
-        Ok(resp) => match serde_json::to_value(resp) {
-            Ok(v) => Json(v).into_response(),
-            Err(e) => err_response(500, format!("serialize error: {e}"), "internal_error"),
-        },
+        Ok(resp) => {
+            { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "copilot", pinned_active); }); }
+            match serde_json::to_value(resp) {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => err_response(500, format!("serialize error: {e}"), "internal_error"),
+            }
+        }
         Err(e) => {
             let status = e.status.unwrap_or(500);
             err_response(status, e.message, if status >= 500 { "proxy_error" } else { "invalid_request_error" })
@@ -201,9 +300,9 @@ async fn chat_completions(
 async fn stream_chat_completions(state: ProxyAppState, req: ChatCompletionRequest) -> Response {
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     let stream = if let Some(ref pid) = pinned {
-        state.router.stream_with_provider(pid, &req).await
+        state.router.stream_with_provider(crate::proxy::router::SURFACE_CHAT, "copilot", pid, &req).await
     } else {
-        state.router.stream_for(crate::proxy::router::SURFACE_CHAT, &req).await
+        state.router.stream_for(crate::proxy::router::SURFACE_CHAT, "copilot", &req).await
     };
     let stream = match stream {
         Ok(s) => s,
@@ -213,6 +312,11 @@ async fn stream_chat_completions(state: ProxyAppState, req: ChatCompletionReques
         }
     };
     use futures_util::stream::StreamExt;
+
+    // Successful failover: persist the winner as the new current provider
+    // for the app (cc-switch parity — the chain head on next start will be
+    // this provider). Pinned providers are skipped inside the helper.
+    { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "copilot", pinned_active); }); }
 
     // Map each upstream OAI chunk to an SSE `data: <json>\n\n` frame, then
     // append the OpenAI-spec `[DONE]` sentinel once the upstream stream
@@ -253,9 +357,9 @@ async fn messages(
     if ant_req.stream == Some(true) {
         let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
         let stream = if let Some(ref pid) = pinned {
-            state.router.stream_with_provider(pid, &oai_req).await
+            state.router.stream_with_provider(crate::proxy::router::SURFACE_CLAUDE, "claude_code", pid, &oai_req).await
         } else {
-            state.router.stream_for(crate::proxy::router::SURFACE_CLAUDE, &oai_req).await
+            state.router.stream_for(crate::proxy::router::SURFACE_CLAUDE, "claude_code", &oai_req).await
         };
         let stream = match stream {
             Ok(s) => s,
@@ -264,6 +368,10 @@ async fn messages(
                 return err_response(status, e.message, "api_error");
             }
         };
+        // Successful failover: persist the winner as the new current provider
+        // for the app (cc-switch parity). Pinned providers are skipped inside
+        // the helper.
+        { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "claude_code", pinned_active); }); }
         let model = requested_model.clone();
         let ant_stream = oai_chunks_to_anthropic_stream(stream, model);
         let body = axum::body::Body::from_stream(ant_stream.map(|sse| Result::<bytes::Bytes, std::io::Error>::Ok(sse.into_bytes().into())));
@@ -277,9 +385,9 @@ async fn messages(
     }
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     let oai_resp = if let Some(ref pid) = pinned {
-        state.router.complete_with_provider(pid, &oai_req).await
+        state.router.complete_with_provider(crate::proxy::router::SURFACE_CLAUDE, "claude_code", pid, &oai_req).await
     } else {
-        state.router.complete_for(crate::proxy::router::SURFACE_CLAUDE, &oai_req).await
+        state.router.complete_for(crate::proxy::router::SURFACE_CLAUDE, "claude_code", &oai_req).await
     };
     let oai_resp = match oai_resp {
         Ok(r) => r,
@@ -288,6 +396,7 @@ async fn messages(
             return err_response(status, e.message, "api_error");
         }
     };
+    { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "claude_code", pinned_active); }); }
     let ant_resp = oai_resp_to_anthropic_resp(&oai_resp, &requested_model);
     match serde_json::to_value(ant_resp) {
         Ok(v) => Json(v).into_response(),
@@ -331,12 +440,13 @@ async fn responses(
     }
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     let result = if let Some(ref pid) = pinned {
-        state.router.complete_with_provider(pid, &chat_req).await
+        state.router.complete_with_provider(crate::proxy::router::SURFACE_CODEX, "codex", pid, &chat_req).await
     } else {
-        state.router.complete_for(crate::proxy::router::SURFACE_CODEX, &chat_req).await
+        state.router.complete_for(crate::proxy::router::SURFACE_CODEX, "codex", &chat_req).await
     };
     match result {
         Ok(resp) => {
+            { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "codex", pinned_active); }); }
             let responses_resp = chat_to_responses(&resp, &requested_model);
             match serde_json::to_value(responses_resp) {
                 Ok(v) => Json(v).into_response(),
@@ -357,9 +467,9 @@ async fn stream_responses(
 ) -> Response {
     let pinned = state.pinned_provider.lock().ok().and_then(|g| g.clone());
     let stream = if let Some(ref pid) = pinned {
-        state.router.stream_with_provider(pid, &chat_req).await
+        state.router.stream_with_provider(crate::proxy::router::SURFACE_CODEX, "codex", pid, &chat_req).await
     } else {
-        state.router.stream_for(crate::proxy::router::SURFACE_CODEX, &chat_req).await
+        state.router.stream_for(crate::proxy::router::SURFACE_CODEX, "codex", &chat_req).await
     };
     let stream = match stream {
         Ok(s) => s,
@@ -368,6 +478,8 @@ async fn stream_responses(
             return err_response(status, e.message, if status >= 500 { "proxy_error" } else { "invalid_request_error" });
         }
     };
+    // Successful failover: persist the winner as the new current provider.
+    { let st = state.clone(); let pinned_active = pinned.is_some(); tokio::spawn(async move { persist_failover_winner(&st, "codex", pinned_active); }); }
     let mapped = chat_chunks_to_responses_stream(stream, &requested_model);
     let with_done = futures_util::stream::iter(
         std::iter::empty::<String>().chain(
@@ -425,6 +537,7 @@ mod tests {
             router,
             auth_token: String::new(),
             pinned_provider: Arc::new(std::sync::Mutex::new(None)),
+            db: None, // tests don't exercise failover-winner persistence
         }
     }
 

@@ -1,18 +1,17 @@
-import { memo } from 'react';
 import { useT } from '../../lib/ctx';
 import { TestIcon } from '../Icons';
-import { useProxyPoolActions, useProxyPoolData } from './proxy_pool_state.js';
+import { useProxyPool } from './state';
 
 interface UpstreamPoolProps {
   onRefresh: () => void;
   onAddProvider: () => void;
 }
 
-/** Upstream pool card with the failover-flow visualization. */
-export const UpstreamPool = memo(function UpstreamPool({
-  onRefresh,
-  onAddProvider,
-}: UpstreamPoolProps) {
+/** Upstream pool card with the failover-flow visualization. Consumes
+ * `useProxyPool()` for data + breaker helpers; receives only two callbacks
+ * (refresh + add) from AppPage. Test button + per-provider test results +
+ * active/pinned tags + breaker dots all read from the context. */
+export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
   const t = useT();
   const {
     providers,
@@ -22,8 +21,10 @@ export const UpstreamPool = memo(function UpstreamPool({
     testingId,
     breakerOf,
     breakerOfClass,
-  } = useProxyPoolData();
-  const { onTestProvider, onClearTestResult, onTogglePin } = useProxyPoolActions();
+    onTestProvider,
+    onClearTestResult,
+    onTogglePin,
+  } = useProxyPool();
 
   return (
     <div className="card">
@@ -43,11 +44,11 @@ export const UpstreamPool = memo(function UpstreamPool({
         <p className="muted">{t('claude.upstream.empty')}</p>
       ) : (
         <>
-          {/* Failover flow visualization. Disabled providers stay in the
-           * chain but render dimmed with a DISABLED tag — hiding them
-           * entirely made it look like they were deleted. */}
+          {/* Failover flow visualization */}
           <div className="failover-flow">
-            {providers.map((pp) => {
+            {providers
+              .filter((pp) => pp.enabled)
+              .map((pp, i, arr) => {
                 const bs = breakerOf(pp.id);
                 const isActive = health?.lastUsed === pp.id;
                 const isPinned = pinnedId === pp.id;
@@ -56,20 +57,14 @@ export const UpstreamPool = memo(function UpstreamPool({
                   'flow-node',
                   isPinned ? 'pinned' : isActive ? 'active' : '',
                   isBroken ? 'broken' : '',
-                  pp.enabled ? '' : 'disabled',
                 ]
                   .filter(Boolean)
                   .join(' ');
                 return (
                   <div key={pp.id}>
-                    <div className="flow-arrow">↓</div>
+                    {i > 0 && <div className="flow-arrow">↓</div>}
                     <div className={nodeClass}>
-                      <span className="flow-node-id">
-                        {pp.name || pp.id}
-                        {!pp.enabled && (
-                          <span className="tag tag-paused">{t('claude.upstream.disabledTag')}</span>
-                        )}
-                      </span>
+                      <span className="flow-node-id">{pp.name || pp.id}</span>
                       <span className="flow-node-url">{pp.baseURL || '—'}</span>
                       <div className="flow-node-status">
                         {bs && (
@@ -150,4 +145,4 @@ export const UpstreamPool = memo(function UpstreamPool({
       )}
     </div>
   );
-});
+}

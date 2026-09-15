@@ -122,13 +122,18 @@ export async function deleteRoute(alias: string): Promise<void> {
   await invoke('route_delete', { alias });
 }
 
-/// Reorder a route's hops (drag-and-drop in the failover chain editor).
-export async function reorderRouteHops(
-  alias: string,
-  orderedProviders: string[],
-): Promise<void> {
-  await invoke('route_reorder_hops', { alias, orderedProviders });
+/// Rename a route's alias in place (hops/description preserved).
+/// Rejects an empty target or a target that already exists.
+export async function renameRoute(from: string, to: string): Promise<void> {
+  await invoke('route_rename', { from, to });
 }
+
+/// Review fix: `reorderRouteHops` was the Phase 18 drag-and-drop backend
+/// round-trip. The current route editor uses pointer-based local
+/// reordering (see AppPage `applyHopMove`), so this export has no consumer
+/// in the UI. The underlying `route_reorder_hops` Tauri command is
+/// retained in lib.rs in case other code paths need it later — only the
+/// dead frontend wrapper is removed.
 
 /// Get the currently pinned proxy provider (force-pin mode). Returns null if none.
 export async function getPinnedProvider(): Promise<string | null> {
@@ -172,12 +177,14 @@ export async function fetchProxyHealth(
   return (await res.json()) as ProxyHealth;
 }
 
-export async function fetchProxyModels(config: ProxyConfig): Promise<string[]> {
-  const headers: Record<string, string> = {};
-  if (config.authToken) headers['authorization'] = `Bearer ${config.authToken}`;
-  const res = await fetch(`http://${config.host}:${config.port}/v1/models`, {
-    headers,
-  });
-  const body = (await res.json()) as { data: Array<{ id: string }> };
-  return body.data.map((m) => m.id);
+/// Round 1: convenience for the App-level status pill. Resolves the proxy
+/// config and calls `/health` in one go. Throws on any failure so the
+/// caller can default to a "stopped" pill state.
+export async function getGatewayHealth(): Promise<ProxyHealth> {
+  const cfg = await getProxyConfig();
+  return fetchProxyHealth(cfg);
 }
+
+// Refactor cleanup: `fetchProxyModels` (direct /v1/models HTTP fetch) was
+// exported but never called - the UI uses `fetchProviderModels` (the
+// `proxy_fetch_models` Tauri command) instead. Removed.

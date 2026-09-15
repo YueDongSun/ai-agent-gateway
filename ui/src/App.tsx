@@ -5,6 +5,8 @@ import { I18nCtx, useCtx } from './lib/ctx';
 import { useI18n } from './i18n/index';
 import { useTheme } from './lib/theme';
 import { APP_PAGE_ORDER, APP_PAGES } from './lib/appPages';
+import { getGatewayHealth } from './lib/api/proxy';
+import { BrandLogo, ClaudeIcon, CodexIcon, CopilotIcon, SunIcon, MoonIcon } from './components/Icons';
 import type { AppType } from './lib/api/types';
 
 interface AppInfo {
@@ -13,35 +15,21 @@ interface AppInfo {
   phase: string;
 }
 
+/** App-level icon picker for the AppSwitcher. Hidden apps (e.g. `pi`) get
+ * no icon — the AppSwitcher already filters them out via APP_PAGE_ORDER. */
+const APP_ICONS: Record<string, () => JSX.Element> = {
+  claude_code: ClaudeIcon,
+  codex: CodexIcon,
+  copilot: CopilotIcon,
+};
+
 const AppPage = lazy(() =>
   import('./components/app/AppPage').then((m) => ({ default: m.AppPage })),
 );
 
-/* ---- Sun/Moon icons (inline SVG - no asset dependency) ---- */
-
-function SunIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <circle cx="12" cy="12" r="5" />
-      <line x1="12" y1="1" x2="12" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="23" />
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-      <line x1="1" y1="12" x2="3" y2="12" />
-      <line x1="21" y1="12" x2="23" y2="12" />
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-    </svg>
-  );
-}
-
-function MoonIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-  );
-}
+/* Sun/Moon icons used to live here as inline SVG. Round 1 moved them to
+ * ./components/Icons.tsx alongside the new ClaudeIcon/CodexIcon/CopilotIcon
+ * so all UI icons share one home. */
 
 function AppInner() {
   const ctx = useCtx();
@@ -53,11 +41,35 @@ function AppInner() {
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateEndpoint, setUpdateEndpoint] = useState('');
+  /** Round 1: global proxy status pill. Independent of the current app
+   * tab — polled from the App shell so the pill stays mounted across tab
+   * switches. 5 s interval is cheap (single fetch + parse). */
+  const [gatewayStatus, setGatewayStatus] = useState<'stopped' | 'running' | 'degraded'>('stopped');
 
   useEffect(() => {
     invoke<AppInfo>('app_info')
       .then(setInfo)
       .catch((e) => setError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const health = await getGatewayHealth();
+        if (!alive) return;
+        const openCount = health.providers.filter((p) => p.breaker?.state === 'open').length;
+        setGatewayStatus(openCount > 0 ? 'degraded' : 'running');
+      } catch {
+        if (alive) setGatewayStatus('stopped');
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, []);
 
   const handleCheckUpdate = async () => {
@@ -90,16 +102,28 @@ function AppInner() {
 
   if (error) {
     return (
-      <div className="aag-root">
+      <div className="aag-root aag-error-wrap">
         <pre className="aag-error">{t('app.error', { message: error })}</pre>
       </div>
     );
   }
 
+  const gwLabel =
+    gatewayStatus === 'running'  ? 'GATEWAY RUNNING'  :
+    gatewayStatus === 'degraded' ? 'GATEWAY DEGRADED' :
+                                   'GATEWAY STOPPED';
+  const gwTitle =
+    gatewayStatus === 'running'  ? 'Gateway running' :
+    gatewayStatus === 'degraded' ? 'Gateway running, but at least one provider circuit is open' :
+                                   'Gateway stopped (start it on the page below)';
+
   return (
     <div className="aag-root">
       <header className="aag-header">
         <div className="aag-brand">
+          <span className="aag-logo" aria-hidden>
+            <BrandLogo />
+          </span>
           <h1>{info?.name ?? t('app.brand')}</h1>
           {info && (
             <span className="aag-sub">
@@ -108,17 +132,32 @@ function AppInner() {
           )}
         </div>
         <nav className="app-switcher" aria-label="App switcher">
-          {APP_PAGE_ORDER.map((at) => (
-            <button
-              key={at}
-              className={view === at ? 'active' : ''}
-              onClick={() => setView(at)}
-            >
-              {APP_PAGES[at].label}
-            </button>
-          ))}
+          {APP_PAGE_ORDER.map((at) => {
+            const Icon = APP_ICONS[at];
+            return (
+              <button
+                key={at}
+                className={view === at ? 'active' : ''}
+                onClick={() => setView(at)}
+              >
+                {Icon ? <Icon /> : null}
+                <span>{APP_PAGES[at].label}</span>
+              </button>
+            );
+          })}
         </nav>
         <div className="header-controls">
+          {/* Round 1: live proxy status pill — single source of truth for
+           * "is the gateway alive?". Polled every 5 s by the App shell. */}
+          <span
+            className={`gw-status ${gatewayStatus}`}
+            title={gwTitle}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="gw-status-dot" />
+            {gwLabel}
+          </span>
           <button
             className="theme-btn"
             onClick={toggleTheme}

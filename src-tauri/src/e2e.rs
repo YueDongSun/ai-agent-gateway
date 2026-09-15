@@ -152,6 +152,7 @@ mod tests {
                     router: Arc::clone(&router),
                     auth_token: String::new(),
                     pinned_provider: Arc::new(std::sync::Mutex::new(None)),
+                    db: None, // e2e doesn't exercise failover-winner persistence
                 };
                 let handle = tokio::spawn(async move {
                     if let Err(e) = serve(addr, state_for_try, rx).await {
@@ -353,6 +354,116 @@ mod tests {
             first_chunk["choices"][0]["delta"]["role"].as_str(),
             Some("assistant"),
             "first SSE chunk should set role=assistant, got: {first_chunk}"
+        );
+
+        // ── 4e. OpenAI Responses API (Codex surface): codex-5-6-sol route ──
+        // This is the Codex CLI/Desktop native protocol. The seeded
+        // codex-5-6-sol route (mock-primary -> mock-fallback) must serve it,
+        // and the response must echo the requested model back.
+        let resp_body = json!({
+            "model": "codex-5-6-sol",
+            "input": "hello from responses e2e",
+            "max_output_tokens": 256,
+            "stream": false
+        });
+        let resp_resp = client
+            .post(format!("{base}/v1/responses"))
+            .json(&resp_body)
+            .send()
+            .await
+            .expect("POST /v1/responses");
+        assert!(
+            resp_resp.status().is_success(),
+            "/v1/responses with codex-5-6-sol should 200, body: {:?}",
+            resp_resp.text().await
+        );
+        let resp_json: Value = resp_resp.json().await.expect("/v1/responses JSON");
+        assert_eq!(
+            resp_json["object"].as_str(),
+            Some("response"),
+            "Responses envelope object=response, got: {resp_json}"
+        );
+        assert_eq!(
+            resp_json["model"].as_str(),
+            Some("codex-5-6-sol"),
+            "response must echo requested codex-5-6-sol, got: {resp_json}"
+        );
+        let output_text = resp_json["output"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+            .and_then(|block| block.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(
+            !output_text.is_empty(),
+            "responses output_text should be non-empty, got: {resp_json}"
+        );
+        assert!(
+            output_text.contains("codex-5-6-sol"),
+            "mock reply should echo the upstream model name, got: {output_text}"
+        );
+
+        // ── 4e2. Responses streaming: named SSE events + [DONE] ──
+        let stream_resp_body = json!({
+            "model": "codex-5-6-luna",
+            "input": "stream responses",
+            "stream": true
+        });
+        let stream_resp_resp = client
+            .post(format!("{base}/v1/responses"))
+            .json(&stream_resp_body)
+            .send()
+            .await
+            .expect("POST /v1/responses stream");
+        assert!(stream_resp_resp.status().is_success(), "responses stream should 200");
+        let sse_text = stream_resp_resp.text().await.expect("responses sse body");
+        for expected_event in ["response.created", "response.output_item.added", "response.output_text.delta", "response.output_item.done", "response.completed"] {
+            assert!(
+                sse_text.contains(expected_event),
+                "responses stream should emit {expected_event}, got:\n{sse_text}"
+            );
+        }
+        assert!(
+            sse_text.contains("[DONE]"),
+            "responses stream must end with [DONE], got:\n{sse_text}"
+        );
+
+        // ── 4e3. Codex surface failover: mock-fail route via /v1/responses ──
+        // The mock-fail route forces the primary (mock-primary) to 503;
+        // failover should fall through to mock-fallback and still 200.
+        let fail_resp_body = json!({
+            "model": "mock-fail",
+            "input": "force codex failover",
+            "stream": false
+        });
+        let fail_resp_resp = client
+            .post(format!("{base}/v1/responses"))
+            .json(&fail_resp_body)
+            .send()
+            .await
+            .expect("POST /v1/responses mock-fail");
+        assert!(
+            fail_resp_resp.status().is_success(),
+            "codex failover should still 200 via mock-fallback, body: {:?}",
+            fail_resp_resp.text().await
+        );
+        let fail_json: Value = fail_resp_resp.json().await.expect("codex failover JSON");
+        assert_eq!(fail_json["object"].as_str(), Some("response"));
+        let fail_text = fail_json["output"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|i| i.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(
+            fail_text.contains("mock-fallback"),
+            "failover should land on mock-fallback, got: {fail_text}"
         );
 
         // ── 5. Graceful shutdown ──

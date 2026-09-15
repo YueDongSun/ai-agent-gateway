@@ -51,6 +51,13 @@
   --pill-off-bg: rgba(139, 147, 163, 0.12);
   --pill-off-fg: #8b93a3;
 
+  /* Round 1 additions: status pill + gateway panel + icon buttons */
+  --warn: #f59e0b;
+  --warn-bg: rgba(245, 158, 11, 0.12);
+  --warn-text: #fbbf24;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.35);
+
   color-scheme: dark;
 }
 
@@ -84,6 +91,13 @@
   --pill-on-fg: #059669;
   --pill-off-bg: rgba(107, 114, 128, 0.1);
   --pill-off-fg: #6b7280;
+
+  /* Round 1 additions: status pill + gateway panel + icon buttons */
+  --warn: #d97706;
+  --warn-bg: rgba(217, 119, 6, 0.08);
+  --warn-text: #b45309;
+  --shadow-card: 0 1px 2px rgba(15, 17, 21, 0.06);
+  --shadow-pop: 0 6px 24px rgba(15, 17, 21, 0.12);
 
   color-scheme: light;
 }
@@ -163,19 +177,31 @@ pre {
   font-size: 13px;
   font-weight: 550;
   font-family: inherit;
-  padding: 6px 18px;
+  padding: 6px 14px;
   border-radius: 7px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
 }
-
+.app-switcher button svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
 .app-switcher button:hover {
   color: var(--fg);
+  svg { opacity: 1; }
 }
 
 .app-switcher button.active {
   background: var(--accent);
   color: #fff;
+  svg { opacity: 1; }
 }
 
 .header-controls {
@@ -203,6 +229,81 @@ pre {
 .lang-btn:hover {
   color: var(--fg);
   border-color: var(--border-strong);
+}
+
+/* ----- Gateway status pill (header) -----
+ * Round 1: a single source of truth for "is the local proxy alive?". Three
+ * states — running (green), degraded (amber — at least one breaker open),
+ * stopped (gray). The dot is the only colored element; the label is muted
+ * by default and inherits the state colour. */
+.gw-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg-muted);
+  user-select: none;
+  white-space: nowrap;
+}
+.gw-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.gw-status.running {
+  color: var(--success-text);
+  border-color: var(--success);
+  background: var(--success-bg);
+}
+.gw-status.running .gw-status-dot {
+  box-shadow: 0 0 6px var(--success);
+}
+.gw-status.degraded {
+  color: var(--warn-text);
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+.gw-status.degraded .gw-status-dot {
+  box-shadow: 0 0 6px var(--warn);
+}
+.gw-status.stopped {
+  color: var(--fg-muted);
+}
+.gw-status.stopped .gw-status-dot {
+  opacity: 0.5;
+}
+
+/* Round 1: AAG logomark next to the brand text. Centered vertically with
+ * the title row. */
+.aag-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.aag-logo {
+  flex-shrink: 0;
+  color: var(--accent);
+  display: flex;
+  width: 22px;
+  height: 22px;
+}
+
+/* Round 1: error fallback wrapper — give the bare `.aag-error` some layout
+ * instead of leaving it as a default-block pre. */
+.aag-error-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
 }
 
 /* ----- Main / page scaffold ----- */
@@ -258,6 +359,25 @@ pre {
   border-radius: var(--radius);
   padding: 18px 20px;
   margin-bottom: 16px;
+  /* Round 1: subtle depth so cards separate from the page background. */
+  box-shadow: var(--shadow-card);
+}
+
+/* Round 1: gateway card wears a subtle accent gradient + accent border so it
+ * reads as the primary "control surface" vs the surrounding data cards.
+ * Doesn't change layout — just colors + a slightly tighter head. */
+.gateway-panel {
+  border-color: var(--accent);
+  background:
+    linear-gradient(135deg, var(--accent-bg) 0%, transparent 55%),
+    var(--bg-elevated);
+  position: relative;
+  overflow: hidden;
+}
+.gateway-panel .card-head {
+  margin-bottom: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
 
 .card-head {
@@ -317,6 +437,52 @@ pre {
 .btn.small {
   padding: 4px 10px;
   font-size: 12px;
+}
+
+/* Round 1: icon-only button — used for copy, test, and other compact
+ * actions where a label eats too much visual weight. Sized so the icon
+ * reads ~14px. Optionally carries a `data-tooltip` for the CSS-only hover
+ * label (the native `title` attr is also kept as a fallback for
+ * keyboard / screen-reader users). */
+.btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 7px;
+  min-width: 26px;
+  position: relative;
+  font-size: 14px;
+}
+.btn.icon-btn svg { display: block; }
+.btn.icon-btn[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  box-shadow: var(--shadow-pop);
+  z-index: 20;
+  pointer-events: none;
+}
+.btn.icon-btn[data-tooltip]:hover::before {
+  /* tiny arrow under the tooltip */
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: var(--border-strong);
+  pointer-events: none;
+  z-index: 20;
 }
 
 .btn:disabled {
@@ -393,41 +559,10 @@ pre {
   white-space: nowrap;
 }
 
-/* ----- Failover chain editor (Claude page) ----- */
-
-.chain-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-top: 12px;
-}
-
-@media (max-width: 860px) {
-  .chain-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.chain-pane {
-  min-width: 0;
-}
-
-.pane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.pane-head h4 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 620;
-  color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
+/* ----- Failover chain editor (Claude page) -----
+ * Round 1 cleanup: `.chain-grid` / `.chain-pane` / `.pane-head` were the
+ * two-pane "Providers | Routes" layout that was replaced by the unified
+ * route editor in Phase 18. No JSX sets these classes anymore. */
 
 .pool-list,
 .route-list,
@@ -466,6 +601,16 @@ pre {
 .provider-row.drag-over {
   border-color: var(--accent);
   outline: 2px solid var(--accent-bg);
+}
+
+/* Disabled upstream: dimmed but still interactive (toggle re-enables). */
+.provider-row.disabled {
+  opacity: 0.55;
+}
+.provider-row.disabled .provider-name,
+.provider-row.disabled .provider-url {
+  text-decoration: line-through;
+  text-decoration-color: var(--fg-muted);
 }
 
 .drag-handle {
@@ -928,48 +1073,14 @@ pre {
   align-items: center;
 }
 
-/* Model Catalog editor (Codex provider edit modal) */
-.model-catalog-section {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
+/* Round 1 cleanup: `.model-catalog-section/header/row` were the Codex
+ * model-catalog editor in the proxy-provider edit modal. Phase 18 moved
+ * model mapping into the route editor, so the catalog UI was retired.
+ * No JSX consumer — safe to delete. */
 
-.model-catalog-header {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr 32px;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 6px;
-  padding: 0 2px;
-}
-
-.model-catalog-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr 32px;
-  gap: 8px;
-  margin-bottom: 8px;
-  align-items: center;
-}
-
-.model-catalog-row .input {
-  font-size: 12px;
-  padding: 6px 8px;
-}
-
-/* The hop row uses class `model-catalog-row` in JSX but its drag-over
- * hover state was previously keyed on `.hop-row.drag-over` (a class
- * that nothing ever sets). Mirror the rule so the highlight actually
- * fires when the user drags a hop over its neighbours. */
-.model-catalog-row.drag-over {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-  outline: 2px solid var(--accent-bg);
-}
-
+/* Round 1: data-tooltip is now used by `.btn.icon-btn[data-tooltip]`
+ * (see the Buttons section). The only `data-tooltip` rule left in the
+ * stylesheet is the hover label there. */
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -1012,20 +1123,24 @@ pre {
   justify-content: center;
   gap: 8px;
   text-align: center;
-  background: var(--accent-bg);
-  color: var(--accent-text);
-  border: 1px solid var(--accent);
+  /* Round 1: soften. Was accent-bg / accent-text / accent border — felt
+   * like a primary CTA at the bottom of the page. Make it a subtle muted
+   * hint instead: dashed muted border, transparent fill, fg-muted text. */
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 10px 16px;
+  padding: 8px 16px;
   margin: 14px auto 6px;
   max-width: 720px;
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
 }
 .restart-hint::before {
   content: '↻';
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-muted);
 }
 
 /* ----- Route editor (Failover Routes card) -----

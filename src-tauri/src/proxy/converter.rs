@@ -311,7 +311,7 @@ pub fn oai_req_to_anthropic_req(req: &ChatCompletionRequest) -> AnthropicRequest
 
     let max_tokens = req.max_tokens.unwrap_or(4096);
     let mut out = AnthropicRequest {
-        model: req.model.clone(),
+        model: crate::proxy::strip_one_m_suffix(&req.model),
         max_tokens,
         system: None,
         messages: msgs,
@@ -623,7 +623,7 @@ pub fn anthropic_req_to_oai_req(body: &AnthropicRequest) -> ChatCompletionReques
     let tool_choice = extra.remove("tool_choice").map(|tc| tool_choice_anthropic_to_oai(&tc));
 
     ChatCompletionRequest {
-        model: body.model.clone(),
+        model: crate::proxy::strip_one_m_suffix(&body.model),
         messages,
         stream: body.stream.unwrap_or(false),
         temperature: body.temperature,

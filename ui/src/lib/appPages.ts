@@ -38,6 +38,8 @@ export interface AppPageConfig {
   launchers: 'codex' | 'copilot' | 'none';
   /** Model options for the model select. */
   models?: string[];
+  /** Hidden from the AppSwitcher (code kept, tab disabled). */
+  enabled?: boolean;
 }
 
 const CODEX_MODELS = ['codex-5-6-sol', 'codex-5-6-luna', 'codex-5-6-terra', 'codex-5-5'];
@@ -220,6 +222,8 @@ const piCfg: AppPageConfig = {
   ccSwitchUpstream: false,
   showGatewayCard: true,
   launchers: 'none',
+  // Disabled: cc-switch now supports pi, so this page is hidden but kept.
+  enabled: false,
 };
 
 export const APP_PAGES: Record<string, AppPageConfig> = {
@@ -229,6 +233,8 @@ export const APP_PAGES: Record<string, AppPageConfig> = {
   pi: piCfg,
 };
 
-export const APP_PAGE_ORDER: AppType[] = ['claude_code', 'codex', 'copilot', 'pi'];
+export const APP_PAGE_ORDER: AppType[] = (['claude_code', 'codex', 'copilot', 'pi'] as AppType[]).filter(
+  (at) => APP_PAGES[at].enabled !== false,
+);
 
 export { CODEX_MODELS, CLAUDE_MODELS, CODEX_DISPLAY };

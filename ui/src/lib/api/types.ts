@@ -47,6 +47,9 @@ export interface ImportReport {
   sourceDb: string;
   imported: ImportedProvider[];
   skippedExisting: ImportedProvider[];
+  /** Providers filtered out because they carry no API key (e.g. Codex
+   *  ChatGPT-login / `default`). */
+  skippedNoKey: ImportedProvider[];
   totalInSource: number;
   /** Routes auto-built from imported Claude providers' tier mappings. */
   importedRoutes: ImportedRoute[];

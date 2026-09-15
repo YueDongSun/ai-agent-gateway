@@ -76,7 +76,9 @@ AAG manages per-agent config to point each CLI at a provider or the local proxy:
   custom providers are injected at launch via `copilot_open_cli_terminal`
   (`COPILOT_PROVIDER_BASE_URL`/`API_KEY`/`TYPE` + `COPILOT_MODEL`).
 - **pi (MS coding agent)** — writes `~/.pi/agent/models.json` (`providers` map) +
-  `~/.pi/agent/settings.json` (default model).
+  `~/.pi/agent/settings.json` (default model). **Disabled in the UI** (page
+  hidden from the AppSwitcher via `enabled:false` in `appPages.ts`) — cc-switch
+  now supports pi; the adapter code is retained for when it's re-enabled.
 - **Antigravity (desktop)** — detect-only this version; switching disabled (no public
   on-disk config schema). See `services/provider/antigravity.rs`.
 
@@ -150,14 +152,30 @@ single Settings toggle, "Overwrite cc-switch config on conflict"
 (`DEFAULT_PROXY_PORT`; schema v13 sweeps the legacy 8787–8792 range),
 and `proxy_start`'s bind-ready timeout is 2s.
 
-**cc-switch provider import** (Phase 15.6): `import_cc_switch_providers`
+**cc-switch provider import** (Phase 15.6 + Phase 22): `import_cc_switch_providers`
 (`services/import_cc_switch/`) reads `~/.cc-switch/cc-switch.db`
 read-only, maps cc-switch's hyphenated app_type ids onto AAG's
 snake_case (`claude`→`claude_code`, `claude-desktop`→`claude_desktop`,
 `grokbuild`→`grok_build`), skips already-present `(id, app_type)` pairs
-(idempotent), and drops cc-switch's `is_current` bit. Claude page has
+(idempotent). Since Phase 22 the importer also: fills every provider
+field (category/sort_index/notes/icon/icon_color/website_url), keeps
+cc-switch's `is_current` bit as AAG's CURRENT marker and its
+`in_failover_queue` flag, and auto-builds failover routes for every
+official Claude model from each imported provider's
+`ANTHROPIC_DEFAULT_*_MODEL` env keys. Tier fallback: a missing tier's
+mapping falls back to ANY other tier's model (fable→opus→sonnet→haiku→
+default), so every official model gets a hop even for partial mappings.
+The `[1M]` context suffix is preserved verbatim (it is part of the
+upstream model id). Only queue members (`in_failover_queue=1`)
+contribute hops; route hop order follows cc-switch's queue (current
+first, then sort_index). Codex providers without an API key
+(ChatGPT-login `codex-official` / `default`) are skipped
+(`ImportReport.skippedNoKey`); each imported codex provider's
+`modelCatalog.models[].model` list is evenly distributed across the 4
+default codex client models (`client[i] → upstream[i*N/4]`: 1 model →
+all four use it, 2 models → two-per-group, N≥3 spread wide). Claude page has
 an "Import from cc-switch" button; the report toast shows
-imported/skipped/total.
+imported/skipped/total + auto-seeded route count + skipped no-key count.
 
 ## Conventions
 

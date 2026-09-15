@@ -17,6 +17,7 @@
     "ui:dev": "npm run dev --prefix ui",
     "ui:build": "npm run build --prefix ui",
     "ui:install": "npm install --prefix ui",
+    "ui:smoke": "node scripts/smoke-demo.mjs",
     "tauri:dev": "npm run ui:install && node scripts/tauri-dev.mjs",
     "tauri:build": "npm run ui:build && npx tauri build --config src-tauri/tauri.conf.json"
   },

@@ -22,7 +22,7 @@ use crate::config::get_db_path;
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Current schema version. Increment on every schema change and add a migration
 /// branch in `schema.rs::apply_schema_migrations`.
@@ -44,8 +44,11 @@ macro_rules! lock_conn {
 pub(crate) use lock_conn;
 
 /// Database connection wrapper. Share via `tauri::State<'_, Database>`.
+/// Cheaply cloneable (the underlying `Mutex<Connection>` is wrapped in
+/// `Arc` so every clone shares the same connection).
+#[derive(Clone)]
 pub struct Database {
-    pub(crate) conn: Mutex<Connection>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -68,7 +71,7 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.create_tables()?;
         db.apply_schema_migrations()?;
@@ -82,7 +85,7 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.create_tables()?;
         db.apply_schema_migrations()?;

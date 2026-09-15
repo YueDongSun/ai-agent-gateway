@@ -90,4 +90,24 @@ impl Database {
         conn.execute("DELETE FROM routes WHERE alias = ?1", params![alias])?;
         Ok(())
     }
+
+    /// Rename a route's alias in place (hops + description ride along —
+    /// they live on the same row). Fails if the target alias already
+    /// exists or the source is missing.
+    #[allow(dead_code)]
+    pub fn rename_route(&self, from: &str, to: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let tx = conn.unchecked_transaction()?;
+        let updated = tx.execute(
+            "UPDATE routes SET alias = ?1 WHERE alias = ?2",
+            params![to, from],
+        )?;
+        if updated == 0 {
+            return Err(AppError::InvalidInput(format!(
+                "route \"{from}\" does not exist"
+            )));
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

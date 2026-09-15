@@ -138,6 +138,8 @@ const proxyConfig = {
   enabled: true,
 };
 
+let pinnedProvider: string | null = null;
+
 const proxyProviders: ProxyProvider[] = [
   {
     id: 'anthropic-primary',
@@ -285,6 +287,7 @@ export function installMockBackend() {
           sourceDb: '(demo: no real filesystem access)',
           imported: [],
           skippedExisting: [],
+          skippedNoKey: [],
           totalInSource: 0,
           importedRoutes: [],
         };
@@ -321,6 +324,12 @@ export function installMockBackend() {
         proxyProviders.splice(idx, 1);
         return null;
       }
+      case 'proxy_get_pinned_provider':
+        return pinnedProvider;
+      case 'proxy_set_pinned_provider': {
+        pinnedProvider = p.providerId ? String(p.providerId) : null;
+        return null;
+      }
       // Demo mock: simulate fetching upstream models from a provider.
       // Returns a few realistic model ids so the ⤓ button is exercisable.
       case 'proxy_fetch_models':
@@ -352,17 +361,17 @@ export function installMockBackend() {
         routes.splice(idx, 1);
         return null;
       }
-      case 'route_reorder_hops': {
-        const alias = String(p.alias);
-        const ordered = p.orderedProviders as string[];
-        const route = routes.find((x) => x.alias === alias);
-        if (!route) throw new Error(`route "${alias}" not found`);
-        const next = [];
-        for (const pid of ordered) {
-          const hop = route.hops.find((h) => h.provider === pid);
-          if (hop) next.push(hop);
+      case 'route_rename': {
+        const from = String(p.from);
+        const to = String(p.to).trim();
+        if (!to) throw new Error('new alias must not be empty');
+        if (to === from) return null;
+        if (routes.some((x) => x.alias === to)) {
+          throw new Error(`UNIQUE constraint failed: routes.alias (${to})`);
         }
-        route.hops = next;
+        const r = routes.find((x) => x.alias === from);
+        if (!r) throw new Error(`route "${from}" not found`);
+        r.alias = to;
         return null;
       }
 
