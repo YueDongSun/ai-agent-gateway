@@ -16,6 +16,7 @@ import {
   listProxyProviders,
   saveProxyProvider,
   deleteProxyProvider,
+  getGatewayHealth,
   fetchProxyHealth,
   getPinnedProvider,
   setPinnedProvider,
@@ -50,7 +51,16 @@ import { GatewayPanel } from './GatewayPanel';
 import { ProviderChain } from './ProviderChain';
 import { UpstreamList } from './UpstreamList';
 import { UpstreamPool } from './UpstreamPool';
-import { ProxyPoolProvider, RoutesProvider, type ProxyPoolState, type RoutesState } from './state';
+import {
+  ProxyPoolActionsProvider,
+  ProxyPoolDataProvider,
+  RoutesActionsProvider,
+  RoutesDataProvider,
+  type ProxyPoolActionsState,
+  type ProxyPoolDataState,
+  type RoutesActionsState,
+  type RoutesDataState,
+} from './state';
 import { RouteEditor } from './RouteEditor';
 
 interface FormState {
@@ -85,6 +95,9 @@ export function AppPage({ appType }: { appType: AppType }) {
   const [gatewayUrl, setGatewayUrl] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [cliStatus, setCliStatus] = useState<CodexCliStatus | null>(null);
+  /** Last error from `codexCliStatus` (null = never failed or
+   *  recovered). The mirror row renders a warning chip when set. */
+  const [cliStatusError, setCliStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -117,11 +130,9 @@ export function AppPage({ appType }: { appType: AppType }) {
   /** Proxy provider edit modal (Claude upstream pool). `models` is the raw
    *  textarea text (one id per line / comma separated) — parsed on save. */
   const [showProxyModal, setShowProxyModal] = useState(false);
-  /** Gateway settings modal (port + auth token). */
+  /** Gateway settings modal (bind host + port + auth token). */
   const [showGatewayModal, setShowGatewayModal] = useState(false);
-  const [gatewayForm, setGatewayForm] = useState({ port: '', authToken: '' });
-  /** Config snapshot for the gateway modal (enabled bit rides along). */
-  const gatewayCfgRef = useRef<ProxyConfig | null>(null);
+  const [gatewayForm, setGatewayForm] = useState({ host: '', port: '', authToken: '' });
   const [editingProxy, setEditingProxy] = useState<ProxyProvider | null>(null);
   const [proxyForm, setProxyForm] = useState({
     id: '',
@@ -140,9 +151,15 @@ export function AppPage({ appType }: { appType: AppType }) {
   /** Which provider is currently being fetched. */
   const [fetchingId, setFetchingId] = useState<string | null>(null);
 
+  /** Ref the timer so back-to-back flashes cancel the previous toast. */
+  const flashTimerRef = useRef<number | null>(null);
   const flash = (msg: string) => {
     setNotice(msg);
-    setTimeout(() => setNotice(null), 4000);
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => {
+      setNotice(null);
+      flashTimerRef.current = null;
+    }, 4000);
   };
 
   const refresh = async () => {
@@ -203,33 +220,91 @@ export function AppPage({ appType }: { appType: AppType }) {
     }
     void refresh();
     if (cfg.launchers === 'codex') {
-      codexCliStatus().then(setCliStatus).catch(() => setCliStatus(null));
+      codexCliStatus()
+        .then((s) => {
+          setCliStatus(s);
+          setCliStatusError(null);
+        })
+        .catch((e) => {
+          setCliStatus(null);
+          setCliStatusError(String(e));
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appType]);
 
   /** Poll proxy /health while the gateway runs so breaker states in the
-   *  upstream pool stay live (they'd otherwise freeze at mount-time data).
-   *  Only for pages that show the pool (Claude + Codex). */
+   *  upstream pool stay live. Only for pages that show the pool
+   *  (Claude + Codex), and paused when the tab is hidden. */
   useEffect(() => {
     const pollsHealth =
       (appType === 'claude_code' || appType === 'codex') && running;
     if (!pollsHealth) return;
     let alive = true;
-    const id = window.setInterval(async () => {
+    const tick = async () => {
       try {
-        const pc = await getProxyConfig();
-        const h = await fetchProxyHealth(pc);
+        const h = await getGatewayHealth();
         if (alive) setHealth(h);
       } catch {
         if (alive) setHealth(null);
       }
-    }, 10_000);
+    };
+    let intervalId: number | null = null;
+    const start = () => {
+      if (intervalId !== null) return;
+      intervalId = window.setInterval(tick, 10_000);
+    };
+    const stop = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+    if (document.visibilityState !== 'hidden') start();
+    const onVis = () => (document.visibilityState === 'hidden' ? stop() : start());
+    document.addEventListener('visibilitychange', onVis);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      stop();
+      document.removeEventListener('visibilitychange', onVis);
     };
   }, [appType, running]);
+
+  /** Mirror CODEX_HOME row staleness fix (Phase 22u): refresh the
+   *  Codex CLI status every 10 s on the Codex page so the row tracks
+   *  settings changes without a tab switch. Paused when hidden. */
+  useEffect(() => {
+    if (cfg.launchers !== 'codex') return;
+    const tick = () => {
+      codexCliStatus()
+        .then((s) => {
+          setCliStatus(s);
+          setCliStatusError(null);
+        })
+        .catch((e) => {
+          setCliStatus(null);
+          setCliStatusError(String(e));
+        });
+    };
+    let intervalId: number | null = null;
+    const start = () => {
+      if (intervalId !== null) return;
+      intervalId = window.setInterval(tick, 10_000);
+    };
+    const stop = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+    if (document.visibilityState !== 'hidden') start();
+    const onVis = () => (document.visibilityState === 'hidden' ? stop() : start());
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [cfg.launchers]);
 
   /** Memoized pool value is defined further down, after its handler
    *  dependencies (breakerOf / breakerOfClass / handleTestProvider /
@@ -297,29 +372,50 @@ export function AppPage({ appType }: { appType: AppType }) {
     }
   };
 
-  // ---- Gateway settings (port + auth token) ----
+  // ---- Gateway settings (bind host + port + auth token) ----
 
   const openGatewayModal = async () => {
+    // The save handler re-reads via getProxyConfig() instead of threading
+    // the snapshot through a ref — StrictMode / remount can't invalidate
+    // a single await chain.
+    setShowGatewayModal(true);
     try {
       const cfg = await getProxyConfig();
-      gatewayCfgRef.current = cfg;
-      setGatewayForm({ port: String(cfg.port), authToken: cfg.authToken });
-      setShowGatewayModal(true);
+      setGatewayForm({ host: cfg.host, port: String(cfg.port), authToken: cfg.authToken });
     } catch (e) {
       setError(String(e));
     }
   };
 
   const handleSaveGateway = async () => {
-    const base = gatewayCfgRef.current;
-    if (!base) return;
+    // Re-fetch the baseline — any concurrent edit (auto-start, settings)
+    // would otherwise be silently overwritten.
+    let base: ProxyConfig;
+    try {
+      base = await getProxyConfig();
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
     const port = Number(gatewayForm.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       setError(t('app.gateway.invalidPort'));
       return;
     }
+    // Backend parses host:port with .expect() — a bad host would panic
+    // proxy start, so validate here. `new URL` round-trips through WHATWG
+    // parsing which accepts localhost, IPv4 dotted-quads, and IPv6
+    // literals (with or without brackets); rejecting anything else.
+    const h = gatewayForm.host.trim();
     try {
-      await saveProxyConfig({ ...base, port, authToken: gatewayForm.authToken.trim() });
+      // eslint-disable-next-line no-new
+      new URL(`http://${h}:${port}`);
+    } catch {
+      setError(t('app.gateway.invalidHost'));
+      return;
+    }
+    try {
+      await saveProxyConfig({ ...base, host: h, port, authToken: gatewayForm.authToken.trim() });
       setShowGatewayModal(false);
       flash(t('app.gateway.savedRestartHint'));
       await refresh();
@@ -541,15 +637,24 @@ export function AppPage({ appType }: { appType: AppType }) {
     } catch (e) { setError(String(e)); }
   };
 
-  /** Enable/disable an upstream provider (persisted immediately; the
-   *  proxy router skips disabled providers on its next rebuild). */
+  /** Enable/disable an upstream provider. Optimistic: flip local state
+   *  first, then persist. The router skips disabled providers on its
+   *  next rebuild — no full refresh needed for a single-bit flip. */
   const handleToggleEnabled = async (id: string, enabled: boolean) => {
     const target = proxyProviders.find((pp) => pp.id === id);
-    if (!target) return;
+    if (!target || target.enabled === enabled) return;
+    setProxyProviders((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, enabled } : p)),
+    );
     try {
       await saveProxyProvider({ ...target, enabled });
-      await refresh();
-    } catch (e) { setError(String(e)); }
+    } catch (e) {
+      // Roll back on failure.
+      setProxyProviders((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, enabled: target.enabled } : p)),
+      );
+      setError(String(e));
+    }
   };
 
   /** Get breaker state for a proxy provider from the health data. */
@@ -622,10 +727,10 @@ export function AppPage({ appType }: { appType: AppType }) {
     try {
       await renameRoute(alias, next);
       // Patch local state + baseline so the dirty flag stays truthful.
-      const patch = (rs: Route[]) =>
+      const remap = (rs: Route[]) =>
         rs.map((r) => (r.alias === alias ? { ...r, alias: next } : r));
-      setRoutes(patch);
-      baselineRef.current = patch(baselineRef.current);
+      setRoutes(remap);
+      baselineRef.current = remap(baselineRef.current);
       delete routeCacheRef.current[alias];
       flash(t('route.renamed', { from: alias, to: next }));
     } catch (e) { setError(String(e)); }
@@ -748,13 +853,13 @@ export function AppPage({ appType }: { appType: AppType }) {
         return !base || JSON.stringify(base) !== JSON.stringify(r);
       });
       const toDelete = baselineRef.current.filter((r) => !currentAliases.has(r.alias));
-      for (const r of toSave) {
-        await saveRoute(r);
-      }
-      for (const r of toDelete) {
-        await deleteRoute(r.alias);
-      }
-      // Update baseline and clear cache — edits are now persisted.
+      // Independent IPC calls — fan out in parallel. Each route's write is
+      // its own unit of work; tokio serializes SQLite but Tauri can issue
+      // them concurrently.
+      await Promise.all([
+        ...toSave.map((r) => saveRoute(r)),
+        ...toDelete.map((r) => deleteRoute(r.alias)),
+      ]);
       baselineRef.current = routes;
       delete routeCacheRef.current[appType];
       flash(t('route.saved'));
@@ -841,10 +946,11 @@ export function AppPage({ appType }: { appType: AppType }) {
     return Array.from(set);
   }, [proxyProviders, fetchedModels]);
 
-  /** Memoized routes slice for the RouteEditor context. Only changes when
-   * one of its fields actually changes; the many handlers are stable
-   * closures over the state setters so they don't churn the memo. */
-  const routesValue = useMemo<RoutesState>(
+  /** Routes data slice — re-rendered only when the underlying data
+   *  changes (drag ticks, dirty markers, route edits). Memoizing
+   *  separately from the actions slice means consumer components
+   *  that only read actions don't churn on every keystroke. */
+  const routesDataValue = useMemo<RoutesDataState>(
     () => ({
       routes,
       isRouteDirty,
@@ -854,7 +960,34 @@ export function AppPage({ appType }: { appType: AppType }) {
       knownModels,
       fetchedModels,
       fetchingId,
+      routeOverIdx,
+      pointerDrag,
       proxyProviders: proxyProviders.map((pp) => ({ id: pp.id, name: pp.name })),
+      routeCacheRef,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      routes,
+      isRouteDirty,
+      filteredRoutes,
+      selectedAliases,
+      collapsedRoutes,
+      knownModels,
+      fetchedModels,
+      fetchingId,
+      routeOverIdx,
+      pointerDrag,
+      proxyProviders,
+    ],
+  );
+
+  /** Routes actions + meta slice. Handler identities are stable across
+   *  most renders (closure-captured state setters don't churn), so the
+   *  memo only invalidates when the gateway status changes (the restart
+   *  button visibility / busy state) or when one of the few
+   *  action deps re-binds. */
+  const routesActionsValue = useMemo<RoutesActionsState>(
+    () => ({
       toggleRouteSelection,
       toggleRouteCollapse,
       handleDeleteSelectedRoutes,
@@ -872,29 +1005,12 @@ export function AppPage({ appType }: { appType: AppType }) {
       handlePointerMove,
       handlePointerUp,
       handleHopKeyDown,
-      routeOverIdx,
-      pointerDrag,
+      onRestartProxy: handleRestartProxy,
       proxyRunning: running,
       restartBusy: busy === 'restart',
-      onRestartProxy: handleRestartProxy,
-      routeCacheRef,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      routes,
-      isRouteDirty,
-      filteredRoutes,
-      selectedAliases,
-      collapsedRoutes,
-      knownModels,
-      fetchedModels,
-      fetchingId,
-      proxyProviders,
-      routeOverIdx,
-      pointerDrag,
-      running,
-      busy,
-    ],
+    [running, busy],
   );
 
   /** Test a proxy provider's connectivity. */
@@ -922,11 +1038,8 @@ export function AppPage({ appType }: { appType: AppType }) {
     });
   };
 
-  /** Memoized pool value - only changes when one of the 6 slice fields
-   * actually changes, so consumers don't re-render on unrelated AppPage
-   * state churn (busy, error, notice, ...). Must stay AFTER the handler
-   * declarations above — see the TDZ note near the top of the file. */
-  const proxyPoolValue = useMemo<ProxyPoolState>(
+  /** Pool data slice — providers / pins / health / test results. */
+  const proxyPoolDataValue = useMemo<ProxyPoolDataState>(
     () => ({
       providers: proxyProviders,
       pinnedId,
@@ -935,13 +1048,23 @@ export function AppPage({ appType }: { appType: AppType }) {
       testingId,
       breakerOf,
       breakerOfClass,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [proxyProviders, pinnedId, health, testResults, testingId],
+  );
+
+  /** Pool actions slice — handler identities are stable across most
+   *  renders (closure-captured setters don't churn), so this memo
+   *  barely ever invalidates. */
+  const proxyPoolActionsValue = useMemo<ProxyPoolActionsState>(
+    () => ({
       onTestProvider: handleTestProvider,
       onClearTestResult: clearTestResult,
       onTogglePin: handleTogglePin,
       onToggleEnabled: handleToggleEnabled,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [proxyProviders, pinnedId, health, testResults, testingId],
+    [],
   );
 
   return (
@@ -973,6 +1096,7 @@ export function AppPage({ appType }: { appType: AppType }) {
         gatewayUrl={gatewayUrl}
         authToken={authToken}
         cliStatus={cliStatus}
+        cliStatusError={cliStatusError}
         copied={copied}
         busy={busy}
         onCopy={copy}
@@ -985,34 +1109,40 @@ export function AppPage({ appType }: { appType: AppType }) {
        * (providers, pin, breaker, test results) so both cards read from one
        * slice instead of plumbing 6 props each. */}
       {(appType === 'claude_code' || appType === 'codex') && (
-        <ProxyPoolProvider value={proxyPoolValue}>
-          <UpstreamPool
-            onRefresh={() => refresh()}
-            onAddProvider={() => openProxyModal()}
-          />
-        </ProxyPoolProvider>
+        <ProxyPoolDataProvider value={proxyPoolDataValue}>
+          <ProxyPoolActionsProvider value={proxyPoolActionsValue}>
+            <UpstreamPool
+              onRefresh={() => refresh()}
+              onAddProvider={() => openProxyModal()}
+            />
+          </ProxyPoolActionsProvider>
+        </ProxyPoolDataProvider>
       )}
 
 
       {/* Failover Route editor - consumes RoutesContext (state + handlers
        * owned by AppPage so the tab-switch cache refs survive remounts). */}
       {(appType === 'claude_code' || appType === 'codex') && (
-        <RoutesProvider value={routesValue}>
-          <RouteEditor />
-        </RoutesProvider>
+        <RoutesDataProvider value={routesDataValue}>
+          <RoutesActionsProvider value={routesActionsValue}>
+            <RouteEditor />
+          </RoutesActionsProvider>
+        </RoutesDataProvider>
       )}
 
 
       {/* Editable provider list - its own card, full page width. Same
        * ProxyPoolContext as the upstream pool above. */}
       {(appType === 'claude_code' || appType === 'codex') && (
-        <ProxyPoolProvider value={proxyPoolValue}>
-          <UpstreamList
-            onAdd={() => openProxyModal()}
-            onEdit={openProxyModal}
-            onDelete={handleDeleteProxy}
-          />
-        </ProxyPoolProvider>
+        <ProxyPoolDataProvider value={proxyPoolDataValue}>
+          <ProxyPoolActionsProvider value={proxyPoolActionsValue}>
+            <UpstreamList
+              onAdd={() => openProxyModal()}
+              onEdit={openProxyModal}
+              onDelete={handleDeleteProxy}
+            />
+          </ProxyPoolActionsProvider>
+        </ProxyPoolDataProvider>
       )}
 
       {/* Provider chain — hidden for Claude (upstream pool replaces it) */}
@@ -1173,6 +1303,15 @@ export function AppPage({ appType }: { appType: AppType }) {
         <div className="modal-backdrop" onClick={() => setShowGatewayModal(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>{t('app.gateway.editSettings')}</h3>
+            <label>
+              {t('app.gateway.hostLabel')}
+              <input
+                className="input"
+                value={gatewayForm.host}
+                placeholder="127.0.0.1"
+                onChange={(e) => setGatewayForm({ ...gatewayForm, host: e.target.value })}
+              />
+            </label>
             <label>
               {t('app.gateway.portLabel')}
               <input

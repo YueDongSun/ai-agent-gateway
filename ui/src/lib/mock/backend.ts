@@ -280,17 +280,25 @@ export function installMockBackend() {
       }
 
       // ---- import_cc_switch_providers ----
-      // Demo mode can't open the user's cc-switch SQLite DB. Return an
-      // empty report so the import button renders cleanly.
-      case 'import_cc_switch_providers':
-        return {
-          sourceDb: '(demo: no real filesystem access)',
-          imported: [],
-          skippedExisting: [],
-          skippedNoKey: [],
-          totalInSource: 0,
-          importedRoutes: [],
-        };
+// Demo mode can't open the user's cc-switch SQLite DB. Return a
+// small synthetic payload so the import button showcases the Phase 22
+// report toast (imported + skipped counts + auto-seeded routes) —
+// empty reports in the UI make the feature look broken.
+case 'import_cc_switch_providers':
+  return {
+    sourceDb: '(demo: synthetic cc-switch payload)',
+    imported: [
+      {
+        id: 'ccs-demo-anthropic',
+        appType: 'claude_code',
+        name: 'cc-switch · Anthropic demo',
+      },
+    ],
+    skippedExisting: [],
+    skippedNoKey: [],
+    totalInSource: 1,
+    importedRoutes: ['claude-fable-5', 'claude-sonnet-5'],
+  };
 
       // ---- proxy ----
       case 'proxy_status':

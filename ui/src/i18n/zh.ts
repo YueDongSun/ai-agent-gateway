@@ -26,7 +26,9 @@ export const zh: Record<string, string> = {
   'app.gateway.restarted': '网关已重启，路由已生效。',
   'app.gateway.portFallback': '端口被占用——代理已改用端口 {port} 并保存为新的默认端口。',
   'app.gateway.portConflict': '网关启动失败：附近所有端口都被占用。请释放端口或修改 Base URL 后重试。详情：{message}',
-  'app.gateway.editSettings': '网关设置（端口、API 密钥）',
+  'app.gateway.editSettings': '网关设置（监听地址、端口、API 密钥）',
+  'app.gateway.hostLabel': '监听地址',
+  'app.gateway.invalidHost': '监听地址必须是 localhost、IPv4 或 IPv6 字面量。',
   'app.gateway.portLabel': '端口',
   'app.gateway.invalidPort': '端口必须是 1–65535 之间的整数。',
   'app.gateway.savedRestartHint': '已保存。重启网关后新设置生效。',
@@ -69,7 +71,7 @@ export const zh: Record<string, string> = {
   'claude.upstream.title': '上游供应商',
   'claude.upstream.listTitle': '上游列表',
   'claude.upstream.add': '+ 添加上游',
-  'claude.upstream.desc': '管理上游 API 供应商（DeepSeek、OpenAI、Anthropic 等）。在下方故障转发路由中配置模型到上游的映射。',
+  'claude.upstream.desc': '管理上游 API 供应商（DeepSeek、OpenAI、Anthropic 等）。用行内开关把上游移出故障转发池；其模型列表会作为下方路由的跳转模型建议。',
   'claude.upstream.empty': '暂无上游供应商。添加一个来构建故障转发池。',
   'claude.upstream.modal.add': '添加上游供应商',
   'claude.upstream.modal.edit': '编辑上游：{name}',
@@ -78,11 +80,8 @@ export const zh: Record<string, string> = {
   'claude.upstream.modal.type': '类型',
   'claude.upstream.modal.baseUrl': 'Base URL（端点）',
   'claude.upstream.modal.apiKey': 'API 密钥',
-  'claude.upstream.modal.modelMapping': '模型映射',
-  'claude.upstream.modal.modelMapping.help': '将 Claude 模型名映射到此供应商的上游模型。例如："claude-sonnet-5" -> "deepseek-v4-pro"。',
-  'claude.upstream.modal.modelMapping.display': 'Claude 模型（显示）',
-  'claude.upstream.modal.modelMapping.upstream': '上游模型',
-  'claude.upstream.modal.modelMapping.add': '+ 添加映射',
+  // Phase 22r 清理：废弃的 `claude.upstream.modal.modelMapping.*`（5 键）
+  // 已移除 —— 模型映射自 Phase 18 起并入路由编辑器。
   // Round 1 cleanup: `claude.upstream.pin` / `unpin` (no JSX consumer) and
   // the entire `claude.mapping.*` block (10 keys) were the retired model
   // mapping editor.
@@ -94,7 +93,7 @@ export const zh: Record<string, string> = {
 
   // Failover route editor (shared by Claude + Codex)
   'route.title': '故障转发路由',
-  'route.desc': '每条路由将客户端请求的模型名映射到有序的故障转发链。拖拽 ⋮⋮ 把手调整顺序；可单独剔除某个供应商。路由保存到数据库，代理下次启动时生效。',
+  'route.desc': '每条路由将客户端请求的模型名映射到有序的故障转发链。拖拽 ⋮⋮ 把手调整顺序；可单独剔除某个供应商。保存后点击“重启代理以生效”（网关运行时）即可应用更改。',
   'route.empty': '暂无路由。从 cc-switch 导入或添加上游供应商来自动生成路由。',
   'route.add': '+ 添加路由',
   'route.rename': '重命名',
@@ -136,23 +135,14 @@ export const zh: Record<string, string> = {
   'codex.mirror.home': '镜像 CODEX_HOME',
   'codex.mirror.notInitialized': '未初始化 - 请先切换一个供应商',
 
-  // Model Catalog editor (Codex provider edit modal)
-  'codex.modal.modelCatalog': '模型映射',
-  'codex.modal.modelCatalog.help': '将显示模型（Codex 显示的）映射到特定供应商的实际上游模型。例如："GPT-5" → DeepSeek 的 "deepseek-v4-flash"。',
-  'codex.modal.modelCatalog.display': '显示名称',
-  'codex.modal.modelCatalog.upstream': '上游模型',
-  'codex.modal.modelCatalog.provider': '供应商',
-  'codex.modal.modelCatalog.selectProvider': '（选择供应商）',
-  'codex.modal.modelCatalog.displayPlaceholder': 'GPT-5',
-  'codex.modal.modelCatalog.upstreamPlaceholder': 'deepseek-v4-flash',
-  'codex.modal.modelCatalog.add': '+ 添加映射',
+  // Phase 22r 清理：废弃的 `codex.modal.modelCatalog.*`（9 键）已移除 ——
+  // 模型映射自 Phase 18 起并入路由编辑器。
   'codex.open.title': '打开 Codex',
   'codex.open.desktop': '打开 Codex 桌面版（镜像）',
   'codex.open.desktop.help': '启动一个全新的 Codex 桌面版实例，自动写入指向 AAG 网关的配置（代理负责故障转发）。现有的 Codex 桌面版不受影响。',
   'codex.open.cli': '在终端打开 Codex CLI',
   'codex.open.cli.help': '在终端启动 Codex CLI，注入 CODEX_HOME + 出站代理环境变量。',
   'codex.open.copilot': '在终端打开 Copilot CLI',
-  'codex.open.copilot.help': '启动 Copilot CLI，注入 COPILOT_PROVIDER_* 环境变量。',
   'codex.open.desktopLaunched': 'Codex 桌面版寄生实例已启动（CODEX_HOME={dir}）。原生 Codex 桌面版继续运行，不受影响。',
   'codex.open.cliLaunched': 'Codex CLI 已在终端启动（CODEX_HOME={dir}）。',
   'codex.open.copilotLaunched': 'Copilot CLI 已启动（供应商={provider}）。',
@@ -170,7 +160,6 @@ export const zh: Record<string, string> = {
   'common.delete': '删除',
   'common.edit': '编辑',
   'common.loading': '加载中…',
-  'common.error': '错误：{message}',
 
   // Header controls
   'header.theme.toggle': '切换主题',

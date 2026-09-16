@@ -25,7 +25,9 @@ export const en = {
   'app.gateway.restarted': 'Gateway restarted — routes applied.',
   'app.gateway.portFallback': 'Port was in use — proxy moved to port {port} and saved it as the new default.',
   'app.gateway.portConflict': 'Could not start the gateway: every nearby port is taken. Free a port or change the base URL, then retry. Details: {message}',
-  'app.gateway.editSettings': 'Gateway settings (port, API key)',
+  'app.gateway.editSettings': 'Gateway settings (bind host, port, API key)',
+  'app.gateway.hostLabel': 'Bind host',
+  'app.gateway.invalidHost': 'Bind host must be localhost, an IPv4 address, or an IPv6 literal.',
   'app.gateway.portLabel': 'Port',
   'app.gateway.invalidPort': 'Port must be an integer between 1 and 65535.',
   'app.gateway.savedRestartHint': 'Saved. Restart the gateway for the new settings to take effect.',
@@ -68,7 +70,7 @@ export const en = {
   'claude.upstream.title': 'Upstream Providers',
   'claude.upstream.listTitle': 'Upstream List',
   'claude.upstream.add': '+ Add upstream',
-  'claude.upstream.desc': 'Manage upstream API providers (DeepSeek, OpenAI, Anthropic, etc.). Configure model-to-upstream mappings in the Failover Routes section below.',
+  'claude.upstream.desc': 'Manage upstream API providers (DeepSeek, OpenAI, Anthropic, etc.). Use the row toggle to pull an upstream out of the failover pool; its model list feeds the hop-model suggestions in the routes below.',
   'claude.upstream.empty': 'No upstream providers. Add one to build the failover pool.',
   'claude.upstream.modal.add': 'Add upstream provider',
   'claude.upstream.modal.edit': 'Edit upstream: {name}',
@@ -77,11 +79,8 @@ export const en = {
   'claude.upstream.modal.type': 'Type',
   'claude.upstream.modal.baseUrl': 'Base URL (endpoint)',
   'claude.upstream.modal.apiKey': 'API key',
-  'claude.upstream.modal.modelMapping': 'Model Mapping',
-  'claude.upstream.modal.modelMapping.help': 'Map Claude model names to upstream models on this provider. Example: "claude-sonnet-5" -> "deepseek-v4-pro".',
-  'claude.upstream.modal.modelMapping.display': 'Claude Model (display)',
-  'claude.upstream.modal.modelMapping.upstream': 'Upstream Model',
-  'claude.upstream.modal.modelMapping.add': '+ Add mapping',
+  // Phase 22r cleanup: the retired `claude.upstream.modal.modelMapping.*`
+  // keys (5) are gone — the route editor absorbed model mapping (Phase 18).
   // Round 1 cleanup: `claude.upstream.pin` / `unpin` (no JSX consumer — the
   // pin toggle uses `pin.help` directly) and the entire `claude.mapping.*`
   // block (10 keys) were the retired model-mapping editor from before Phase
@@ -94,7 +93,7 @@ export const en = {
 
   // Failover route editor (shared by Claude + Codex)
   'route.title': 'Failover Routes',
-  'route.desc': 'Each route maps a client-facing model name to an ordered failover chain. Drag the ⋮⋮ handle to reorder hops; remove individual providers from the chain. Routes are saved to the database — the proxy picks them up on next start.',
+  'route.desc': 'Each route maps a client-facing model name to an ordered failover chain. Drag the ⋮⋮ handle to reorder hops; remove individual providers from the chain. Save, then use "Restart proxy to apply" (while the gateway is running) to pick changes up.',
   'route.empty': 'No routes configured. Import from cc-switch or add upstream providers to auto-generate routes.',
   'route.add': '+ Add Route',
   'route.rename': 'Rename',
@@ -136,25 +135,15 @@ export const en = {
   'codex.mirror.home': 'Mirror CODEX_HOME',
   'codex.mirror.notInitialized': 'not initialized - switch a provider first',
 
-  // Model Catalog editor (Codex provider edit modal)
-  'codex.modal.modelCatalog': 'Model Mapping',
-  'codex.modal.modelCatalog.help': 'Map display models (what Codex shows) to actual upstream models on specific providers. Example: "GPT-5" → "deepseek-v4-flash" on DeepSeek.',
-  'codex.modal.modelCatalog.display': 'Display Name',
-  'codex.modal.modelCatalog.upstream': 'Upstream Model',
-  'codex.modal.modelCatalog.provider': 'Provider',
-  'codex.modal.modelCatalog.selectProvider': '(select provider)',
-  'codex.modal.modelCatalog.displayPlaceholder': 'GPT-5',
-  'codex.modal.modelCatalog.upstreamPlaceholder': 'deepseek-v4-flash',
-  'codex.modal.modelCatalog.add': '+ Add mapping',
+  // (Phase 22r cleanup: the retired modelCatalog / modelMapping editor
+  // keys were removed — the route editor replaced that editor.)
   'codex.open.title': 'Open Codex',
   'codex.open.desktop': 'Open Codex Desktop (mirror)',
   'codex.open.desktop.help': 'Launches a NEW Codex Desktop instance pointed at AAG\'s gateway (auto-written config). The proxy handles failover. Your existing Codex Desktop stays untouched.',
   'codex.open.cli': 'Open Codex CLI in terminal',
   'codex.open.cli.help': 'Launches the Codex CLI in a terminal with CODEX_HOME + outbound proxy injected.',
   'codex.open.copilot': 'Open Copilot CLI in terminal',
-  'codex.open.copilot.help': 'Launches the Copilot CLI with COPILOT_PROVIDER_* environment variables injected.',
   'codex.open.desktopLaunched': 'Codex Desktop parasite launched (CODEX_HOME={dir}). Native Codex Desktop keeps running untouched.',
-  'codex.open.desktop.confirm': '',
   'codex.open.cliLaunched': 'Codex CLI started in terminal (CODEX_HOME={dir}).',
   'codex.open.copilotLaunched': 'Copilot CLI started (provider={provider}).',
   'codex.open.failed': 'Could not launch: {message}',
@@ -171,7 +160,6 @@ export const en = {
   'common.delete': 'Delete',
   'common.edit': 'Edit',
   'common.loading': 'Loading…',
-  'common.error': 'Error: {message}',
 
   // Header controls
   'header.theme.toggle': 'Toggle theme',

@@ -1,6 +1,7 @@
+import { memo } from 'react';
 import { useT } from '../../lib/ctx';
 import { TestIcon } from '../Icons';
-import { useProxyPool } from './state';
+import { useProxyPoolActions, useProxyPoolData } from './state';
 
 interface UpstreamPoolProps {
   onRefresh: () => void;
@@ -8,10 +9,16 @@ interface UpstreamPoolProps {
 }
 
 /** Upstream pool card with the failover-flow visualization. Consumes
- * `useProxyPool()` for data + breaker helpers; receives only two callbacks
- * (refresh + add) from AppPage. Test button + per-provider test results +
- * active/pinned tags + breaker dots all read from the context. */
-export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
+ * `useProxyPoolData()` for providers / breaker / test results and
+ * `useProxyPoolActions()` for the handlers (Phase 23e split - the
+ * action identities are stable, so this card re-renders only when the
+ * data slice changes); receives only two callbacks (refresh + add)
+ * from AppPage. Memoized: the tree siblings under the same providers
+ * don't re-render when only this card's data changes. */
+export const UpstreamPool = memo(function UpstreamPool({
+  onRefresh,
+  onAddProvider,
+}: UpstreamPoolProps) {
   const t = useT();
   const {
     providers,
@@ -21,10 +28,8 @@ export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
     testingId,
     breakerOf,
     breakerOfClass,
-    onTestProvider,
-    onClearTestResult,
-    onTogglePin,
-  } = useProxyPool();
+  } = useProxyPoolData();
+  const { onTestProvider, onClearTestResult, onTogglePin } = useProxyPoolActions();
 
   return (
     <div className="card">
@@ -44,11 +49,11 @@ export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
         <p className="muted">{t('claude.upstream.empty')}</p>
       ) : (
         <>
-          {/* Failover flow visualization */}
+          {/* Failover flow visualization. Disabled providers stay in the
+           * chain but render dimmed with a DISABLED tag — hiding them
+           * entirely made it look like they were deleted. */}
           <div className="failover-flow">
-            {providers
-              .filter((pp) => pp.enabled)
-              .map((pp, i, arr) => {
+            {providers.map((pp) => {
                 const bs = breakerOf(pp.id);
                 const isActive = health?.lastUsed === pp.id;
                 const isPinned = pinnedId === pp.id;
@@ -57,14 +62,20 @@ export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
                   'flow-node',
                   isPinned ? 'pinned' : isActive ? 'active' : '',
                   isBroken ? 'broken' : '',
+                  pp.enabled ? '' : 'disabled',
                 ]
                   .filter(Boolean)
                   .join(' ');
                 return (
                   <div key={pp.id}>
-                    {i > 0 && <div className="flow-arrow">↓</div>}
+                    <div className="flow-arrow">↓</div>
                     <div className={nodeClass}>
-                      <span className="flow-node-id">{pp.name || pp.id}</span>
+                      <span className="flow-node-id">
+                        {pp.name || pp.id}
+                        {!pp.enabled && (
+                          <span className="tag tag-paused">{t('claude.upstream.disabledTag')}</span>
+                        )}
+                      </span>
                       <span className="flow-node-url">{pp.baseURL || '—'}</span>
                       <div className="flow-node-status">
                         {bs && (
@@ -145,4 +156,4 @@ export function UpstreamPool({ onRefresh, onAddProvider }: UpstreamPoolProps) {
       )}
     </div>
   );
-}
+});

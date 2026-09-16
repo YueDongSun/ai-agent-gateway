@@ -606,11 +606,11 @@ pre {
 /* Disabled upstream: dimmed but still interactive (toggle re-enables). */
 .provider-row.disabled {
   opacity: 0.55;
+  text-decoration-color: var(--fg-muted);
 }
 .provider-row.disabled .provider-name,
 .provider-row.disabled .provider-url {
   text-decoration: line-through;
-  text-decoration-color: var(--fg-muted);
 }
 
 .drag-handle {
@@ -752,6 +752,13 @@ pre {
   border-color: var(--danger);
   background: var(--danger-bg);
   opacity: 0.7;
+}
+
+/* Disabled upstream in the flow: dimmed + dashed so it's visibly part
+ * of the chain but clearly out of rotation. */
+.flow-node.disabled {
+  border-style: dashed;
+  opacity: 0.5;
 }
 
 .flow-arrow {

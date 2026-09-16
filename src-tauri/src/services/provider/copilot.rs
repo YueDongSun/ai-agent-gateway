@@ -158,7 +158,6 @@ pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn strip_jsonc_removes_line_and_block_comments() {

@@ -7,9 +7,6 @@
 
 use crate::commands::provider::queue_endpoint_of;
 use crate::database::Database;
-use crate::provider::Provider;
-use crate::proxy;
-use crate::services;
 use serde::Serialize;
 use tauri::Manager;
 use std::collections::HashMap;

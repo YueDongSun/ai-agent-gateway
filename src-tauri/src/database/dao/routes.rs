@@ -93,12 +93,13 @@ impl Database {
 
     /// Rename a route's alias in place (hops + description ride along —
     /// they live on the same row). Fails if the target alias already
-    /// exists or the source is missing.
+    /// exists or the source is missing. Mirrors the style of the
+    /// sibling single-UPDATE DAOs (one statement, no implicit
+    /// transaction wrapper needed).
     #[allow(dead_code)]
     pub fn rename_route(&self, from: &str, to: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
-        let tx = conn.unchecked_transaction()?;
-        let updated = tx.execute(
+        let updated = conn.execute(
             "UPDATE routes SET alias = ?1 WHERE alias = ?2",
             params![to, from],
         )?;
@@ -107,7 +108,6 @@ impl Database {
                 "route \"{from}\" does not exist"
             )));
         }
-        tx.commit()?;
         Ok(())
     }
 }

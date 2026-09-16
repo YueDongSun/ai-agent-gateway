@@ -1834,10 +1834,6 @@ mod tests {
         assert_eq!(tool_choice_anthropic_to_oai(&json!("any")), "required");
     }
 
-    fn data_lines(s: String) -> String {
-        s
-    }
-
     /// Parse an Anthropic SSE event payload (data string after `data:` strip)
     /// by extracting just the JSON. We feed JSON strings into the stream
     /// directly — the converter parses them with serde_json::from_str.

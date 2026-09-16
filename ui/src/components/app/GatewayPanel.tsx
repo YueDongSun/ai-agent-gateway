@@ -9,6 +9,10 @@ interface GatewayPanelProps {
   gatewayUrl: string;
   authToken: string;
   cliStatus: CodexCliStatus | null;
+  /** Last error from the Codex CLI status fetch (Phase 23f). When
+   *  set, the mirror row renders a warning chip instead of the
+   *  initialized pill, so the user can see why the row is stale. */
+  cliStatusError?: string | null;
   copied: string | null;
   busy: string | null;
   onCopy: (text: string, key: string) => void;
@@ -27,6 +31,7 @@ export function GatewayPanel({
   gatewayUrl,
   authToken,
   cliStatus,
+  cliStatusError,
   copied,
   busy,
   onCopy,
@@ -46,11 +51,21 @@ export function GatewayPanel({
           {running ? t('app.gateway.running') : t('app.gateway.stopped')}
         </span>
         {running ? (
-          <button className="btn" onClick={onStop} disabled={busy === 'stop'}>
+          <button
+            className="btn"
+            onClick={onStop}
+            disabled={busy === 'stop'}
+            data-testid="gateway-stop"
+          >
             {t('app.gateway.stop')}
           </button>
         ) : (
-          <button className="btn primary" onClick={onStart} disabled={busy === 'start'}>
+          <button
+            className="btn primary"
+            onClick={onStart}
+            disabled={busy === 'start'}
+            data-testid="gateway-start"
+          >
             {t('app.gateway.start')}
           </button>
         )}
@@ -99,9 +114,19 @@ export function GatewayPanel({
         <div className="endpoint-row">
           <span className="endpoint-label">{t('codex.mirror.home')}</span>
           <code className="endpoint-value">{cliStatus?.configDir ?? '~/.codex-cli'}</code>
-          <span className={cliStatus?.initialized ? 'pill on' : 'pill off'}>
-            {cliStatus?.initialized ? '✓' : t('codex.mirror.notInitialized')}
-          </span>
+          {cliStatusError ? (
+            <span
+              className="pill off"
+              title={cliStatusError}
+              data-testid="codex-mirror-error"
+            >
+              ⚠
+            </span>
+          ) : (
+            <span className={cliStatus?.initialized ? 'pill on' : 'pill off'}>
+              {cliStatus?.initialized ? '✓' : t('codex.mirror.notInitialized')}
+            </span>
+          )}
           <button
             className="btn icon-btn"
             onClick={() => onCopy(cliStatus?.configDir ?? '~/.codex-cli', 'mirror')}

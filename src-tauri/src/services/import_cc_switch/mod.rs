@@ -171,7 +171,6 @@ fn read_cc_switch_providers(path: &std::path::Path) -> Result<Vec<CcSwitchRow>, 
                 notes: r.get(8)?,
                 icon: r.get(9)?,
                 icon_color: r.get(10)?,
-                meta: r.get(11)?,
                 is_current: r.get::<_, i64>(12)? != 0,
                 in_failover_queue: r.get::<_, i64>(13)? != 0,
             })
@@ -183,7 +182,8 @@ fn read_cc_switch_providers(path: &std::path::Path) -> Result<Vec<CcSwitchRow>, 
 }
 
 /// Internal: rows as read from cc-switch's DB. `app_type` already
-/// mapped onto AAG's snake_case.
+/// mapped onto AAG's snake_case. (cc-switch's `meta` JSON column is
+/// selected but not carried over — AAG builds its own ProviderMeta.)
 struct CcSwitchRow {
     id: String,
     app_type: String,
@@ -196,7 +196,6 @@ struct CcSwitchRow {
     notes: Option<String>,
     icon: Option<String>,
     icon_color: Option<String>,
-    meta: String,
     is_current: bool,
     in_failover_queue: bool,
 }

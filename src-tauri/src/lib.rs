@@ -21,10 +21,7 @@ pub mod tray;
 mod e2e;
 
 use database::Database;
-use provider::Provider;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
