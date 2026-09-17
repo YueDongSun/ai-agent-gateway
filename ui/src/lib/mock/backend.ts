@@ -18,6 +18,7 @@
 ///   - `window.__aagDemoSetError(null)`             - clear the forced error
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import { mockIPC } from '@tauri-apps/api/mocks';
+import { app_version, is_demo_build } from '../build_info.js';
 import type { Provider } from '../api/types';
 import type { ProxyProvider, Route } from '../api/proxy';
 
@@ -34,7 +35,7 @@ export const isTauri = typeof window !== 'undefined' && Boolean(internals());
 export const isDemo =
   typeof window !== 'undefined' &&
   !isTauri &&
-  Boolean((import.meta as { env?: Record<string, unknown> }).env?.DEV);
+  (Boolean((import.meta as { env?: Record<string, unknown> }).env?.DEV) || is_demo_build);
 
 // ---------------------------------------------------------------------------
 // In-memory store (module-level, survives HMR only while the page is open)
@@ -223,7 +224,7 @@ export function installMockBackend() {
     switch (cmd) {
       // ---- app ----
       case 'app_info':
-        return { name: 'AI Agent Gateway (demo)', version: '0.2.0', phase: '16' };
+        return { name: 'AI Agent Gateway', version: app_version, phase: '16' };
       case 'app_check_update':
         return null;
 
@@ -449,7 +450,13 @@ case 'import_cc_switch_providers':
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-const DEMO_PROXY_BASE = 'http://127.0.0.1:8989';
+function demo_proxy_base() {
+  return `http://${proxyConfig.host}:${proxyConfig.port}`;
+}
+
+function mock_proxy_path(url: string, path: string) {
+  return url === `${demo_proxy_base()}${path}` || url.startsWith(`${demo_proxy_base()}${path}?`);
+}
 
 /// Intercept the direct proxy fetches (the pages poll `/health` and
 /// `/v1/models` via `fetch`, not invoke) so the demo shows live status.
@@ -457,8 +464,8 @@ const DEMO_PROXY_BASE = 'http://127.0.0.1:8989';
 function installFetchInterceptor() {
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    if (url.startsWith(`${DEMO_PROXY_BASE}/health`)) {
+    const url = input instanceof Request ? input.url : String(input);
+    if (mock_proxy_path(url, '/health')) {
       return new Response(
         JSON.stringify({
           status: 'ok',
@@ -472,7 +479,7 @@ function installFetchInterceptor() {
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }
-    if (url.startsWith(`${DEMO_PROXY_BASE}/v1/models`)) {
+    if (mock_proxy_path(url, '/v1/models')) {
       const ids = [...new Set(routes.map((r) => r.alias))].sort();
       return new Response(
         JSON.stringify({

@@ -1,240 +1,24 @@
 #!/usr/bin/env node
-/// Browser smoke test for the AAG demo mode (no Tauri needed).
-///
-/// Boots (or reuses) a vite dev server on :1420, drives a headless Edge
-/// instance over the DevTools protocol, and asserts the app actually
-/// renders and the key interactions work. Catches runtime crashes that
-/// tsc / vite build cannot see (e.g. the Phase 22i TDZ white-screen).
-///
-/// Usage:
-///   node scripts/smoke-demo.mjs [--keep]        from the repo root
-///     --keep   leave the browser + vite server running afterwards
-///
-/// Exit code 0 = all checks passed; 1 = any failure (details on stderr).
-import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-const DEMO_URL = 'http://localhost:1420/';
-const CDP_PORT = 9223;
-const VITE_PORT = 1420;
-
-const log = (msg) => process.stdout.write(`${msg}\n`);
-const fail = (msg) => {
-  process.stderr.write(`FAIL: ${msg}\n`);
-};
-
-// ---------------------------------------------------------------------------
-// 1. Find a Chromium-family browser.
-// ---------------------------------------------------------------------------
-function findBrowser() {
-  const candidates = [
-    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-  ];
-  for (const c of candidates) if (existsSync(c)) return c;
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// 2. Ensure the vite dev server is up (start one if :1420 isn't answering).
-// ---------------------------------------------------------------------------
-async function httpOk(url, timeoutMs = 800) {
-  try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), timeoutMs);
-    const res = await fetch(url, { signal: ac.signal });
-    clearTimeout(t);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureVite({ keep }) {
-  if (await httpOk(DEMO_URL)) return null; // already running — reuse
-  log('[smoke] starting vite dev server…');
-  const child = spawn('npm', ['run', 'dev', '--prefix', 'ui'], {
-    // Designed to run from the repo root (npm run ui:smoke).
-    cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
-  });
-  child.stdout.on('data', () => {});
-  child.stderr.on('data', () => {});
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    if (await httpOk(DEMO_URL)) return keep ? child : child;
-    await sleep(400);
-  }
-  child.kill();
-  throw new Error('vite dev server did not come up within 20s');
-}
-
-// ---------------------------------------------------------------------------
-// 3. Launch headless browser with remote debugging.
-// ---------------------------------------------------------------------------
-async function launchBrowser(exe, { keep }) {
-  const profile = mkdtempSync(join(tmpdir(), 'aag-smoke-'));
-  const child = spawn(
-    exe,
-    [
-      '--headless=new',
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-default-browser-check',
-      `--user-data-dir=${profile}`,
-      `--remote-debugging-port=${CDP_PORT}`,
-      'about:blank',
-    ],
-    { stdio: 'ignore' },
-  );
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
-      if (res.ok) return child;
-    } catch {
-      /* not up yet */
-    }
-    await sleep(300);
-  }
-  child.kill();
-  throw new Error('headless browser did not expose CDP within 15s');
-}
-
-// ---------------------------------------------------------------------------
-// 4. Minimal CDP client (native WebSocket, no deps).
-// ---------------------------------------------------------------------------
-class Cdp {
-  constructor(ws) {
-    this.ws = ws;
-    this.id = 0;
-    this.pending = new Map();
-    this.exceptions = [];
-    this.consoleErrors = [];
-    ws.addEventListener('message', (ev) => this.#onMessage(ev));
-  }
-
-  #onMessage(ev) {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && this.pending.has(msg.id)) {
-      this.pending.get(msg.id)(msg);
-      this.pending.delete(msg.id);
-      return;
-    }
-    if (msg.method === 'Runtime.exceptionThrown') {
-      const d = msg.params.exceptionDetails;
-      this.exceptions.push(d.exception?.description ?? d.text ?? 'unknown');
-    }
-    if (
-      msg.method === 'Runtime.consoleAPICalled' &&
-      msg.params.type === 'error'
-    ) {
-      this.consoleErrors.push(
-        msg.params.args.map((a) => a.value ?? a.description ?? '').join(' '),
-      );
-    }
-  }
-
-  connect() {
-    return new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, { once: true });
-      this.ws.addEventListener('error', reject, { once: true });
-    });
-  }
-
-  send(method, params = {}) {
-    return new Promise((resolve) => {
-      const mid = ++this.id;
-      this.pending.set(mid, resolve);
-      this.ws.send(JSON.stringify({ id: mid, method, params }));
-    });
-  }
-
-  /** Run an expression; if a NEW Runtime.exceptionThrown arrived during
-   *  the call, the latest description is included in the return value
-   *  envelope (so the call site can pinpoint which step blew up). */
-  async eval(expression) {
-    const before = this.exceptions.length;
-    const res = await this.send('Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      // Async IIFE checks resolve via awaitPromise, not as plain objects.
-      awaitPromise: true,
-    });
-    if (res.result?.exceptionDetails) {
-      throw new Error(
-        (res.result.exceptionDetails.text || 'Uncaught') +
-          (res.result.exceptionDetails.exception?.description
-            ? ' — ' + res.result.exceptionDetails.exception.description.split('\n')[0]
-            : '') +
-          '\n  expression head: ' + expression.slice(0, 120),
-      );
-    }
-    const fresh = this.exceptions.slice(before);
-    const lastError = fresh[fresh.length - 1] ?? null;
-    // Return an envelope so call sites can detect per-step errors
-    // without scanning the full cdp.exceptions array.
-    return { __asyncError: lastError, value: res.result?.result?.value };
-  }
-
-  /** Unwrap the eval envelope (returns the bare value, like the pre-
-   *  envelope API). Use `evalWithErr` when you want per-step async
-   *  error detail too. */
-  async evalValue(expression) {
-    const env = await this.eval(expression);
-    return env.value;
-  }
-
-  /** Run an eval and return the raw envelope (value + per-step
-   *  async error). Use when the call site wants to surface async
-   *  exceptions explicitly (e.g. as a check failure with detail). */
-  async evalWithErr(expression) {
-    return this.eval(expression);
-  }
-}
-
-/** React-controlled inputs ignore a bare `value=…` + dispatchEvent —
- *  the value setter must come from the element's prototype to fire
- *  React's onChange listener. */
-function setReactInputValue(el, value) {
-  const desc = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value');
-  desc.set.call(el, value);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-/** Find a button under `root` whose trimmed text *contains* any of
- *  `labels`. Substring matching (not equality) survives incidental
- *  whitespace, kerning, or icon glyphs. */
-function findButtonByLabel(root, ...labels) {
-  const buttons = root.querySelectorAll('button');
-  return [...buttons].find((b) => labels.some((l) => b.textContent.includes(l)));
-}
-
-async function attachPage() {
-  const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
-  const page = list.find((t) => t.type === 'page');
-  if (!page) throw new Error('no page target in CDP list');
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  const cdp = new Cdp(ws);
-  await cdp.connect();
-  await cdp.send('Runtime.enable');
-  await cdp.send('Page.enable');
-  return cdp;
-}
+import { attach_page as attach_owned_page } from './ui_smoke/cdp_client.mjs';
+import { install_demo_api_adapter } from './ui_smoke/demo_api_adapter.mjs';
+import { check_in_page } from './ui_smoke/page_checks.mjs';
+import { run_phase_23_regressions } from './ui_smoke/phase_23_regressions.mjs';
+import { run_gateway_feedback_checks, run_product_initial_checks } from './ui_smoke/product_checks.mjs';
+import { create_smoke_runtime, find_browser as find_owned_browser, sleep } from './ui_smoke/smoke_runtime.mjs';
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const log = (message) => process.stdout.write(message + '\n');
+const fail = (message) => process.stderr.write('FAIL: ' + message + '\n');
 
 let failed = false;
+let check_count = 0;
+let passed_count = 0;
 function check(name, ok, detail = '') {
+  check_count += 1;
   if (ok) {
+    passed_count += 1;
     log(`  ✓ ${name}`);
   } else {
     failed = true;
@@ -242,101 +26,77 @@ function check(name, ok, detail = '') {
   }
 }
 
-/** Run a check that lives inside the page (CDP eval). The helper:
- *   - wraps the call in an `evalWithErr` envelope,
- *   - if the return value is the literal string `'ok'`, the check passes;
- *   - if the return value is any other truthy value (object / number /
- *     array), the check passes — use a `predicate` for structural asserts;
- *   - any async error thrown during the eval is appended to the failure
- *     detail so the failing step is locatable.
- *
- * Usage:
- *   // boolean assertion:
- *   await checkInPage(cdp, 'gateway starts', async () => {
- *     document.querySelector('[data-testid="gateway-start"]')?.click();
- *     await sleep(1500);
- *     return document.body.innerText.includes('● 运行中') ? 'ok' : 'no-pill';
- *   });
- *
- *   // structural assertion:
- *   await checkInPage(cdp, 'copy buttons present', async () => {
- *     const buttons = document.querySelectorAll('.endpoint-row button');
- *     return { ok: buttons.length >= 2, count: buttons.length };
- *   });
- */
-async function checkInPage(cdp, name, fn) {
-  const src = '(' + fn.toString() + ')()';
-  const env = await cdp.evalWithErr(src);
-  const val = env.value;
-  // Structural pass: a returned object with `.ok === true` is treated as
-  // a pass with optional `.detail` for the failure line.
-  let ok = val === 'ok';
-  let detail = env.__asyncError
-    ? 'async: ' + env.__asyncError.slice(0, 160)
-    : '';
-  if (!ok && val && typeof val === 'object' && val.ok === true) {
-    ok = true;
-    detail = env.__asyncError
-      ? 'async: ' + env.__asyncError.slice(0, 160)
-      : '';
-  } else if (!ok) {
-    detail = [
-      (val === undefined || val === null) ? 'eval returned no value' : (typeof val === 'object' ? JSON.stringify(val) : String(val)),
-      env.__asyncError ? 'async: ' + env.__asyncError.slice(0, 160) : '',
-    ]
-      .filter(Boolean)
-      .join(' | ');
-  }
-  check(name, ok, detail);
-}
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 const keep = process.argv.includes('--keep');
-let viteProc = null;
-let browserProc = null;
+const built_demo = process.argv.includes('--built-demo');
+let smoke_runtime = null;
 
 try {
-  const exe = findBrowser();
+  const exe = find_owned_browser();
   check('browser found', Boolean(exe), 'no Edge/Chrome in standard paths');
   if (!exe) process.exit(1);
 
-  viteProc = await ensureVite({ keep });
-  browserProc = await launchBrowser(exe, { keep });
-  const cdp = await attachPage();
+  smoke_runtime = await create_smoke_runtime(exe, { built_demo });
+  const cdp = await attach_owned_page(smoke_runtime.cdp_origin);
 
   // --- load + render ---
+  log('[smoke] owned Vite ' + smoke_runtime.demo_url + ' profile ' + smoke_runtime.profile_directory);
   log('[smoke] loading demo page…');
-  await cdp.send('Page.navigate', { url: DEMO_URL });
+  await cdp.send('Page.navigate', { url: smoke_runtime.demo_url });
   await sleep(6000);
 
-  const bodyText = (await cdp.evalValue('document.body.innerText')) ?? '';
+  const loaded_url = await cdp.eval_value('location.href');
+  check('page stays on the owned runtime URL', loaded_url === smoke_runtime.demo_url, `loaded=${loaded_url} expected=${smoke_runtime.demo_url}`);
+
+  const bodyText = (await cdp.eval_value('document.body.innerText')) ?? '';
   check('page renders (no "UI error" crash screen)', !bodyText.includes('UI error'));
   check('header present', bodyText.includes('AI Agent Gateway'));
   check('Claude page rendered', bodyText.includes('AAG 网关') || bodyText.includes('AAG Gateway'));
+  const favicon_href = await cdp.eval_value("document.querySelector('link[rel=\"icon\"]')?.getAttribute('href')");
+  check('favicon points to the packaged app icon', favicon_href === '/app_icon.svg', `href=${favicon_href ?? 'missing'}`);
+  const build_badge = await cdp.eval_value(`(() => {
+    const channel = document.querySelector('[data-testid="build_channel"]');
+    const version = document.querySelector('[data-testid="build_version"]');
+    return {
+      channel: channel?.getAttribute('data-channel') ?? null,
+      version: version?.textContent?.trim() ?? null,
+    };
+  })()`);
+  check('demo exposes its build channel and version', build_badge?.channel === 'demo' && Boolean(build_badge?.version), JSON.stringify(build_badge));
 
   // --- route editor landmarks ---
-  const hopHandles = await cdp.evalValue("document.querySelectorAll('.hop-drag-handle').length");
+  const hopHandles = await cdp.eval_value("document.querySelectorAll('.hop-drag-handle').length");
   check('hop drag handles rendered', hopHandles > 0, `count=${hopHandles}`);
 
+  const is_demo = await cdp.eval_value('window.__aagDemoIsDemo === true');
+  check('browser uses the synthetic IPC backend', is_demo);
+  if (!is_demo) throw new Error('refusing smoke mutations outside the demo backend');
+  await install_demo_api_adapter(cdp);
+  await run_product_initial_checks({ cdp, check_in_page, check, sleep });
+  await run_phase_23_regressions({ cdp, check_in_page, check, sleep });
+  await run_gateway_feedback_checks({ cdp, check_in_page, check });
+
   // --- start the gateway ---
-  await cdp.evalValue("document.querySelector('[data-testid=\"gateway-start\"]')?.click(); 1");
+  await cdp.eval_value("document.querySelector('[data-testid=\"gateway-start\"]')?.click(); 1");
   await sleep(1500);
-  const runningText = (await cdp.evalValue('document.body.innerText')) ?? '';
+  const runningText = (await cdp.eval_value('document.body.innerText')) ?? '';
   check(
     'gateway starts (running pill)',
     runningText.includes('● 运行中') || runningText.includes('● running'),
   );
 
   // --- restart button appears in route toolbar only while running ---
-  const restartBtn = await cdp.evalValue(
+  const restartBtn = await cdp.eval_value(
     "document.querySelector('[data-testid=\"route-restart\"]') !== null",
   );
   check('route-toolbar restart button visible while running', restartBtn);
 
+
   // --- route rename (auto-answer the prompt) ---
-  await checkInPage(cdp, 'route rename updates the alias', async () => {
+  await check_in_page(cdp, check, 'route rename updates the alias', async () => {
     // Read the FIRST route alias via the testid so this check doesn't
     // break when more routes land or class names change.
     const firstAliasEl = document.querySelector('[data-testid^="route-alias-"]');
@@ -355,7 +115,7 @@ try {
   });
 
   // --- upstream enable toggle (UpstreamList switch) ---
-  await checkInPage(cdp, 'upstream enable toggle flips + persists', async () => {
+  await check_in_page(cdp, check, 'upstream enable toggle flips + persists', async () => {
     const row = document.querySelector('.provider-list .provider-row');
     if (!row) return 'no-row';
     const sw = row.querySelector('.toggle-switch input');
@@ -369,14 +129,14 @@ try {
   });
 
   // --- disabled upstream stays visible in the flow (dimmed, not hidden) ---
-  await checkInPage(cdp, 'disabled upstream still renders in the flow', async () => {
+  await check_in_page(cdp, check, 'disabled upstream still renders in the flow', async () => {
     return document.querySelectorAll('.failover-flow .flow-node.disabled').length > 0
       ? 'ok'
       : 'no-disabled-flow-node';
   });
 
   // --- hop keyboard reorder (focus a handle, press ArrowDown) ---
-  await checkInPage(cdp, 'hop keyboard ArrowDown reorders', async () => {
+  await check_in_page(cdp, check, 'hop keyboard ArrowDown reorders', async () => {
     const firstModel = document.querySelector('.hop-row[data-hop-idx="0"]')?.dataset.routeAlias;
     if (!firstModel) return 'no-hop';
     const aliasOf = (i) =>
@@ -397,7 +157,7 @@ try {
   });
 
   // Inject helpers once so the per-check eval strings stay terse.
-  await cdp.evalValue(`Object.assign(window, {
+  await cdp.eval_value(`Object.assign(window, {
     setReactInputValue: (el, v) => {
       const d = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value');
       d.set.call(el, v);
@@ -425,7 +185,7 @@ try {
   }); 1`);
 
   // --- gateway settings modal opens + saves ---
-  await checkInPage(cdp, 'gateway settings modal edits the port', async () => {
+  await check_in_page(cdp, check, 'gateway settings modal edits the port', async () => {
     const ready = await window.openGatewayModal();
     if (ready !== 'ok') return 'open=' + ready;
     const modal = document.querySelector('.modal');
@@ -442,7 +202,7 @@ try {
   });
 
   // --- gateway modal rejects an out-of-range port (validation path) ---
-  await checkInPage(cdp, 'gateway modal rejects an invalid port', async () => {
+  await check_in_page(cdp, check, 'gateway modal rejects an invalid port', async () => {
     const ready = await window.openGatewayModal();
     if (ready !== 'ok') return 'open=' + ready;
     const modal = document.querySelector('.modal');
@@ -467,7 +227,7 @@ try {
   // ---- EDGE-CASE 1: cc-switch import (Phase 22 button) ----
 // Mock returns a synthetic 1-provider payload (Phase 22u), so the UI
 // flashes a notice banner with the import report.
-await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
+await check_in_page(cdp, check, 'cc-switch import flashes a report', async () => {
   const btn = [...document.querySelectorAll('button')]
     .find(b => /cc-switch/i.test(b.textContent));
   if (!btn) return 'no-button';
@@ -485,7 +245,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
 
   // ---- EDGE-CASE 2: proxy restart button (RouteEditor) ----
   // "重启代理以生效" / "Restart proxy to apply" — should stop + start.
-  await checkInPage(cdp, 'proxy restart button round-trips', async () => {
+  await check_in_page(cdp, check, 'proxy restart button round-trips', async () => {
     const btn = document.querySelector('[data-testid="route-restart"]');
     if (!btn) return 'no-restart-btn';
     const label = btn.textContent.trim();
@@ -501,7 +261,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
   });
 
   // ---- EDGE-CASE 3: route add (prompt for new alias) ----
-  await checkInPage(cdp, 'route add inserts a new card', async () => {
+  await check_in_page(cdp, check, 'route add inserts a new card', async () => {
     try {
       const uniq = 'smoke-route-' + Date.now();
       window.prompt = () => uniq;
@@ -520,7 +280,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
   });
 
   // ---- EDGE-CASE 4: hop add / remove on the freshly-created route ----
-  await checkInPage(cdp, 'route hop add then remove', async () => {
+  await check_in_page(cdp, check, 'route hop add then remove', async () => {
     const alias = [...document.querySelectorAll('.route-card-title strong')]
       .map(s => s.textContent.trim())
       .find(a => a.startsWith('smoke-route-'));
@@ -548,7 +308,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
 
   // ---- EDGE-CASE 5: provider add / edit / delete (proxy provider modal) ----
   // Use the upstream list "+ Add upstream" button (header-actions).
-  await checkInPage(cdp, 'proxy provider add/edit/delete', async () => {
+  await check_in_page(cdp, check, 'proxy provider add/edit/delete', async () => {
     const addBtn = [...document.querySelectorAll('button')]
       .find(b => b.textContent.includes('Add upstream') || b.textContent.includes('添加上游'));
     if (!addBtn) return 'no-add-upstream-btn';
@@ -632,7 +392,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
   // Headless Chromium denies clipboard writes by default — the icon-button
   // should still render and the "✓" feedback should NOT appear (silently
   // fails). Verify the buttons exist; the no-op failure is acceptable.
-  await checkInPage(cdp, 'gateway panel exposes copy buttons', async () => {
+  await check_in_page(cdp, check, 'gateway panel exposes copy buttons', async () => {
     const all = [...document.querySelectorAll('.endpoint-row button.icon-btn')];
     const labels = [...document.querySelectorAll('.endpoint-row')]
       .map(r => r.querySelector('.endpoint-label')?.textContent ?? '');
@@ -645,7 +405,7 @@ await checkInPage(cdp, 'cc-switch import flashes a report', async () => {
   // ---- EDGE-CASE 7: tab persistence — switch to Codex and back, ----
 // Claude's route set must round-trip identically; Codex tab must only
 // show codex-prefixed aliases.
-await checkInPage(cdp, 'tab switch preserves Claude routes', async () => {
+await check_in_page(cdp, check, 'tab switch preserves Claude routes', async () => {
   const claudeBtn = [...document.querySelectorAll('.app-switcher button')]
     .find(b => b.textContent.trim() === 'Claude');
   claudeBtn?.click();
@@ -654,7 +414,7 @@ await checkInPage(cdp, 'tab switch preserves Claude routes', async () => {
     .map(s => s.textContent.trim()).sort();
   return { ok: aliasesBefore.length > 0, before: aliasesBefore };
 });
-await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => {
+await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', async () => {
   const codexBtn = [...document.querySelectorAll('.app-switcher button')]
     .find(b => b.textContent.trim() === 'Codex');
   codexBtn?.click();
@@ -666,9 +426,9 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
 });
 
   // ---- EDGE-CASE 8: Codex page renders all four routes ----
-  await cdp.evalValue("[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
+  await cdp.eval_value("[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
   await sleep(1500);
-  const codexRoutes = await cdp.evalValue(`[...document.querySelectorAll('.route-card-title strong')]
+  const codexRoutes = await cdp.eval_value(`[...document.querySelectorAll('.route-card-title strong')]
     .map(s => s.textContent.trim())
     .filter(a => a.startsWith('codex-'))
     .sort()`);
@@ -680,22 +440,22 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
   );
 
   // ---- EDGE-CASE 9: Codex page renders the upstream provider list ----
-  await checkInPage(cdp, 'Codex page renders provider list rows', async () => {
+  await check_in_page(cdp, check, 'Codex page renders provider list rows', async () => {
     const list = document.querySelector('.provider-list');
     const rows = list ? list.querySelectorAll('.provider-row').length : 0;
     return { ok: rows > 0, count: rows };
   });
 
   // --- tab switch to Codex ---
-  await cdp.evalValue("[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
+  await cdp.eval_value("[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
   await sleep(1500);
-  const codexText = (await cdp.evalValue('document.body.innerText')) ?? '';
+  const codexText = (await cdp.eval_value('document.body.innerText')) ?? '';
   check('Codex tab renders mirror row', codexText.includes('~/.codex-cli'));
 
   // --- Codex mirror row error chip (Phase 23f) ---
   // Force codex_cli_status to reject; the mirror row should render a
   // ⚠ chip with the failure in its title attribute.
-  const mirrorArm = await cdp.evalValue(`(() => {
+  const mirrorArm = await cdp.eval_value(`(() => {
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__._realInvoke = window.__TAURI_INTERNALS__.invoke;
     const real = window.__TAURI_INTERNALS__.invoke;
@@ -707,11 +467,11 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
   })()`);
   check('Codex mirror error override armed', mirrorArm === 'armed', String(mirrorArm));
   // Switch Claude <-> Codex to force AppPage's mount-time fetch.
-  await cdp.evalValue(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click(); 1`);
+  await cdp.eval_value(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click(); 1`);
   await sleep(800);
-  await cdp.evalValue(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1`);
+  await cdp.eval_value(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1`);
   await sleep(1500);
-  await checkInPage(cdp, 'Codex mirror row shows error chip on fetch failure', async () => {
+  await check_in_page(cdp, check, 'Codex mirror row shows error chip on fetch failure', async () => {
     const chip = document.querySelector('[data-testid="codex-mirror-error"]');
     if (!chip) return 'no-chip';
     const title = chip.getAttribute('title') || '';
@@ -720,7 +480,7 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
       : 'chip-without-expected-title: ' + title.slice(0, 80);
   });
   // Restore the real invoke so subsequent checks aren't affected.
-  await cdp.evalValue(`(() => {
+  await cdp.eval_value(`(() => {
     const real = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__._realInvoke;
     if (real) window.__TAURI_INTERNALS__.invoke = real;
     return 'restored';
@@ -736,7 +496,7 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
 // row is the smoking gun). The button text changes after a toggle, but
 // the surrounding re-render makes the round-trip a flaky target — we
 // only assert the card is present and reachable.
-  await checkInPage(cdp, 'Codex page exposes ProviderChain card', async () => {
+  await check_in_page(cdp, check, 'Codex page exposes ProviderChain card', async () => {
     const rows = [...document.querySelectorAll('.provider-row')];
     const chainRow = rows.find(r => [...r.querySelectorAll('button')]
       .some(b => /^\s*[+−]\s*chain\s*$/.test(b.textContent.trim())
@@ -747,7 +507,7 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
   });
 
   // Codex route hop add + remove round-trip.
-  await checkInPage(cdp, 'Codex route hop add then remove', async () => {
+  await check_in_page(cdp, check, 'Codex route hop add then remove', async () => {
     const addHopBtn = [...document.querySelectorAll('.route-card-actions button')]
       .find(b => b.textContent.includes('添加跳转') || b.textContent.includes('Add Hop'));
     if (!addHopBtn) return 'no-add-hop-btn';
@@ -767,7 +527,7 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
 
   // Codex page exposes the gateway panel — make sure the running pill
   // carries over (the gateway should we set started on Claude persists).
-  await checkInPage(cdp, 'Codex page shows gateway status inherited from Claude', async () => {
+  await check_in_page(cdp, check, 'Codex page shows gateway status inherited from Claude', async () => {
     const text = document.body.innerText;
     return text.includes('● 运行中') || text.includes('● running') ? 'ok' : 'no-running-pill';
   });
@@ -776,23 +536,24 @@ await checkInPage(cdp, 'Codex tab filters routes to codex- prefix', async () => 
   const exc = [...cdp.exceptions];
   check('zero uncaught exceptions', exc.length === 0, exc[0]?.slice(0, 200));
 
-  await cdp.evalValue('1').catch(() => {});
+  await cdp.eval_value('1').catch(() => {});
 } catch (e) {
   failed = true;
   fail(e.message ?? String(e));
 } finally {
-  if (!keep) {
-    if (browserProc) browserProc.kill();
-    if (viteProc) viteProc.kill();
-    // Give Windows a beat to release the ports before the process exits.
-    await sleep(500);
-  } else {
-    log('[smoke] --keep: leaving vite + browser running.');
+  if (smoke_runtime && (!keep || failed)) {
+    try {
+      await smoke_runtime.close();
+      log('[smoke] owned runtime closed and profile removed.');
+    } catch (error) {
+      failed = true;
+      fail('runtime cleanup: ' + (error.message ?? String(error)));
+    }
+  } else if (keep) {
+    log('[smoke] --keep: browser and Vite remain running until this process stops.');
   }
 }
 
-if (failed) {
-  process.exit(1);
-}
-log('[smoke] all checks passed.');
-process.exit(0);
+if (failed) process.exit(1);
+log('[smoke] ' + passed_count + '/' + check_count + ' checks passed.');
+if (!keep) process.exit(0);

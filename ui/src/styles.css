@@ -131,12 +131,12 @@ pre {
   position: sticky;
   top: 0;
   z-index: 50;
-  height: 64px;
+  min-height: 64px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 24px;
+  padding: 0 max(24px, calc((100vw - var(--page-max)) / 2));
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
 }
@@ -168,6 +168,47 @@ pre {
   background: var(--bg-elevated-2);
   border: 1px solid var(--border);
   border-radius: 10px;
+  min-width: 0;
+}
+
+.aag-logo img {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.release_badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.release_version {
+  color: var(--fg-muted);
+}
+
+.release_channel {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated-2);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.release_channel[data-channel="demo"] {
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.release_channel[data-channel="development"] {
+  color: var(--warn);
+}
+
+.release_channel[data-channel="release"] {
+  color: var(--success);
 }
 
 .app-switcher button {
@@ -208,6 +249,7 @@ pre {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .theme-btn,
@@ -273,6 +315,11 @@ pre {
 }
 .gw-status.degraded .gw-status-dot {
   box-shadow: 0 0 6px var(--warn);
+}
+.gw-status.unknown {
+  color: var(--warn-text);
+  border-color: var(--border-strong);
+  background: var(--warn-bg);
 }
 .gw-status.stopped {
   color: var(--fg-muted);
@@ -552,11 +599,30 @@ pre {
 
 .endpoint-value {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   color: var(--fg-code);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.secret_value {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.secret_value .endpoint-value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.secret_toggle {
+  flex-shrink: 0;
 }
 
 /* ----- Failover chain editor (Claude page) -----
@@ -1282,19 +1348,30 @@ pre {
  * the input itself) for the column to actually keep its width. */
 .hop-table {
   width: 100%;
+  min-width: 620px;
   border-collapse: separate;
   border-spacing: 0;
-  table-layout: auto;
+  table-layout: fixed;
   font-size: 12.5px;
 }
-.hop-table col.hop-col-idx     { width: 32px; }
-.hop-table col.hop-col-drag    { width: 28px; }
-.hop-table col.hop-col-provider{ width: 32%; }
-.hop-table col.hop-col-remove  { width: 32px; }
-.hop-provider-cell,
-.hop-model-cell {
-  min-width: 160px; /* column floor — <col> min-width is ignored in auto layout */
-  width: 34%;      /* claim a real share of the table */
+.hop_table_wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.hop-table col.hop-col-idx { width: 40px; }
+.hop-table col.hop-col-drag { width: 40px; }
+.hop-table col.hop-col-provider { width: 42%; }
+.hop-table col.hop-col-model { width: auto; }
+.hop-table col.hop-col-remove { width: 44px; }
+.hop-table .hop-row {
+  display: table-row;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: inherit;
+  cursor: default;
 }
 .hop-table thead th {
   font-size: 11px;
@@ -1362,7 +1439,7 @@ pre {
   font-size: 12px;
   padding: 5px 8px;
   width: 100%;
-  min-width: 120px; /* keep the select/input clickable even in squeezed tables */
+  min-width: 0;
 }
 .hop-remove-cell {
   text-align: center;
@@ -1380,15 +1457,13 @@ pre {
   display: flex;
   align-items: stretch;
   width: 100%;
-  /* Floor width so the td's auto-layout min-content contribution keeps
-   * the column open even before any value is typed. */
-  min-width: 140px;
+  min-width: 0;
 }
 .model-suggest .input {
   font-size: 12px;
   padding: 5px 6px 5px 8px;
   flex: 1 1 auto;
-  min-width: 80px;
+  min-width: 0;
   border-radius: var(--radius-sm) 0 0 var(--radius-sm);
 }
 .model-suggest-toggle {
@@ -1467,6 +1542,76 @@ pre {
   padding: 24px;
   color: var(--danger);
   white-space: pre-wrap;
+}
+
+@media (max-width: 1100px) {
+  .aag-header {
+    padding: 10px 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .aag-brand {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .aag-brand .aag-sub {
+    display: none;
+  }
+
+  .release_version {
+    display: none;
+  }
+
+  .app-switcher {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .app-switcher button {
+    flex: 0 0 auto;
+  }
+
+  .route-toolbar {
+    position: static;
+  }
+
+  .route-card-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .route-card-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 520px) {
+  .aag-main {
+    padding: 16px 16px 36px;
+  }
+
+  .aag-header {
+    gap: 8px;
+  }
+
+  .header-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .route-toolbar-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .route-card {
+    padding: 10px;
+  }
 }
 
 /* ----- About (fallback view) ----- */

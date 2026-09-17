@@ -2,6 +2,13 @@
 
 Unified **Gateway Proxy** + **Config Switcher** for AI Coding Agents
 
+The current desktop distribution is **v0.2.0 Preview**. Start with the
+[release notes](docs/releases/v0_2_0.md), [build and platform guide](docs/desktop_release.md),
+and [current progress](PROGRESS.md). The Windows preview is unsigned; native
+acceptance on other operating systems and automatic updates are not complete.
+The feature descriptions below also include the retained Node CLI and historical
+migration scope; they are not a platform certification checklist.
+
 A comprehensive solution inspired by `cc-switch` capabilities, with broader agent support and enhanced proxy infrastructure. Supports Copilot, Kilo, Cursor, Zcode, MiniMax, Kimi agents while providing a local OpenAI & Anthropic compatible proxy with **circuit-breaker auto-failover** mechanism.
 
 > **Desktop app (primary):** AAG is now a **Tauri 2 desktop app** (`src-tauri/` +
@@ -64,11 +71,16 @@ A comprehensive solution inspired by `cc-switch` capabilities, with broader agen
 ### Desktop app (primary)
 
 ```bash
-cd ui && npm install        # install React deps
-cd src-tauri && cargo check # Rust typecheck (build ui/dist first if needed)
-npm run tauri:dev           # from repo root: dev window
-npm run tauri:build         # from repo root: production installer (.msi/.dmg/.deb/...)
+npm install
+npm run ui:install
+npm run ui:build
+npm run desktop:dev
 ```
+
+Run all commands above from the repository root. `npm run ui:demo` opens the
+browser UI from source, and `npm run ui:preview` rebuilds and serves the browser
+demo bundle. `npm run desktop:build` rebuilds the native UI and creates bundles
+for the host OS. The root `npm run dev` still launches the legacy Node TUI.
 
 Data lives in `~/.aag/aag.db` (SQLite). Override locations with
 `AAG_CONFIG_DIR` (app data + DB) and `AAG_HOME_DIR` (agent config paths) for

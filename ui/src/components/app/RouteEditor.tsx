@@ -1,28 +1,9 @@
 import { memo } from 'react';
 import { useT } from '../../lib/ctx';
 import { ModelSuggest } from '../ModelSuggest';
-import { useRoutesActions, useRoutesData } from './state';
+import { useRoutesActions, useRoutesData } from './routes_state.js';
 import type { Route, RouteHop } from '../../lib/api/proxy';
 
-/** Failover route editor card. Consumes `useRoutesData()` for the
- *  user-actionable state and `useRoutesActions()` for handlers; the
- *  AppPage owns both provider values (data + actions are memoized
- *  separately — see Phase 23c).
- *
- *  Internally split into three memoized subcomponents:
- *    - <Toolbar>      depends only on data + actions for buttons
- *    - <RouteCard>    depends on a single route + the small shared
- *                       action subset it needs; rerenders only when
- *                       its own route reference, drag status, or
- *                       selection state changes
- *    - <HopRow>      depends on a single hop + drag status + per-hop
- *                       handler closures; rerenders only when its
- *                       own hop / drag status changes
- *
- *  Layout: sticky toolbar -> per-route `.route-card` -> hop `<table>`
- *  with pointer-based drag-reorder (handle column only, so
- *  <select>/<input> children don't swallow the pointerdown).
- */
 export function RouteEditor() {
   const t = useT();
   return (
@@ -34,9 +15,6 @@ export function RouteEditor() {
   );
 }
 
-/** Top sticky toolbar: depends on actions for the button handlers
- *  and only a few data fields (selected count, dirty flag, gateway
- *  status). Most route edits don't touch any of these. */
 function ToolbarImpl() {
   const t = useT();
   const a = useRoutesActions();
@@ -93,8 +71,6 @@ function ToolbarImpl() {
 }
 const Toolbar = memo(ToolbarImpl);
 
-/** Route list shell + empty state. The list iterates routes; each card
- *  is its own memoized subtree. */
 function RouteListImpl() {
   const t = useT();
   const d = useRoutesData();
@@ -111,13 +87,6 @@ function RouteListImpl() {
 }
 const RouteList = memo(RouteListImpl);
 
-/** A single route card. Re-renders only when:
- *    - `route` reference changes (its hops were edited or it was added)
- *    - its selection state toggles
- *    - its collapse state toggles
- *  Drag state (`routeOverIdx` / `pointerDrag`) is split: each
- *  <HopRow> checks the drag status for its own index directly, so
- *  unrelated hops don't re-render during a drag tick. */
 function RouteCardImpl({ route }: { route: Route }) {
   const t = useT();
   const a = useRoutesActions();
@@ -183,34 +152,36 @@ function RouteCardImpl({ route }: { route: Route }) {
           {route.hops.length === 0 ? (
             <p className="muted small route-no-hops">{t('route.noHops')}</p>
           ) : (
-            <table className="hop-table">
-              <colgroup>
-                <col className="hop-col-idx" />
-                <col className="hop-col-drag" />
-                <col className="hop-col-provider" />
-                <col className="hop-col-model" />
-                <col className="hop-col-remove" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th />
-                  <th>{t('route.hopProvider')}</th>
-                  <th>{t('route.hopModel')}</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {route.hops.map((hop, i) => (
-                  <HopRow
-                    key={i}
-                    route={route}
-                    hop={hop}
-                    index={i}
-                  />
-                ))}
-              </tbody>
-            </table>
+            <div className="hop_table_wrap">
+              <table className="hop-table">
+                <colgroup>
+                  <col className="hop-col-idx" />
+                  <col className="hop-col-drag" />
+                  <col className="hop-col-provider" />
+                  <col className="hop-col-model" />
+                  <col className="hop-col-remove" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th />
+                    <th>{t('route.hopProvider')}</th>
+                    <th>{t('route.hopModel')}</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {route.hops.map((hop, i) => (
+                    <HopRow
+                      key={i}
+                      route={route}
+                      hop={hop}
+                      index={i}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}
@@ -219,9 +190,6 @@ function RouteCardImpl({ route }: { route: Route }) {
 }
 const RouteCard = memo(RouteCardImpl);
 
-/** A single hop row. Each row subscribes only to its own index's
- *  drag status (read directly off `routeOverIdx` / `pointerDrag`),
- *  so a drag tick that lights up row 3 doesn't re-render row 0–9. */
 function HopRowImpl({
   route,
   hop,

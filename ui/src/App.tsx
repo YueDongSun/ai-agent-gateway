@@ -5,7 +5,10 @@ import { I18nCtx, useCtx } from './lib/ctx';
 import { useI18n } from './i18n/index';
 import { useTheme } from './lib/theme';
 import { APP_PAGE_ORDER, APP_PAGES } from './lib/appPages';
-import { getGatewayHealth } from './lib/api/proxy';
+import { use_gateway_status } from './hooks/use_gateway_status.js';
+import { app_version, build_channel } from './lib/build_info.js';
+import { isDemo } from './lib/mock/backend.js';
+import { Release_badge } from './components/release_badge.js';
 import { BrandLogo, ClaudeIcon, CodexIcon, CopilotIcon, SunIcon, MoonIcon } from './components/Icons';
 import type { AppType } from './lib/api/types';
 
@@ -13,6 +16,8 @@ interface AppInfo {
   name: string;
   version: string;
   phase: string;
+  platform?: string;
+  architecture?: string;
 }
 
 /** App-level icon picker for the AppSwitcher. Hidden apps (e.g. `pi`) get
@@ -41,35 +46,13 @@ function AppInner() {
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateEndpoint, setUpdateEndpoint] = useState('');
-  /** Round 1: global proxy status pill. Independent of the current app
-   * tab — polled from the App shell so the pill stays mounted across tab
-   * switches. 5 s interval is cheap (single fetch + parse). */
-  const [gatewayStatus, setGatewayStatus] = useState<'stopped' | 'running' | 'degraded'>('stopped');
+  const { gateway_status, refresh_gateway_status } = use_gateway_status();
+  const release_channel = isDemo ? 'demo' : build_channel === 'demo' ? 'development' : build_channel;
 
   useEffect(() => {
     invoke<AppInfo>('app_info')
       .then(setInfo)
       .catch((e) => setError(String(e)));
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const health = await getGatewayHealth();
-        if (!alive) return;
-        const openCount = health.providers.filter((p) => p.breaker?.state === 'open').length;
-        setGatewayStatus(openCount > 0 ? 'degraded' : 'running');
-      } catch {
-        if (alive) setGatewayStatus('stopped');
-      }
-    };
-    void tick();
-    const id = setInterval(tick, 5000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
   }, []);
 
   const handleCheckUpdate = async () => {
@@ -109,13 +92,15 @@ function AppInner() {
   }
 
   const gwLabel =
-    gatewayStatus === 'running'  ? 'GATEWAY RUNNING'  :
-    gatewayStatus === 'degraded' ? 'GATEWAY DEGRADED' :
-                                   'GATEWAY STOPPED';
+    gateway_status === 'running'  ? t('header.gateway_running') :
+    gateway_status === 'degraded' ? t('header.gateway_degraded') :
+    gateway_status === 'stopped'  ? t('header.gateway_stopped') :
+                                    t('header.gateway_unknown');
   const gwTitle =
-    gatewayStatus === 'running'  ? 'Gateway running' :
-    gatewayStatus === 'degraded' ? 'Gateway running, but at least one provider circuit is open' :
-                                   'Gateway stopped (start it on the page below)';
+    gateway_status === 'running'  ? t('header.gateway_running_description') :
+    gateway_status === 'degraded' ? t('header.gateway_degraded_description') :
+    gateway_status === 'stopped'  ? t('header.gateway_stopped_description') :
+                                    t('header.gateway_unknown_description');
 
   return (
     <div className="aag-root">
@@ -125,11 +110,14 @@ function AppInner() {
             <BrandLogo />
           </span>
           <h1>{info?.name ?? t('app.brand')}</h1>
-          {info && (
-            <span className="aag-sub">
-              {t('app.subtitle', { version: info.version, phase: info.phase })}
-            </span>
-          )}
+          <Release_badge
+            version={app_version}
+            channel={release_channel}
+            label={t(`release.channel_${release_channel}`)}
+            description={t(`release.description_${release_channel}`)}
+            platform={info?.platform}
+            architecture={info?.architecture}
+          />
         </div>
         <nav className="app-switcher" aria-label="App switcher">
           {APP_PAGE_ORDER.map((at) => {
@@ -147,13 +135,12 @@ function AppInner() {
           })}
         </nav>
         <div className="header-controls">
-          {/* Round 1: live proxy status pill — single source of truth for
-           * "is the gateway alive?". Polled every 5 s by the App shell. */}
           <span
-            className={`gw-status ${gatewayStatus}`}
+            className={`gw-status ${gateway_status}`}
             title={gwTitle}
             role="status"
             aria-live="polite"
+            data-testid="gateway_status"
           >
             <span className="gw-status-dot" />
             {gwLabel}
@@ -180,7 +167,7 @@ function AppInner() {
       <main className="aag-main">
         <Suspense fallback={<section className="page-loading" aria-live="polite">{t('common.loading')}</section>}>
           {APP_PAGE_ORDER.includes(view) ? (
-            <AppPage appType={view} />
+            <AppPage appType={view} on_gateway_status_refresh={refresh_gateway_status} />
           ) : (
             <section>
               <h2>{info?.name ?? t('app.brand')}</h2>

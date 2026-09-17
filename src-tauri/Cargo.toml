@@ -1,7 +1,7 @@
 [package]
 name = "ai-agent-gateway"
 version = "0.2.0"
-description = "AI Agent Gateway — Tauri desktop shell (Phase 0 skeleton)"
+description = "Unified local gateway and configuration switcher for AI coding agents"
 authors = ["Yuedong Sun"]
 license = "MIT"
 edition = "2021"

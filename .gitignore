@@ -6,6 +6,7 @@ yarn.lock
 
 # Build outputs
 dist/
+ui/dist_demo/
 target/
 build/
 out/

@@ -1,5 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { build_settings } from './vite_build_config.mjs';
+
+const tauri_config = JSON.parse(
+  readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src-tauri/tauri.conf.json'), 'utf8'),
+) as { version: string };
 
 /// Dev-only request logger: prints every HTTP request Vite serves, so
 /// `tauri:dev` output shows whether the Tauri webview actually fetched the
@@ -33,23 +41,36 @@ function requestLogger(): Plugin {
 //
 // Tauri-side: `tauri.conf.json` reads `devUrl` from the env-rewritten config
 // below; see the post-build step in package.json for the port-discovery flow.
-const preferred = Number(process.env.AAG_DEV_PORT) || 1421;
-const strict = process.env.AAG_DEV_STRICT_PORT === '1';
+const preferred_port = Number(process.env.AAG_DEV_PORT) || 1421;
+const strict_port = process.env.AAG_DEV_STRICT_PORT === '1';
 
-export default defineConfig({
-  plugins: [react(), requestLogger()],
-  clearScreen: false,
-  server: {
-    port: preferred,
-    strictPort: strict,
-    host: process.env.TAURI_DEV_HOST || false,
-    hmr: process.env.TAURI_DEV_HOST
-      ? {
-          protocol: 'ws',
-          host: process.env.TAURI_DEV_HOST,
-          port: preferred + 1,
-        }
-      : undefined,
-    watch: { ignored: ['**/src-tauri/**'] },
-  },
+export default defineConfig(({ command, mode }) => {
+  const { build_channel, is_demo_build, out_dir } = build_settings(command, mode);
+
+  return {
+    plugins: [react(), requestLogger()],
+    clearScreen: false,
+    define: {
+      __AAG_APP_VERSION__: JSON.stringify(tauri_config.version),
+      __AAG_BUILD_CHANNEL__: JSON.stringify(build_channel),
+      __AAG_DEMO_BUILD__: JSON.stringify(is_demo_build),
+    },
+    build: {
+      outDir: out_dir,
+      emptyOutDir: true,
+    },
+    server: {
+      port: preferred_port,
+      strictPort: strict_port,
+      host: process.env.TAURI_DEV_HOST || false,
+      hmr: process.env.TAURI_DEV_HOST
+        ? {
+            protocol: 'ws',
+            host: process.env.TAURI_DEV_HOST,
+            port: preferred_port + 1,
+          }
+        : undefined,
+      watch: { ignored: ['**/src-tauri/**'] },
+    },
+  };
 });

@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { useT } from '../../lib/ctx';
 import type { ProxyProvider } from '../../lib/api/proxy';
-import { useProxyPoolActions, useProxyPoolData } from './state';
+import { useProxyPoolActions, useProxyPoolData } from './proxy_pool_state.js';
 
 interface UpstreamListProps {
   onAdd: () => void;
@@ -10,11 +10,7 @@ interface UpstreamListProps {
 }
 
 /** Editable upstream provider list card (full page width). Shows breaker
- * dots, pin tags, enable toggles, and model-mapping chips per row.
- * Data from `useProxyPoolData()`; the enable toggle comes from
- * `useProxyPoolActions()` inside each memoized row (Phase 23e/23h split)
- * so a single row's state change doesn't re-render the list. Only the
- * three CRUD callbacks come from AppPage. */
+ * dots, pin tags, enable toggles, and model-mapping chips per row. */
 export const UpstreamList = memo(function UpstreamList({
   onAdd,
   onEdit,
@@ -54,9 +50,6 @@ export const UpstreamList = memo(function UpstreamList({
   );
 });
 
-/** A single upstream row. Memoized: an optimistic enable-flip (local
- *  state patch keeps other rows' provider references stable) or a
- *  breaker transition only re-renders the affected row. */
 const ProviderRow = memo(function ProviderRow({
   provider: pp,
   isPinned,

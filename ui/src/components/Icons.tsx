@@ -94,15 +94,15 @@ export function TestIcon(props: IconProps = {}) {
 /// Sized for the 24-28px header brand area.
 export function BrandLogo(props: IconProps = {}) {
   return (
-    <svg
-      {...svgProps(props)}
-      viewBox="0 0 22 22"
-      strokeWidth={1.9}
-    >
-      <path d="M3 18 L8.5 4 L11 4 L16.5 18" />
-      <path d="M5.2 14 L14.3 14" />
-      <circle cx="11" cy="18" r="0.8" fill="currentColor" stroke="none" />
-    </svg>
+    <img
+      src="/app_icon.svg"
+      className={props.className}
+      style={props.style}
+      width={28}
+      height={28}
+      alt={props.title ?? ''}
+      aria-hidden={props.title ? undefined : true}
+    />
   );
 }
 

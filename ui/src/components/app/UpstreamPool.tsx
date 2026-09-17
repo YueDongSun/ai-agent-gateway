@@ -1,20 +1,14 @@
 import { memo } from 'react';
 import { useT } from '../../lib/ctx';
 import { TestIcon } from '../Icons';
-import { useProxyPoolActions, useProxyPoolData } from './state';
+import { useProxyPoolActions, useProxyPoolData } from './proxy_pool_state.js';
 
 interface UpstreamPoolProps {
   onRefresh: () => void;
   onAddProvider: () => void;
 }
 
-/** Upstream pool card with the failover-flow visualization. Consumes
- * `useProxyPoolData()` for providers / breaker / test results and
- * `useProxyPoolActions()` for the handlers (Phase 23e split - the
- * action identities are stable, so this card re-renders only when the
- * data slice changes); receives only two callbacks (refresh + add)
- * from AppPage. Memoized: the tree siblings under the same providers
- * don't re-render when only this card's data changes. */
+/** Upstream pool card with the failover-flow visualization. */
 export const UpstreamPool = memo(function UpstreamPool({
   onRefresh,
   onAddProvider,

@@ -1,5 +1,6 @@
 import { useT } from '../../lib/ctx';
 import { CopyIcon } from '../Icons';
+import { Secret_value } from '../secret_value.js';
 import type { AppPageConfig } from '../../lib/appPages';
 import type { CodexCliStatus } from '../../lib/api/codexCli';
 
@@ -96,10 +97,20 @@ export function GatewayPanel({
       </div>
       <div className="endpoint-row">
         <span className="endpoint-label">{t('app.gateway.apiKey')}</span>
-        <code className="endpoint-value">{authToken || t('app.gateway.noKey')}</code>
+        <Secret_value
+          key={cfg.label}
+          value={authToken}
+          empty_label={t('app.gateway.noKey')}
+          hidden_label={t('app.gateway.hidden_key')}
+          show_label={t('app.gateway.show_key')}
+          hide_label={t('app.gateway.hide_key')}
+          test_id="gateway_key"
+        />
         <button
           className="btn icon-btn"
           onClick={() => onCopy(authToken, 'key')}
+          disabled={!authToken}
+          data-testid="gateway_key_copy"
           title={t('app.gateway.copy')}
           data-tooltip={t('app.gateway.copy')}
           aria-label={t('app.gateway.copy')}

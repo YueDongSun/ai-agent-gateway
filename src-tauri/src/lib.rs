@@ -30,6 +30,8 @@ struct AppInfo {
     name: &'static str,
     version: &'static str,
     phase: &'static str,
+    platform: &'static str,
+    architecture: &'static str,
 }
 
 #[tauri::command]
@@ -38,6 +40,8 @@ fn app_info() -> AppInfo {
         name: "AI Agent Gateway",
         version: env!("CARGO_PKG_VERSION"),
         phase: "2 - proxy + failover",
+        platform: std::env::consts::OS,
+        architecture: std::env::consts::ARCH,
     }
 }
 
@@ -111,6 +115,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(db)
         .manage(Mutex::new(None::<commands::proxy::RunningProxy>))
+        .manage(tray::Tray_availability::default())
         .invoke_handler(tauri::generate_handler![
             app_info, app_check_update,
             commands::provider::provider_list, commands::provider::provider_current,
@@ -167,9 +172,33 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let tray_available = window
+                    .app_handle()
+                    .state::<tray::Tray_availability>()
+                    .is_available();
+                if tray::should_hide_on_close(window.label(), tray_available) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         });
 
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod app_info_tests {
+    use super::app_info;
+
+    #[test]
+    fn app_info_reports_build_platform_and_architecture() {
+        let info = app_info();
+        assert_eq!(info.platform, std::env::consts::OS);
+        assert_eq!(info.architecture, std::env::consts::ARCH);
+    }
 }

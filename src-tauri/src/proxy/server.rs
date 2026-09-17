@@ -562,24 +562,33 @@ mod tests {
 
     #[tokio::test]
     async fn serve_returns_actual_bound_port() {
-        // Bind port 0 and let the kernel assign the port atomically -
-        // no free_port() race window at all (23h). The test's job is to
-        // prove serve() reports the ACTUAL bound port back.
-        let state = make_state().await;
+        let mut state = make_state().await;
+        state.db = Some(crate::database::Database::memory().expect("memory db"));
         let (tx, rx) = oneshot::channel();
-        let addr = socket_addr("127.0.0.1", 0);
-        // Spawn serve.
-        let handle = tokio::spawn(async move { serve(addr, state, rx).await });
-        // The handle resolves to the BoundInfo only at shutdown; to
-        // learn the port while running, probe via the returned bound
-        // info after a graceful stop is too late for the /health check.
-        // Instead: stop first, then assert the port is valid and was
-        // actually serving by connecting once before shutdown.
+        let (bound, handle) = serve_detached(socket_addr("127.0.0.1", 0), state, rx)
+            .await
+            .expect("bind server");
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(500))
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("build client");
+        let health_result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.get(format!("http://{}/health", bound.addr)).send(),
+        )
+        .await;
         let _ = tx.send(());
-        let bound = handle.await.expect("task").expect("serve ok");
+        let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            matches!(shutdown_result, Ok(Ok(Ok(())))),
+            "server did not shut down cleanly: {shutdown_result:?}"
+        );
+        let response = health_result
+            .expect("health request timed out")
+            .expect("health request failed");
+        assert!(response.status().is_success());
         assert!(bound.addr.port() > 0, "kernel-assigned port must be non-zero");
-        // Server is shut down now; the port number itself is the
-        // contract under test (proxy_start persists it as the default).
         assert_eq!(bound.addr.ip().to_string(), "127.0.0.1");
     }
 
@@ -653,4 +662,3 @@ mod tests {
         assert!(bound.addr.port() <= base + 5);
     }
 }
-

@@ -168,21 +168,21 @@ export async function fetchProviderModels(providerId: string): Promise<Array<{ i
 
 export async function fetchProxyHealth(
   config: ProxyConfig,
+  signal?: AbortSignal,
 ): Promise<ProxyHealth> {
   const headers: Record<string, string> = {};
   if (config.authToken) headers['authorization'] = `Bearer ${config.authToken}`;
   const res = await fetch(`http://${config.host}:${config.port}/health`, {
     headers,
+    signal,
   });
+  if (!res.ok) throw new Error(`Gateway health request failed (${res.status})`);
   return (await res.json()) as ProxyHealth;
 }
 
-/// Round 1: convenience for the App-level status pill. Resolves the proxy
-/// config and calls `/health` in one go. Throws on any failure so the
-/// caller can default to a "stopped" pill state.
-export async function getGatewayHealth(): Promise<ProxyHealth> {
+export async function getGatewayHealth(signal?: AbortSignal): Promise<ProxyHealth> {
   const cfg = await getProxyConfig();
-  return fetchProxyHealth(cfg);
+  return fetchProxyHealth(cfg, signal);
 }
 
 // Refactor cleanup: `fetchProxyModels` (direct /v1/models HTTP fetch) was

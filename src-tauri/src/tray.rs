@@ -8,6 +8,7 @@
 //! Reference: cc-switch `src-tauri/src/tray.rs:595` (`create_tray_menu`)
 //! and `src-tauri/src/tray.rs:894` (`handle_tray_menu_event`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
@@ -16,6 +17,26 @@ use tauri::{AppHandle, Manager, Runtime};
 pub const MENU_SHOW: &str = "aag_tray_show";
 pub const MENU_HIDE: &str = "aag_tray_hide";
 pub const MENU_QUIT: &str = "aag_tray_quit";
+
+#[derive(Default)]
+#[allow(non_camel_case_types)]
+pub struct Tray_availability {
+    available: AtomicBool,
+}
+
+impl Tray_availability {
+    pub fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
+
+    fn mark_available(&self) {
+        self.available.store(true, Ordering::Release);
+    }
+}
+
+pub fn should_hide_on_close(window_label: &str, tray_available: bool) -> bool {
+    tray_available && window_label == "main"
+}
 
 /// Build the fixed Show / Hide / Quit menu. Errors are logged and surface as
 /// AppError::Message upstream — but `build_tray` swallows them at runtime so
@@ -33,16 +54,19 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 /// with the same builder id on rebuild.
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_menu(app)?;
+    #[cfg(target_os = "macos")]
+    let icon = tauri::include_image!("./icons/tray_icon.png");
+    #[cfg(not(target_os = "macos"))]
     let icon = app
         .default_window_icon()
         .cloned()
         .ok_or_else(|| tauri::Error::AssetNotFound("default window icon".into()))?;
 
-    TrayIconBuilder::with_id("aag_tray")
+    let builder = TrayIconBuilder::with_id("aag_tray")
         .tooltip("AI Agent Gateway")
         .icon(icon)
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(false)
         .on_menu_event(|app, event: MenuEvent| {
             handle_menu_event(app, event);
         })
@@ -55,8 +79,11 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             {
                 show_main_window(tray.app_handle());
             }
-        })
-        .build(app)?;
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder.icon_as_template(true);
+    builder.build(app)?;
+    app.state::<Tray_availability>().mark_available();
     Ok(())
 }
 
@@ -84,5 +111,26 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_hide_on_close;
+
+    #[test]
+    fn close_hides_only_the_main_window_when_tray_is_available() {
+        assert!(should_hide_on_close("main", true));
+        assert!(!should_hide_on_close("main", false));
+        assert!(!should_hide_on_close("settings", true));
+    }
+
+    #[test]
+    fn embedded_tray_icon_is_a_visible_transparent_32px_image() {
+        let icon = tauri::include_image!("./icons/tray_icon.png");
+        assert_eq!(icon.width(), 32);
+        assert_eq!(icon.height(), 32);
+        assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0));
     }
 }

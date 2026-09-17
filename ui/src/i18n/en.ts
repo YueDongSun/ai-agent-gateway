@@ -5,6 +5,12 @@ export const en = {
   // App shell
   'app.brand': 'AI Agent Gateway',
   'app.subtitle': 'v{version} · {phase}',
+  'release.channel_demo': 'Demo',
+  'release.channel_development': 'Development',
+  'release.channel_release': 'Release',
+  'release.description_demo': 'Browser demo with synthetic data; no native agent configuration is connected.',
+  'release.description_development': 'Development build. Changes are not a signed release.',
+  'release.description_release': 'Production build. Signing and release acceptance are verified separately.',
   'app.footer': 'Local gateway with per-app failover · OpenAI Responses + Anthropic + Chat Completions',
   'app.error': 'Error: {message}',
   'app.update.placeholder': 'https://releases.example.com/aag/latest.json (optional)',
@@ -20,6 +26,9 @@ export const en = {
   'app.gateway.apiKey': 'API Key',
   'app.gateway.copy': 'Copy',
   'app.gateway.noKey': '(not set - proxy accepts any key)',
+  'app.gateway.show_key': 'Show key',
+  'app.gateway.hide_key': 'Hide key',
+  'app.gateway.hidden_key': 'API key hidden',
   'app.gateway.start': 'Start',
   'app.gateway.stop': 'Stop',
   'app.gateway.restarted': 'Gateway restarted — routes applied.',
@@ -166,6 +175,14 @@ export const en = {
   'header.theme.light': 'Light',
   'header.theme.dark': 'Dark',
   'header.lang.toggle': 'Language',
+  'header.gateway_running': 'GATEWAY RUNNING',
+  'header.gateway_stopped': 'GATEWAY STOPPED',
+  'header.gateway_degraded': 'GATEWAY DEGRADED',
+  'header.gateway_unknown': 'GATEWAY UNKNOWN',
+  'header.gateway_running_description': 'Gateway running',
+  'header.gateway_stopped_description': 'Gateway stopped (start it on the page below)',
+  'header.gateway_degraded_description': 'Gateway running, but at least one provider circuit is open or health is unavailable',
+  'header.gateway_unknown_description': 'Gateway status unavailable because the local application did not respond',
 } as const;
 
 export type MessageKey = keyof typeof en;

@@ -54,13 +54,15 @@ import { UpstreamPool } from './UpstreamPool';
 import {
   ProxyPoolActionsProvider,
   ProxyPoolDataProvider,
-  RoutesActionsProvider,
-  RoutesDataProvider,
   type ProxyPoolActionsState,
   type ProxyPoolDataState,
+} from './proxy_pool_state.js';
+import {
+  RoutesActionsProvider,
+  RoutesDataProvider,
   type RoutesActionsState,
   type RoutesDataState,
-} from './state';
+} from './routes_state.js';
 import { RouteEditor } from './RouteEditor';
 
 interface FormState {
@@ -86,7 +88,12 @@ function emptyForm(cfg: AppPageConfig, gatewayUrl: string): FormState {
  * slots add the cc-switch endpoint card (Claude), the gateway card, and the
  * Codex launchers.
  */
-export function AppPage({ appType }: { appType: AppType }) {
+interface App_page_props {
+  appType: AppType;
+  on_gateway_status_refresh?: () => Promise<void>;
+}
+
+export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) {
   const t = useT();
   const cfg = APP_PAGES[appType];
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -202,6 +209,7 @@ export function AppPage({ appType }: { appType: AppType }) {
         }
       }
       setError(null);
+      void on_gateway_status_refresh?.();
     } catch (e) {
       setError(String(e));
     }
@@ -946,10 +954,6 @@ export function AppPage({ appType }: { appType: AppType }) {
     return Array.from(set);
   }, [proxyProviders, fetchedModels]);
 
-  /** Routes data slice — re-rendered only when the underlying data
-   *  changes (drag ticks, dirty markers, route edits). Memoizing
-   *  separately from the actions slice means consumer components
-   *  that only read actions don't churn on every keystroke. */
   const routesDataValue = useMemo<RoutesDataState>(
     () => ({
       routes,
@@ -981,37 +985,28 @@ export function AppPage({ appType }: { appType: AppType }) {
     ],
   );
 
-  /** Routes actions + meta slice. Handler identities are stable across
-   *  most renders (closure-captured state setters don't churn), so the
-   *  memo only invalidates when the gateway status changes (the restart
-   *  button visibility / busy state) or when one of the few
-   *  action deps re-binds. */
-  const routesActionsValue = useMemo<RoutesActionsState>(
-    () => ({
-      toggleRouteSelection,
-      toggleRouteCollapse,
-      handleDeleteSelectedRoutes,
-      handleAddRoute,
-      handleDeleteRoute,
-      handleRenameRoute,
-      handleAddHop,
-      handleRemoveHop,
-      handleEditHop,
-      handleFetchModels,
-      handleSaveRoutes,
-      handleDiscardRoutes,
-      hopRowAt,
-      handlePointerDown,
-      handlePointerMove,
-      handlePointerUp,
-      handleHopKeyDown,
-      onRestartProxy: handleRestartProxy,
-      proxyRunning: running,
-      restartBusy: busy === 'restart',
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [running, busy],
-  );
+  const routesActionsValue: RoutesActionsState = {
+    toggleRouteSelection,
+    toggleRouteCollapse,
+    handleDeleteSelectedRoutes,
+    handleAddRoute,
+    handleDeleteRoute,
+    handleRenameRoute,
+    handleAddHop,
+    handleRemoveHop,
+    handleEditHop,
+    handleFetchModels,
+    handleSaveRoutes,
+    handleDiscardRoutes,
+    hopRowAt,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handleHopKeyDown,
+    onRestartProxy: handleRestartProxy,
+    proxyRunning: running,
+    restartBusy: busy === 'restart',
+  };
 
   /** Test a proxy provider's connectivity. */
   const handleTestProvider = async (providerId: string) => {
@@ -1053,19 +1048,12 @@ export function AppPage({ appType }: { appType: AppType }) {
     [proxyProviders, pinnedId, health, testResults, testingId],
   );
 
-  /** Pool actions slice — handler identities are stable across most
-   *  renders (closure-captured setters don't churn), so this memo
-   *  barely ever invalidates. */
-  const proxyPoolActionsValue = useMemo<ProxyPoolActionsState>(
-    () => ({
-      onTestProvider: handleTestProvider,
-      onClearTestResult: clearTestResult,
-      onTogglePin: handleTogglePin,
-      onToggleEnabled: handleToggleEnabled,
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
+  const proxyPoolActionsValue: ProxyPoolActionsState = {
+    onTestProvider: handleTestProvider,
+    onClearTestResult: clearTestResult,
+    onTogglePin: handleTogglePin,
+    onToggleEnabled: handleToggleEnabled,
+  };
 
   return (
     <section className="page">
@@ -1327,7 +1315,7 @@ export function AppPage({ appType }: { appType: AppType }) {
               {t('app.gateway.apiKey')}
               <input
                 className="input"
-                type="text"
+                type="password"
                 value={gatewayForm.authToken}
                 placeholder="(empty = accept any key)"
                 onChange={(e) => setGatewayForm({ ...gatewayForm, authToken: e.target.value })}
