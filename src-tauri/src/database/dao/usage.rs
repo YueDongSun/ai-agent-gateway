@@ -174,7 +174,9 @@ impl Database {
             })
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
@@ -208,7 +210,9 @@ impl Database {
             })
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
@@ -266,7 +270,16 @@ mod tests {
         Database::memory().expect("memory db")
     }
 
-    fn rec(app: &str, prov: &str, model: &str, ts: i64, pt: i64, ct: i64, cost: f64, dur: i64) -> UsageRecordInput {
+    fn rec(
+        app: &str,
+        prov: &str,
+        model: &str,
+        ts: i64,
+        pt: i64,
+        ct: i64,
+        cost: f64,
+        dur: i64,
+    ) -> UsageRecordInput {
         UsageRecordInput {
             ts,
             app_id: app.into(),
@@ -282,8 +295,30 @@ mod tests {
     #[test]
     fn record_and_count() {
         let db = make_db();
-        let id1 = db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 100, 10, 20, 0.001, 500)).unwrap();
-        let id2 = db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 200, 30, 40, 0.002, 600)).unwrap();
+        let id1 = db
+            .record_usage(&rec(
+                "claude_code",
+                "anthropic",
+                "claude-3-5-sonnet",
+                100,
+                10,
+                20,
+                0.001,
+                500,
+            ))
+            .unwrap();
+        let id2 = db
+            .record_usage(&rec(
+                "claude_code",
+                "anthropic",
+                "claude-3-5-sonnet",
+                200,
+                30,
+                40,
+                0.002,
+                600,
+            ))
+            .unwrap();
         assert!(id1 > 0 && id2 > id1);
         assert_eq!(db.count_usage().unwrap(), 2);
     }
@@ -291,9 +326,30 @@ mod tests {
     #[test]
     fn summary_aggregates_tokens_cost_and_duration() {
         let db = make_db();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 100, 100, 200, 0.010, 400)).unwrap();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 200, 50,  150, 0.005, 800)).unwrap();
-        db.record_usage(&rec("codex", "openai", "gpt-4o", 300, 200, 100, 0.020, 200)).unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            100,
+            100,
+            200,
+            0.010,
+            400,
+        ))
+        .unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            200,
+            50,
+            150,
+            0.005,
+            800,
+        ))
+        .unwrap();
+        db.record_usage(&rec("codex", "openai", "gpt-4o", 300, 200, 100, 0.020, 200))
+            .unwrap();
 
         let sum = db.get_usage_summary(None, None, None).unwrap();
         assert_eq!(sum.total_requests, 3);
@@ -301,18 +357,48 @@ mod tests {
         assert_eq!(sum.total_completion_tokens, 450);
         assert_eq!(sum.total_tokens, 800);
         // Cost: 0.010 + 0.005 + 0.020 = 0.035
-        assert!((sum.total_cost_usd - 0.035).abs() < 1e-9, "cost={}", sum.total_cost_usd);
+        assert!(
+            (sum.total_cost_usd - 0.035).abs() < 1e-9,
+            "cost={}",
+            sum.total_cost_usd
+        );
         // Avg duration: (400 + 800 + 200) / 3 = 466.666...
-        assert!((sum.avg_duration_ms - 466.6667).abs() < 0.01, "avg_dur={}", sum.avg_duration_ms);
+        assert!(
+            (sum.avg_duration_ms - 466.6667).abs() < 0.01,
+            "avg_dur={}",
+            sum.avg_duration_ms
+        );
     }
 
     #[test]
     fn summary_filters_by_time_window_and_app() {
         let db = make_db();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 100, 10, 20, 0.001, 100)).unwrap();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 200, 30, 40, 0.002, 100)).unwrap();
-        db.record_usage(&rec("codex",       "openai",     "gpt-4o",            300, 50, 60, 0.003, 100)).unwrap();
-        db.record_usage(&rec("codex",       "openai",     "gpt-4o",            400, 70, 80, 0.004, 100)).unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            100,
+            10,
+            20,
+            0.001,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            200,
+            30,
+            40,
+            0.002,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec("codex", "openai", "gpt-4o", 300, 50, 60, 0.003, 100))
+            .unwrap();
+        db.record_usage(&rec("codex", "openai", "gpt-4o", 400, 70, 80, 0.004, 100))
+            .unwrap();
 
         // Time window: [150, 350) -> 200, 300
         let sum = db.get_usage_summary(Some(150), Some(350), None).unwrap();
@@ -328,9 +414,39 @@ mod tests {
     #[test]
     fn by_model_groups_and_sums() {
         let db = make_db();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 100, 10, 20, 0.001, 100)).unwrap();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-5-sonnet", 200, 30, 40, 0.002, 100)).unwrap();
-        db.record_usage(&rec("claude_code", "anthropic", "claude-3-haiku", 300, 5,  10, 0.0005, 100)).unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            100,
+            10,
+            20,
+            0.001,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-5-sonnet",
+            200,
+            30,
+            40,
+            0.002,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "claude-3-haiku",
+            300,
+            5,
+            10,
+            0.0005,
+            100,
+        ))
+        .unwrap();
 
         let by_model = db.get_usage_by_model(None, None, None).unwrap();
         assert_eq!(by_model.len(), 2);
@@ -345,9 +461,30 @@ mod tests {
     #[test]
     fn by_provider_groups_and_sums() {
         let db = make_db();
-        db.record_usage(&rec("claude_code", "anthropic", "m", 100, 10, 20, 0.001, 100)).unwrap();
-        db.record_usage(&rec("claude_code", "anthropic", "m", 200, 30, 40, 0.002, 100)).unwrap();
-        db.record_usage(&rec("claude_code", "openai",     "m", 300, 50, 60, 0.003, 100)).unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "m",
+            100,
+            10,
+            20,
+            0.001,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec(
+            "claude_code",
+            "anthropic",
+            "m",
+            200,
+            30,
+            40,
+            0.002,
+            100,
+        ))
+        .unwrap();
+        db.record_usage(&rec("claude_code", "openai", "m", 300, 50, 60, 0.003, 100))
+            .unwrap();
 
         // anthropic: 2 records, 10+20+30+40 = 100 total tokens
         // openai:     1 record,  50+60        = 110 total tokens
@@ -365,7 +502,9 @@ mod tests {
     #[test]
     fn delete_removes_record() {
         let db = make_db();
-        let id = db.record_usage(&rec("claude_code", "anthropic", "m", 100, 1, 2, 0.01, 50)).unwrap();
+        let id = db
+            .record_usage(&rec("claude_code", "anthropic", "m", 100, 1, 2, 0.01, 50))
+            .unwrap();
         assert_eq!(db.count_usage().unwrap(), 1);
         db.delete_usage(id).unwrap();
         assert_eq!(db.count_usage().unwrap(), 0);

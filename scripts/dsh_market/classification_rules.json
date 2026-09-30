@@ -1,0 +1,553 @@
+{
+  "version": "metadata_rules_v2",
+  "modules": [
+    {
+      "id": "appearance",
+      "keywords": [
+        "theme", "skin", "sidebar", "layout", "appearance", "ui", "dark", "light",
+        "主题", "皮肤", "界面", "美化", "panel", "navigation", "emoji", "pet",
+        "collapse", "annotation", "style", "font", "color", "图标", "面板",
+        "导航", "表情", "宠物", "侧栏", "批注", "样式"
+      ]
+    },
+    {
+      "id": "orchestration",
+      "keywords": [
+        "workflow", "automation", "scheduler", "task", "planner", "pipeline",
+        "orchestrat", "agent", "multi-agent", "swarm", "delegate", "cron",
+        "任务", "自动化", "工作流", "编排", "调度", "智能体", "定时"
+      ]
+    },
+    {
+      "id": "reasoning",
+      "keywords": [
+        "cot", "chain-of-thought", "chain of thought", "thinking", "reasoning",
+        "reflection", "self-consistency", "tree-of-thought", "planning",
+        "deliberat", "思维链", "推理", "反思", "深思", "思考"
+      ]
+    },
+    {
+      "id": "models",
+      "keywords": [
+        "model", "provider", "router", "claude", "openai", "ollama", "gpt",
+        "gemini", "deepseek", "qwen", "llm", "模型", "供应商", "路由",
+        "prompt", "preset", "inference", "routing", "completion", "提示词",
+        "预设", "破甲", "推理", "接入"
+      ]
+    },
+    {
+      "id": "tools",
+      "keywords": [
+        "mcp", "tool", "integration", "bridge", "sync", "telegram", "slack",
+        "wechat", "feishu", "webhook", "api", "集成", "工具", "微信", "飞书",
+        "连接", "qqbot", "dingtalk", "wecom", "discord", "connect", "qq",
+        "钉钉", "接入", "browser", "fetch", "scrape", "crawl"
+      ]
+    },
+    {
+      "id": "knowledge",
+      "keywords": [
+        "memory", "knowledge", "search", "research", "document", "context",
+        "rag", "embedding", "vector", "retriev", "记忆", "知识", "搜索",
+        "文档", "上下文", "note", "novel", "writer", "reader", "science",
+        "story", "stock", "kline", "笔记", "小说", "阅读", "写作", "行情",
+        "研报", "资料"
+      ]
+    },
+    {
+      "id": "media",
+      "keywords": [
+        "image", "vision", "video", "audio", "music", "sound", "media",
+        "图片", "视觉", "视频", "音频", "语音", "creator", "creative",
+        "comfyui", "slide", "draw", "paint", "插画", "创作", "幻灯片",
+        "绘图", "多媒体", "voice", "tts", "speech", "screenshot"
+      ]
+    },
+    {
+      "id": "developer",
+      "keywords": [
+        "code", "git", "repo", "workspace", "terminal", "debug", "test",
+        "代码", "开发", "终端", "文件", "github", "development", "toolkit",
+        "skill", "editor", "build", "emulator", "network", "proxy",
+        "diagnostic", "template", "marketplace", "plugin-hub", "脚本",
+        "编辑", "构建", "网络", "代理", "插件管理", "插件市场", "技能",
+        "linter", "format", "refactor", "review"
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": "personalization",
+      "keywords": [
+        "theme",
+        "skin",
+        "sidebar",
+        "layout",
+        "appearance",
+        "ui",
+        "主题",
+        "皮肤",
+        "界面",
+        "美化",
+        "message",
+        "chat",
+        "panel",
+        "navigation",
+        "notification",
+        "emoji",
+        "pet",
+        "desktop",
+        "mobile",
+        "collapse",
+        "annotation",
+        "消息",
+        "聊天",
+        "面板",
+        "导航",
+        "通知",
+        "表情",
+        "宠物",
+        "侧栏",
+        "批注"
+      ]
+    },
+    {
+      "id": "developer_tools",
+      "keywords": [
+        "code",
+        "git",
+        "repo",
+        "workspace",
+        "terminal",
+        "debug",
+        "test",
+        "代码",
+        "开发",
+        "终端",
+        "文件",
+        "github",
+        "development",
+        "toolkit",
+        "skill",
+        "editor",
+        "build",
+        "emulator",
+        "network",
+        "proxy",
+        "diagnostic",
+        "template",
+        "marketplace",
+        "plugin-hub",
+        "脚本",
+        "编辑",
+        "构建",
+        "网络",
+        "代理",
+        "插件管理",
+        "插件市场",
+        "技能"
+      ]
+    },
+    {
+      "id": "agents",
+      "keywords": [
+        "agent",
+        "workflow",
+        "automation",
+        "scheduler",
+        "task",
+        "planner",
+        "工作流",
+        "任务",
+        "自动化",
+        "智能体"
+      ]
+    },
+    {
+      "id": "models",
+      "keywords": [
+        "model",
+        "provider",
+        "router",
+        "claude",
+        "openai",
+        "ollama",
+        "模型",
+        "供应商",
+        "路由",
+        "prompt",
+        "preset",
+        "inference",
+        "routing",
+        "completion",
+        "提示词",
+        "预设",
+        "破甲",
+        "推理"
+      ]
+    },
+    {
+      "id": "data",
+      "keywords": [
+        "memory",
+        "knowledge",
+        "search",
+        "research",
+        "document",
+        "context",
+        "rag",
+        "记忆",
+        "知识",
+        "搜索",
+        "文档",
+        "上下文",
+        "note",
+        "novel",
+        "writer",
+        "reader",
+        "science",
+        "story",
+        "stock",
+        "kline",
+        "笔记",
+        "小说",
+        "阅读",
+        "写作",
+        "行情",
+        "研报",
+        "资料"
+      ]
+    },
+    {
+      "id": "integrations",
+      "keywords": [
+        "mcp",
+        "integration",
+        "bridge",
+        "sync",
+        "telegram",
+        "slack",
+        "wechat",
+        "feishu",
+        "webhook",
+        "集成",
+        "微信",
+        "飞书",
+        "连接",
+        "qqbot",
+        "dingtalk",
+        "wecom",
+        "discord",
+        "connect",
+        "qq",
+        "钉钉",
+        "接入"
+      ]
+    },
+    {
+      "id": "media",
+      "keywords": [
+        "image",
+        "vision",
+        "video",
+        "audio",
+        "music",
+        "sound",
+        "media",
+        "图片",
+        "视觉",
+        "视频",
+        "音频",
+        "语音",
+        "creator",
+        "creative",
+        "comfyui",
+        "slide",
+        "draw",
+        "paint",
+        "插画",
+        "创作",
+        "幻灯片",
+        "绘图",
+        "多媒体"
+      ]
+    },
+    {
+      "id": "security",
+      "keywords": [
+        "security",
+        "guard",
+        "audit",
+        "approval",
+        "permission",
+        "privacy",
+        "redact",
+        "安全",
+        "审计",
+        "审批",
+        "权限",
+        "隐私"
+      ]
+    },
+    {
+      "id": "observability",
+      "keywords": [
+        "cost",
+        "usage",
+        "token",
+        "billing",
+        "budget",
+        "monitor",
+        "metric",
+        "quota",
+        "balance",
+        "费用",
+        "用量",
+        "监控",
+        "余额",
+        "统计"
+      ]
+    }
+  ],
+  "use_cases": [
+    {
+      "id": "customize_ui",
+      "keywords": [
+        "theme",
+        "skin",
+        "sidebar",
+        "layout",
+        "ui",
+        "主题",
+        "皮肤",
+        "界面",
+        "美化",
+        "message",
+        "chat",
+        "panel",
+        "navigation",
+        "notification",
+        "emoji",
+        "pet",
+        "desktop",
+        "mobile",
+        "collapse",
+        "annotation",
+        "消息",
+        "聊天",
+        "面板",
+        "导航",
+        "通知",
+        "表情",
+        "宠物",
+        "侧栏",
+        "批注"
+      ]
+    },
+    {
+      "id": "code_workflow",
+      "keywords": [
+        "git",
+        "code",
+        "terminal",
+        "workspace",
+        "debug",
+        "test",
+        "代码",
+        "开发",
+        "终端",
+        "github",
+        "development",
+        "toolkit",
+        "skill",
+        "editor",
+        "build",
+        "emulator",
+        "network",
+        "proxy",
+        "diagnostic",
+        "template",
+        "marketplace",
+        "plugin-hub",
+        "脚本",
+        "编辑",
+        "构建",
+        "网络",
+        "代理",
+        "插件管理",
+        "插件市场",
+        "技能"
+      ]
+    },
+    {
+      "id": "automate_tasks",
+      "keywords": [
+        "workflow",
+        "automation",
+        "scheduler",
+        "task",
+        "planner",
+        "任务",
+        "自动化",
+        "工作流"
+      ]
+    },
+    {
+      "id": "connect_models",
+      "keywords": [
+        "model",
+        "provider",
+        "router",
+        "claude",
+        "openai",
+        "ollama",
+        "模型",
+        "供应商",
+        "路由",
+        "prompt",
+        "preset",
+        "inference",
+        "routing",
+        "completion",
+        "提示词",
+        "预设",
+        "破甲",
+        "推理"
+      ]
+    },
+    {
+      "id": "knowledge_research",
+      "keywords": [
+        "memory",
+        "knowledge",
+        "search",
+        "research",
+        "document",
+        "rag",
+        "记忆",
+        "知识",
+        "搜索",
+        "文档",
+        "note",
+        "novel",
+        "writer",
+        "reader",
+        "science",
+        "story",
+        "stock",
+        "kline",
+        "笔记",
+        "小说",
+        "阅读",
+        "写作",
+        "行情",
+        "研报",
+        "资料"
+      ]
+    },
+    {
+      "id": "connect_tools",
+      "keywords": [
+        "mcp",
+        "integration",
+        "bridge",
+        "sync",
+        "telegram",
+        "wechat",
+        "feishu",
+        "工具",
+        "集成",
+        "微信",
+        "飞书",
+        "qqbot",
+        "dingtalk",
+        "wecom",
+        "discord",
+        "connect",
+        "qq",
+        "钉钉",
+        "接入"
+      ]
+    },
+    {
+      "id": "create_media",
+      "keywords": [
+        "image",
+        "vision",
+        "video",
+        "audio",
+        "music",
+        "sound",
+        "图片",
+        "视频",
+        "音频",
+        "语音",
+        "creator",
+        "creative",
+        "comfyui",
+        "slide",
+        "draw",
+        "paint",
+        "插画",
+        "创作",
+        "幻灯片",
+        "绘图",
+        "多媒体"
+      ]
+    },
+    {
+      "id": "protect_workspace",
+      "keywords": [
+        "security",
+        "guard",
+        "audit",
+        "approval",
+        "permission",
+        "privacy",
+        "安全",
+        "审计",
+        "审批",
+        "权限",
+        "隐私"
+      ]
+    },
+    {
+      "id": "track_usage",
+      "keywords": [
+        "cost",
+        "usage",
+        "token",
+        "billing",
+        "budget",
+        "monitor",
+        "quota",
+        "balance",
+        "费用",
+        "用量",
+        "监控",
+        "余额"
+      ]
+    },
+    {
+      "id": "desktop_workflow",
+      "keywords": [
+        "desktop",
+        "native",
+        "window",
+        "tray",
+        "tauri",
+        "electron",
+        "桌面",
+        "窗口",
+        "托盘"
+      ]
+    },
+    {
+      "id": "claude_native",
+      "keywords": [
+        "claude",
+        "anthropic"
+      ]
+    }
+  ]
+}

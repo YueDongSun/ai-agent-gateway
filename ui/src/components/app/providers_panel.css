@@ -1,0 +1,239 @@
+/* Unified provider card panel (cc-switch style).
+ *
+ * Scoped styles for providers_panel / provider_card / provider_modal /
+ * advanced_routes. Imports nothing; reuses the shared :root tokens from
+ * styles.css (--bg-*, --fg-*, --accent*, --success*, --warn*, --danger*,
+ * --border*, --radius, --shadow-*) and its shared classes (.card, .btn,
+ * .tag*, .toggle-switch, .breaker-dot*, .test-result*).
+ *
+ * Layout follows cc-switch's ProviderCard: a vertical single-column list
+ * of full-width rounded cards; left drag handle + 32px icon tile + name
+ * with small badges + URL line; hover/focus-revealed actions; accent
+ * border + gradient wash on the CURRENT card, success green on the
+ * actively-serving upstream. */
+
+.providers-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.provider-card {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+.provider-card:hover {
+  border-color: var(--border-strong);
+}
+.provider-card.current {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card);
+}
+.provider-card.current::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--accent-bg), transparent 55%);
+  pointer-events: none;
+}
+/* The upstream currently serving requests (health.lastUsed) — the
+ * "failover-active" green, mirroring cc-switch's emerald active card. */
+.provider-card.active {
+  border-color: var(--success);
+}
+.provider-card.active::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--success-bg), transparent 55%);
+  pointer-events: none;
+}
+.provider-card.dragging {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.provider-card.drag-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.provider-card.disabled .provider-card-main {
+  opacity: 0.6;
+}
+.provider-card.standalone {
+  border-style: dashed;
+}
+
+.provider-card-main {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.provider-card-drag {
+  cursor: grab;
+  color: var(--fg-muted);
+  user-select: none;
+  padding: 6px 2px;
+  font-size: 13px;
+  letter-spacing: -1px;
+  line-height: 1;
+}
+.provider-card-drag:active {
+  cursor: grabbing;
+}
+.provider-card-drag:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 4px;
+}
+/* Keeps the grid columns aligned on standalone cards (no drag handle). */
+.provider-card-drag-spacer {
+  width: 14px;
+}
+
+.provider-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg-muted);
+}
+
+.provider-card-body {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.provider-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 22px;
+  font-weight: 600;
+}
+.provider-card-url {
+  color: var(--fg-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.priority-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  border: 1px solid var(--border);
+}
+
+/* Actions (switch/chain/toggles/test/edit/delete) reveal on hover or
+ * keyboard focus, cc-switch style. State stays readable at a glance via
+ * the always-visible tags (CURRENT / P{n} / OUT / DISABLED / PINNED).
+ * Opacity only — never pointer-events — so automation and hit-testing
+ * keep working. */
+.provider-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.provider-card:hover .provider-card-actions,
+.provider-card:focus-within .provider-card-actions {
+  opacity: 1;
+}
+
+.provider-test-result {
+  position: relative;
+}
+
+.standalone-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.standalone-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+
+.advanced-routes-dirty-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 8px;
+  background: var(--warn);
+  vertical-align: middle;
+}
+
+/* RouteEditor renders its own .card — flatten it inside the advanced
+ * section so it doesn't double-frame. */
+.advanced-routes .route-editor {
+  border: none;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+/* Modal section headings inside the unified provider modal. */
+.provider-modal-section {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.provider-modal-hint {
+  margin: 6px 0 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.provider-modal-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 12px;
+}
+.provider-modal-color {
+  width: 44px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-input, var(--bg-elevated-2));
+  cursor: pointer;
+}

@@ -12,15 +12,43 @@ const tauri_config = JSON.parse(
 /// Dev-only request logger: prints every HTTP request Vite serves, so
 /// `tauri:dev` output shows whether the Tauri webview actually fetched the
 /// page (and which URL). Invaluable when the window shows a blank page.
+export function safe_request_log_record(request: {
+  method?: string;
+  url?: string;
+  headers?: Record<string, string | string[] | undefined>;
+}): string {
+  const method = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(
+    request.method ?? '',
+  )
+    ? request.method
+    : 'UNKNOWN';
+  let pathname = '/invalid';
+  try {
+    pathname = new URL(request.url ?? '/', 'http://local.invalid').pathname;
+  } catch {
+    // Keep a stable category and never include the invalid value.
+  }
+  const route = pathname === '/'
+    ? 'root'
+    : pathname.startsWith('/@vite') || pathname.startsWith('/@react-refresh')
+      ? 'vite_internal'
+      : pathname.startsWith('/src/')
+        ? 'source_module'
+        : /\.[a-zA-Z0-9]{1,8}$/.test(pathname)
+          ? 'asset'
+          : 'application_route';
+  const ua = String(request.headers?.['user-agent'] ?? '');
+  const client = ua.includes('WebView2') ? 'webview' : ua.includes('Edg/') ? 'edge' : 'other';
+  return `[vite-req] method=${method} route=${route} client=${client}`;
+}
+
 function requestLogger(): Plugin {
   return {
     name: 'aag-request-logger',
     apply: 'serve',
     configureServer(server) {
       server.middlewares.use((req, _res, next) => {
-        const ua = String(req.headers['user-agent'] ?? '');
-        const client = ua.includes('WebView2') ? 'webview' : ua.includes('Edg/') ? 'edge' : 'other';
-        console.log(`[vite-req] ${req.method} ${req.url} (${client})`);
+        console.log(safe_request_log_record(req));
         next();
       });
     },

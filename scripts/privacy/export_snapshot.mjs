@@ -130,7 +130,7 @@ function link_fingerprint(path, line) {
   return createHash('sha256').update(`aag_public_link_v1\0${path}\0${line}`).digest('hex').slice(0, 20);
 }
 
-export function verify_snapshot_links(snapshot_root, exported_files) {
+export function verify_snapshot_links(snapshot_root, exported_files, policy = local_policy) {
   const files = new Set(exported_files.map(file => file.path));
   const directories = new Set();
   for (const path of files) {
@@ -140,6 +140,17 @@ export function verify_snapshot_links(snapshot_root, exported_files) {
       directory = posix.dirname(directory);
     }
   }
+  // The policy can declare a list of paths whose targets are expected to
+  // disappear from the public tree: dev-tree references like `PROGRESS.md`,
+  // `docs/progress/`, `.kilo/`, `.claude/`, `docs/PHASE-ARCHIVE.md`, and
+  // markdown-format review files. The post-export surgery in
+  // scripts/public_sync.mjs removes every markdown link that still points
+  // at one of these; reporting them here as `broken_local_link` would
+  // force every release to manually pre-strip every such bullet, which
+  // became noisy once the public exclusion list tightened. Security-driven
+  // exclusions stay in `export_excluded_paths` and continue to trigger
+  // `broken_local_link` here as before.
+  const exempt_targets = new Set(policy.link_check_exempt_targets ?? []);
   const findings = [];
   for (const file of exported_files.filter(candidate => candidate.path.toLowerCase().endsWith('.md'))) {
     const text = readFileSync(destination_path(snapshot_root, file.path), 'utf8');
@@ -157,7 +168,9 @@ export function verify_snapshot_links(snapshot_root, exported_files) {
           : posix.normalize(posix.join(posix.dirname(file.path), target));
         if (joined !== '..' && !joined.startsWith('../') && !joined.includes('\\')) normalized = joined.replace(/\/$/, '');
       }
-      if (normalized && (files.has(normalized) || directories.has(normalized))) continue;
+      if (!normalized) continue;
+      if (files.has(normalized) || directories.has(normalized)) continue;
+      if (exempt_targets.has(normalized)) continue;
       const line = markdown_line(text, match.index);
       findings.push({
         severity: 'blocker',

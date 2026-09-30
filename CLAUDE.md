@@ -2,186 +2,184 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repo shape (read this first)
+## Read first
 
-This repo is a Tauri 2 desktop app (**AI Agent Gateway / AAG**) migrated from a Node/TypeScript CLI/TUI proxy, aiming for feature parity with **cc-switch** (<https://github.com/farion1231/cc-switch>, MIT, 121k stars). The migration plan, data model, and phasing live in **`DESIGN.md`**; the per-iteration loop state lives in **`PROGRESS.md`** (read both before doing anything in `src-tauri/` or `ui/`).
+Read these documents in order:
 
-Two source trees coexist today:
+1. `AGENTS.md` for repository-wide agent rules.
+2. `docs/architecture.md` for module ownership and runtime contracts.
+3. `docs/development.md` for commands and verification.
+4. `PROGRESS.md` before Rust, Tauri, release, or migration work.
 
-- **`src/`** - the original Node/TypeScript proxy + CLI/TUI. **Still runnable standalone** (`npm run gateway`) for headless use, but the desktop app is the primary deliverable. ~19 files, ~1.7 kLOC.
-- **`src-tauri/` + `ui/`** - the Tauri 2 Rust backend + React 18 frontend. **Feature-complete through Phase 10**: SQLite SSOT, provider CRUD + live config switching (Claude Code + Codex), local proxy (streaming SSE + OpenAI/Anthropic conversion + circuit breaker), backup/restore, MCP, Skills, Sessions, Usage, S3/WebDAV sync, deep links, tray, auto-update.
+## Setup
 
-The reference cc-switch source is available read-only at `~/Documents/Codex/2026-07-05/ben/work/cc-switch-src/` - consult it when porting features.
-
-## Build / Run / Test (Node `src/` tree - legacy)
-
-```
-npm install
-npm run typecheck        # tsc --noEmit
-npm test                 # vitest run (10 tests, incl. SSE streaming e2e)
-npm run dev              # tsx src/index.ts — launches interactive TUI (no args)
-npm run gateway          # tsx src/index.ts gateway        (--host, --port flags)
+```text
+npm ci --ignore-scripts
+npm ci --prefix ui --ignore-scripts
 ```
 
-## Build / Run / Test (Tauri `src-tauri/` + `ui/` trees - primary)
+There are two dependency trees: the repository root and `ui/`. Root and UI npm
+lockfiles and `src-tauri/Cargo.lock` are tracked; use `npm ci --ignore-scripts`
+and `cargo ... --locked --offline` for reproducible local checks.
 
+Run the desktop app with `npm run desktop:dev`, the browser-only demo with
+`npm run ui:demo`, and the legacy Node gateway with `npm run gateway`.
+
+## Runtime contracts
+
+- Node TypeScript is strict ESM: relative imports need explicit `.js`
+  extensions. Node tests live in `tests/` (Vitest); Rust tests are inline and
+  in `src-tauri/src/e2e.rs`.
+- HTTP surfaces: `/v1/chat/completions` (OpenAI), `/v1/messages` (Anthropic),
+  `/v1/responses` (OpenAI Responses / Codex CLI), `/v1/models`, `/health`.
+- Persistence: AAG SQLite at `~/.aag/aag.db` and Node JSON config at
+  `~/.ai-agent-gateway/config.json`, both overridable with `AAG_CONFIG_DIR`;
+  `AAG_HOME_DIR` shifts agent paths for tests only. Current schema version is
+  in `src-tauri/src/database/mod.rs`.
+- Tauri commands expose `Result<T, String>` and map from `AppError`. SQL
+  belongs in `src-tauri/src/database/dao/`, orchestration in `commands/`, and
+  domain logic in `services/`.
+
+## Runtime choice
+
+- Use `src/` for the independently runnable Node gateway, CLI, TUI, and legacy
+  agent adapters.
+- Use `src-tauri/` for SQLite, Tauri commands, native lifecycle, and the Rust
+  proxy.
+- Use `ui/` for the React desktop surface and synthetic browser demo.
+
+The desktop application is the primary product. The Node runtime remains a
+supported headless compatibility surface.
+
+## Architecture
+
+Both proxies (Node Hono in `src/gateway/`, Rust Axum in
+`src-tauri/src/proxy/`) use an OpenAI Chat Completions-shaped canonical format
+internally. Anthropic conversion happens at the HTTP edge and the
+Anthropic-native provider boundary; routing and breaker decisions are made on
+the canonical shape. Requests flow through a route alias to ordered hops with
+per-provider circuit breakers. Retriable failures are network errors, 429, and
+5xx; other 4xx errors propagate without failover. Anthropic clients routed to
+Anthropic-compatible upstreams keep the original source envelope so thinking
+blocks, signatures, and tool order survive without appearing on OpenAI wire
+shapes.
+
+## Module map
+
+- Rust IPC orchestration: `src-tauri/src/commands/`
+- SQLite schema and DAOs: `src-tauri/src/database/`
+- Proxy and failover: `src-tauri/src/proxy/`
+- Agent adapters and coexistence services: `src-tauri/src/services/`
+  (`provider/`, `detect/`, `import_cc_switch/`)
+- Managed DSH extension: `src-tauri/src/services/dsh/`
+  (isolated lifecycle, plugins, redacted upstream resolution)
+- MCP registry and Claude sync: `src-tauri/src/services/mcp/`
+- Backups and remote sync: `src-tauri/src/services/sync/`
+- Restricted DSH runtime and marketplace windows: `src-tauri/src/dsh_window.rs`,
+  `src-tauri/src/dsh_market_window.rs`
+- Shared app page: `ui/src/components/app/AppPage.tsx`
+- UI pool state: `ui/src/components/app/proxy_pool_state.tsx`
+- UI route state: `ui/src/components/app/routes_state.tsx`
+- DSH manager UI: `ui/src/components/dsh/`
+- DSH marketplace UI: `ui/src/components/dsh_market/`
+- MCP registry UI: `ui/src/components/mcp/`
+- Global diagnostics dialog: `ui/src/components/diagnostics_modal.tsx`
+- React error boundary: `ui/src/components/error_boundary.tsx`
+- Typed IPC: `ui/src/lib/api/`
+- Synthetic demo-only IPC: `ui/src/lib/mock/`
+- Hooks, theme, locale, build metadata: `ui/src/hooks/`,
+  `ui/src/lib/theme.ts`, `ui/src/lib/shell_i18n.ts`, `ui/src/lib/build_info.ts`
+- Browser smoke: `scripts/ui_smoke/`
+- Verification runner and feature catalog: `scripts/verification/`
+- Read-only MCP companion and automation: `scripts/mcp/`
+- DSH marketplace catalog and native checks: `scripts/dsh_market/`
+
+Keep domain logic in its owning module. Do not put SQL in commands, put live
+file writes in the UI, or use browser-demo behavior as native evidence.
+
+## Working rules
+
+- Inspect `git status` and preserve unrelated changes.
+- Use `snake_case` for new project-controlled identifiers and filenames.
+- Preserve public Tauri command names, npm scripts, protocol fields, and
+  generated asset names.
+- Validate at boundaries, preserve error context, and never silently drop bad
+  records.
+- Protect API keys, auth tokens, databases, and live agent configuration.
+- Use atomic writes and backups before replacing agent configuration.
+- Keep current callbacks in React contexts; stale closures are not a valid
+  performance optimization.
+
+## Verification
+
+The current full gate is recorded in `docs/development.md` and reproduced in
+`AGENTS.md`. The Node, Rust, browser-demo, native, and external evidence
+streams remain independent — do not claim signing, installation, upgrade,
+real upstream, or native WebView2 acceptance from local unit or demo tests.
+
+UI subset:
+
+```text
+npm run typecheck
+npm test
+npm run test:desktop_runner
+npm run ui:build
+npm run ui:build_demo
+npm run ui:smoke
+npm run ui:smoke_demo
+npm run release:verify
 ```
-cd ui && npm install                 # install React deps (also done by tauri:dev)
-cd src-tauri && cargo check          # Rust typecheck
-cd src-tauri && cargo test --lib     # Rust unit tests (59 incl. full-stack e2e)
-cd ui && npx tsc --noEmit            # UI typecheck
-cd ui && npx vite build              # produce ui/dist/ that Tauri expects at build time
-npm run tauri:dev                    # from repo root: boots Tauri window pointed at ui dev server
-npm run tauri:build                  # from repo root: production bundle (.msi/.dmg/etc.)
+
+Rust subset (after `ui/dist` exists):
+
+```text
+cd src-tauri
+cargo check --locked --offline
+cargo test --locked --offline --lib -- --test-threads=1
 ```
 
-`tauri.conf.json` references `../ui/dist` as `frontendDist` - **`ui/dist/` must exist before `cargo check` / `cargo build` will succeed** (the `generate_context!` proc macro panics otherwise). `beforeDevCommand`/`beforeBuildCommand` use root-relative paths (`npm run dev --prefix ui`).
+`ui/dist` must exist before Tauri cargo checks; run `npm run ui:build` first.
+The serial Rust flag protects tests that mutate process-wide environment
+overrides. Run Node and Rust tests with disposable `AAG_CONFIG_DIR` and
+`AAG_HOME_DIR` values and leave `AAG_TEST_CCSWITCH_DB` unset so optional
+real-database probes do not run.
 
-**Browser-only demo mode (no Tauri):** `cd ui && npm run dev` and open http://localhost:1420. The frontend's `invoke` calls go through `window.__TAURI_INTERNALS__`, which only exists in the Tauri webview; in a plain browser `ui/src/lib/mock/backend.ts` installs a mock IPC backend (`@tauri-apps/api/mocks`) covering every command + intercepting the direct proxy `fetch`es, so both pages are usable with realistic seed data. Debug hook in the console: `window.__aagDemoSetError(cmd|null)` (force a command to reject). The mock is a no-op inside the Tauri webview (real Rust backend wins), so production is unaffected.
+Single tests:
 
-Icons under `src-tauri/icons/` are AAG-branded (dark navy + cyan "A"), generated by `src-tauri/generate_icons.py`.
+```text
+npx vitest run tests/adapters.test.ts
+cd src-tauri && cargo test --locked --offline --lib <module_path>::tests::<name> -- --exact --test-threads=1
+```
 
-## Architecture (Tauri app - what the code actually is)
+For cross-tree or release work, use the complete gate in
+`docs/development.md`. Report Node, Rust, browser-demo, native, and external
+evidence separately. Do not claim signing, installation, upgrade, real
+upstream, or native WebView2 acceptance from local unit or demo tests.
 
-**Backend** (`src-tauri/src/`):
-- `lib.rs` - all `#[tauri::command]` functions + `invoke_handler` registration. Command args auto-convert camelCase (JS) ↔ snake_case (Rust).
-- `database/` - SQLite SSOT at `~/.aag/aag.db` (`AAG_CONFIG_DIR` override). `schema.rs` = CREATE TABLE + versioned migrations (`SCHEMA_VERSION`, `PRAGMA user_version`). DAOs are `impl Database` blocks in `database/dao/` (providers, proxy_providers, routes, proxy_config, backups, mcp_servers, skills, sessions, usage_records, sync_config, **app_meta**).
-- `config.rs` - path + file I/O helpers. `get_home_dir()` honors `AAG_HOME_DIR` override (portable installs / tests). `get_codex_config_dir_with_override()` resolves the isolated CODEX_HOME when set.
-- `services/provider/` - per-app adapters (`claude_code.rs`, `codex.rs`) with `write_live_snapshot(app_type, provider, codex_cli_home)`.
-- `proxy/` - axum HTTP server (127.0.0.1, port from `proxy_config`), circuit breaker, router (alias→hops failover), providers (openai/anthropic/mock), OpenAI↔Anthropic converter.
-- `services/sync/` - S3 (SigV4) + WebDAV transports with auto-stamp of last sync result.
-- `deeplink.rs` + `deeplink_parser.rs` - `aag://` URL scheme handling.
-- `tray.rs` - system tray (Show/Hide/Quit).
+MCP/DSH workspace slice uses `npm run verify:features -- --scope <node|ui|mcp|dsh>`
+(append `--run` to execute); the runner is read-only by default and never
+installs missing dependencies. Companion and DSH transport checks live under
+`npm run test:automation`, `npm run test:dsh_transport`,
+`npm run test:dsh_market_catalog`, and `npm run test:dsh_market_native`.
 
-**Frontend** (`ui/src/`):
-- `App.tsx` - nav + view switching + deep-link dispatch.
-- `components/` - one page per feature: Providers, Proxy, Backup, MCP, Skills, Sessions, Usage, Sync, Deep links, **CodexCli**.
-- `lib/api/` - typed `invoke` wrappers mirroring Rust types (one file per feature).
+## Known behavior
 
-## Agent isolated switching
+- Rust routing uses a snapshot taken at `proxy_start`; restart after route or
+  provider changes.
+- Streaming failover probes the first chunk only; it does not transparently
+  recover a stream that fails after commitment.
+- Browser demo IPC is synthetic and must refuse real mutations.
+- The current release is the unsigned `v0.2.0` preview.
 
-AAG manages per-agent config to point each CLI at a provider or the local proxy:
+## Two-repository publication model
 
-- **Claude Code***  AAG never writes `~/.claude/settings.json` (Phase 16): cc-switch owns
-  that file and chains through AAG as its Anthropic upstream. `provider_switch` for
-  `claude_code` only flips the DB current marker (used for chain-head highlighting).
-- **Codex CLI***  `provider_switch` writes `config.toml` + `auth.json` into the **mirror**
-  CODEX_HOME (`config::get_codex_mirror_dir`: `codex_cli_home` from `app_meta`, default
-  `~/.codex-cli` - NEVER the native `~/.codex`), so the Codex desktop app's config is
-  untouched. `codex_open_cli_terminal` launches a terminal with `CODEX_HOME` +
-  `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` (+ `NO_PROXY`) injected; `codex_open_desktop_window`
-  launches a NEW Codex Desktop process with `CODEX_HOME=<mirror>` (mirror install - both
-  instances can run side by side).
-- **Copilot CLI** — writes `~/.copilot/settings.json` (JSONC, merged, `model` + `env` block);
-  custom providers are injected at launch via `copilot_open_cli_terminal`
-  (`COPILOT_PROVIDER_BASE_URL`/`API_KEY`/`TYPE` + `COPILOT_MODEL`).
-- **pi (MS coding agent)** — writes `~/.pi/agent/models.json` (`providers` map) +
-  `~/.pi/agent/settings.json` (default model). **Disabled in the UI** (page
-  hidden from the AppSwitcher via `enabled:false` in `appPages.ts`) — cc-switch
-  now supports pi; the adapter code is retained for when it's re-enabled.
-- **Antigravity (desktop)** — detect-only this version; switching disabled (no public
-  on-disk config schema). See `services/provider/antigravity.rs`.
-
-**Failover** (`proxy/`): the local proxy builds a Router from `proxy_providers` +
-`routes` at `proxy_start`. The Claude page's failover editor exposes CRUD for both
-(`proxy_provider_*` / `route_*` / `route_reorder_hops` commands) so users can build
-real failover chains (alias -> hops), drag-reorder the hops, and restart the proxy
-to apply them.
-
-**OpenAI Responses API** (Phase 16): the proxy serves `POST /v1/responses`
-(`proxy/responses.rs` wire types + `converter.rs` <-> Chat Completions conversion)
-for both streaming (named SSE events `response.created` / `output_item.added` /
-`response.output_text.delta` / `response.output_item.done` / `response.completed`
-+ `data: [DONE]`) and non-streaming. The Codex CLI / Codex Desktop speak this
-natively; requests funnel through the same Router failover as everything else.
-
-**Official-model gateway surface** (Phase 14): the proxy advertises the official
-Claude model list (`proxy/models.rs::OFFICIAL_MODELS` — fable-5, opus-4-8/4-7/4-6,
-sonnet-5, sonnet-4-6, haiku-4-5) on `/v1/models` (entries carry both Anthropic and
-OpenAI fields) and seeds one failover route per official id (`database/seed.rs`).
-Anthropic-native clients point `ANTHROPIC_BASE_URL` at the proxy, see the official
-model names, and their requests flow through the hop chains — the response echoes
-the requested official id back. UI mirror: `ui/src/lib/models.ts`.
-
-**Phase 16 UI (two pages, cc-switch style)**: an AppSwitcher segmented control in the 64px sticky
-header switches between the **Claude** page (endpoint copy-card for cc-switch + upstream provider
-pool with flow visualization + **failover route editor** with drag-reorderable hops + one-click
-"Import from cc-switch") and the **Codex** page (gateway status card + **failover route editor**
-for Codex models (5.6Sol/5.6Luna/5.6Terra/5.5) + provider list + launchers:
-`codex_open_desktop_window` mirror install / `codex_open_cli_terminal` / `copilot_open_cli_terminal`).
-Phase 18 unified model mapping into the route editor: each route = client-facing model name →
-ordered hops (provider + upstream model), with drag-reorder, per-hop removal, and per-hop model
-editing. Design: systemBlue `#0A84FF` (dark) / `#2563EB` (light), emerald-500 running pill, rounded-xl cards.
-
-**Vendors (unified supplier management)**: a vendor = one upstream supplier that may serve
-multiple protocols (`anthropic` / `openai-chat` / `openai-responses`) sharing a single API key,
-with optional per-protocol endpoint overrides (`endpoints[protocol]` wins over `base_url`).
-Stored in the `vendors` table (`database/dao/vendors.rs`, schema v10; commands `vendor_list/save/delete`).
-The provider smart form (`ui/src/lib/providerForm.ts` + ProvidersPage) has a vendor picker:
-picking a vendor auto-fills endpoint + key and auto-selects the protocol the target app
-speaks (`APP_PROTOCOL`: claude_code→anthropic, codex/copilot/pi→openai-chat). Provider
-rows keep a baked-in `settings_config` snapshot, so deleting a vendor never cascades.
-
-**cc-switch coexistence detection** (Phase 15.5 + follow-up): when both
-AAG and [cc-switch](https://github.com/farion1231/cc-switch) are running,
-both write `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` /
-`COPILOT_PROVIDER_BASE_URL` into the same live agent config files;
-whichever wrote last wins, silently routing requests through the wrong
-proxy. **Default deployment shape**: AAG acts as an Anthropic
-upstream — cc-switch chains through it (`cc-switch → AAG → upstream`),
-and only the Codex CLI isolated CODEX_HOME window treats AAG as its
-primary endpoint. So the detector runs and shows a banner, but **the
-hard block is opt-in** (`KEY_CCSWITCH_BLOCK_ENABLED`, default off in
-`app_meta`). Detector
-(`src-tauri/src/services/detect/cc_switch.rs`) combines four signals (TCP
-probe `127.0.0.1:15721` + `~/.cc-switch/cc-switch.db` exists + live-config
-residue in `~/.claude/settings.json` / `~/.codex/config.toml`). State lives
-in `app_meta` under `ccswitch_override_enabled` + `ccswitch_last_status_json`
-+ `ccswitch_block_enabled` (schema v11 is a no-op stamp — no new tables).
-Commands: `detect_cc_switch() -> CcSwitchStatus`,
-`set_cc_switch_override(enabled)`, `get_cc_switch_blocking()`,
-`set_cc_switch_blocking(enabled)`. When blocking is on, the guards reject
-`codex` / `copilot` writes whose settings point at AAG's own proxy while
-cc-switch is detected; `claude_code` is **never** blocked (Claude CLI's
-`ANTHROPIC_BASE_URL` is meant to point at AAG's upstream — that's the
-supported cc-switch → AAG chain). **UI surface is silent by default**
-(Phase 15.7): no banner, no dialogs, no polling — the only control is a
-single Settings toggle, "Overwrite cc-switch config on conflict"
-(ON = write freely; OFF = backend hard-block; maps to
-`ccswitch_block_enabled`). Default proxy port is **8989**
-(`DEFAULT_PROXY_PORT`; schema v13 sweeps the legacy 8787–8792 range),
-and `proxy_start`'s bind-ready timeout is 2s.
-
-**cc-switch provider import** (Phase 15.6 + Phase 22): `import_cc_switch_providers`
-(`services/import_cc_switch/`) reads `~/.cc-switch/cc-switch.db`
-read-only, maps cc-switch's hyphenated app_type ids onto AAG's
-snake_case (`claude`→`claude_code`, `claude-desktop`→`claude_desktop`,
-`grokbuild`→`grok_build`), skips already-present `(id, app_type)` pairs
-(idempotent). Since Phase 22 the importer also: fills every provider
-field (category/sort_index/notes/icon/icon_color/website_url), keeps
-cc-switch's `is_current` bit as AAG's CURRENT marker and its
-`in_failover_queue` flag, and auto-builds failover routes for every
-official Claude model from each imported provider's
-`ANTHROPIC_DEFAULT_*_MODEL` env keys. Tier fallback: a missing tier's
-mapping falls back to ANY other tier's model (fable→opus→sonnet→haiku→
-default), so every official model gets a hop even for partial mappings.
-The `[1M]` context suffix is preserved verbatim (it is part of the
-upstream model id). Only queue members (`in_failover_queue=1`)
-contribute hops; route hop order follows cc-switch's queue (current
-first, then sort_index). Codex providers without an API key
-(ChatGPT-login `codex-official` / `default`) are skipped
-(`ImportReport.skippedNoKey`); each imported codex provider's
-`modelCatalog.models[].model` list is evenly distributed across the 4
-default codex client models (`client[i] → upstream[i*N/4]`: 1 model →
-all four use it, 2 models → two-per-group, N≥3 spread wide). Claude page has
-an "Import from cc-switch" button; the report toast shows
-imported/skipped/total + auto-seeded route count + skipped no-key count.
-
-## Conventions
-
-- **Rust**: new tables bump `SCHEMA_VERSION` + add a migration branch in `schema.rs`. New commands must be registered in `lib.rs::invoke_handler`. DAO methods live in `impl Database` blocks.
-- **TypeScript**: strict; ESM. UI imports from `lib/api/*`. No path aliases in `src/` (Node tree); `ui/` uses relative imports.
-- **Docs**: after any feature change, update `PROGRESS.md` log; keep `DESIGN.md`/`CLAUDE.md`/`AGENTS.md` in sync.
+- This checkout is the private development worktree: `master` and `feat/*`
+  branches stay private and are never pushed to a public remote.
+- Develop here. The public release repository receives history-free
+  snapshots only: run `npm run privacy:sync_public -- --public-clone <absolute-path> --release vX.Y.Z --notes <text>` (see `scripts/public_sync.mjs`). It enforces the public remote allowlist, the noreply publisher identity, release-tag format, and the full audit gate.
+- Never push, pull, fetch, or merge between the private and public repositories, and never add one remote to the other checkout.
+- `private-export-*` branches and their sanitized source commits must never be pushed anywhere.
+- Keep `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` free of personal names, emails, machine paths, and credentials: these files ship verbatim in every public snapshot.
 
 ## Public-release model
 

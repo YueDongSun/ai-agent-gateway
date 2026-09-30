@@ -38,6 +38,8 @@ pub struct BackupPayload {
 
 /// Tables included in a backup (in insertion-order).
 const INCLUDED_TABLES: &[&str] = &["providers", "proxy_providers", "routes", "proxy_config"];
+/// Bound the number of plaintext credential snapshots retained in SQLite.
+const DEFAULT_BACKUP_RETENTION: i64 = 10;
 
 /// Convert a `rusqlite::types::Value` to `serde_json::Value` for JSON
 /// serialization in backups.
@@ -61,17 +63,27 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let now = chrono::Utc::now().timestamp_millis();
         let id = format!("backup-{now}");
-        let label = label.unwrap_or_else(|| {
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
-        });
+        let label =
+            label.unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         let payload = Self::dump_all_to_payload(&conn)?;
         let json = serde_json::to_vec(&payload)?;
         let size_bytes = json.len() as u64;
-        conn.execute(
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO backups (id, label, created_at, size_bytes, data)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, label, now, size_bytes as i64, json],
         )?;
+        transaction.execute(
+            "DELETE FROM backups
+             WHERE id IN (
+                 SELECT id FROM backups
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![DEFAULT_BACKUP_RETENTION],
+        )?;
+        transaction.commit()?;
         Ok(BackupEntry {
             id,
             label,
@@ -141,9 +153,8 @@ impl Database {
     #[allow(dead_code)]
     pub fn cleanup_rotated(&self, keep: u32) -> Result<Vec<String>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id FROM backups ORDER BY created_at DESC LIMIT -1 OFFSET ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM backups ORDER BY created_at DESC LIMIT -1 OFFSET ?1")?;
         let to_delete: Vec<String> = stmt
             .query_map(params![keep as i64], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())
@@ -173,7 +184,9 @@ impl Database {
                 Ok(serde_json::Value::Object(obj))
             })?;
             let mut out = Vec::new();
-            for r in rows { out.push(r?); }
+            for r in rows {
+                out.push(r?);
+            }
             Ok(out)
         };
         Ok(BackupPayload {
@@ -189,7 +202,9 @@ impl Database {
 
     // Suppress unused warning for INCLUDED_TABLES - kept for future schema additions.
     #[allow(dead_code)]
-    fn _included_tables_marker() -> &'static [&'static str] { INCLUDED_TABLES }
+    fn _included_tables_marker() -> &'static [&'static str] {
+        INCLUDED_TABLES
+    }
 }
 
 #[cfg(test)]
@@ -230,5 +245,19 @@ mod tests {
         let entry = db.create_backup(None).unwrap();
         db.delete_backup(&entry.id).unwrap();
         assert!(db.list_backups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_backup_automatically_bounds_plaintext_retention() {
+        let db = make_db();
+        for i in 0..(DEFAULT_BACKUP_RETENTION + 2) {
+            db.create_backup(Some(format!("bounded backup {i}")))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let backups = db.list_backups().unwrap();
+        assert_eq!(backups.len(), DEFAULT_BACKUP_RETENTION as usize);
+        assert_eq!(backups[0].label, "bounded backup 11");
+        assert_eq!(backups.last().unwrap().label, "bounded backup 2");
     }
 }

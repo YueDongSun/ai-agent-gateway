@@ -1,6 +1,6 @@
 import type { ChatCompletionRequest } from '../../config/schema.js';
 import type { OAIChatResponse, OAIStreamChunk } from '../canonical.js';
-import { BaseProvider, makeError } from './base.js';
+import { BaseProvider, makeProviderError } from './base.js';
 import { logger } from '../../util/log.js';
 import {
   oaiReqToAnthropicReq,
@@ -8,6 +8,7 @@ import {
   anthropicStreamToOAIChunks,
   type AnthropicResponse,
 } from '../converter.js';
+import { endpointUrl } from './endpoint.js';
 
 /**
  * Anthropic-native provider.
@@ -15,46 +16,74 @@ import {
  */
 export class AnthropicProvider extends BaseProvider {
   private endpoint(): string {
-    let base = this.config.baseURL.replace(/\/+$/, '');
-    if (!base) base = 'https://api.anthropic.com';
-    if (!base.endsWith('/v1')) base += '/v1';
-    return `${base}/messages`;
+    // Shared normalization: a base stored as a full `.../v1/messages`
+    // endpoint is used as-is instead of being doubled (see endpoint.ts).
+    return endpointUrl(this.config.baseURL, 'anthropic');
   }
 
   async complete(req: ChatCompletionRequest): Promise<OAIChatResponse> {
     const body = oaiReqToAnthropicReq(req);
     body.stream = false;
-    const res = await fetch(this.endpoint(), {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify(body),
-      signal: this.timeoutSignal(),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw makeError(`${this.id} HTTP ${res.status}: ${text.slice(0, 300)}`, {
-        status: res.status,
-        retriable: res.status >= 500 || res.status === 429,
+    let res: Response;
+    try {
+      res = await fetch(this.endpoint(), {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal: this.timeoutSignal(),
+      });
+    } catch {
+      throw makeProviderError('upstream_transport_error', {
+        retriable: true,
+        stage: 'request_send',
       });
     }
-    const resp = (await res.json()) as AnthropicResponse;
+    if (!res.ok) {
+      const responseBytes = await responseByteLength(res);
+      throw makeProviderError('upstream_http_error', {
+        status: res.status,
+        retriable: res.status >= 500 || res.status === 429,
+        stage: 'response_status',
+        responseBytes,
+      });
+    }
+    let resp: AnthropicResponse;
+    try {
+      resp = (await res.json()) as AnthropicResponse;
+    } catch {
+      throw makeProviderError('upstream_decode_error', {
+        status: 502,
+        retriable: true,
+        stage: 'response_decode',
+      });
+    }
     return anthropicRespToOAIResp(resp, req.model);
   }
 
   async *stream(req: ChatCompletionRequest): AsyncGenerator<OAIStreamChunk> {
     const body = oaiReqToAnthropicReq(req);
     body.stream = true;
-    const res = await fetch(this.endpoint(), {
-      method: 'POST',
-      headers: { ...this.headers(), accept: 'text/event-stream' },
-      body: JSON.stringify(body),
-      signal: this.timeoutSignal(),
-    });
+    let res: Response;
+    try {
+      res = await fetch(this.endpoint(), {
+        method: 'POST',
+        headers: { ...this.headers(), accept: 'text/event-stream' },
+        body: JSON.stringify(body),
+        signal: this.timeoutSignal(),
+      });
+    } catch {
+      throw makeProviderError('upstream_transport_error', {
+        retriable: true,
+        stage: 'stream_connect',
+      });
+    }
     if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => '');
-      throw makeError(`${this.id} stream HTTP ${res.status}: ${text.slice(0, 300)}`, {
+      const responseBytes = await responseByteLength(res);
+      throw makeProviderError('upstream_http_error', {
         status: res.status,
         retriable: res.status >= 500 || res.status === 429,
+        stage: 'stream_status',
+        responseBytes,
       });
     }
     // Anthropic SSE: "event: X\ndata: {...}\n\n"
@@ -88,5 +117,13 @@ async function* readLines(
     }
   }
   if (buf.trim()) yield buf.replace(/\r$/, '');
-  logger.debug('anthropic', 'stream ended');
+  logger.debug('anthropic', 'stream_ended');
+}
+
+async function responseByteLength(response: Response): Promise<number> {
+  try {
+    return (await response.arrayBuffer()).byteLength;
+  } catch {
+    return 0;
+  }
 }

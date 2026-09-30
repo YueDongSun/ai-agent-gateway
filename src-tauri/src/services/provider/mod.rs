@@ -6,11 +6,22 @@
 //! - Codex: `~/.codex/config.toml` (TOML) + `~/.codex/auth.json` (JSON)
 //! - Others: stubbed for later phases.
 
-pub mod claude_code;
-pub mod codex;
-pub mod copilot;
-pub mod pi;
 pub mod antigravity;
+pub mod claude_code;
+pub mod claude_mirror;
+pub mod client_config;
+pub mod codex;
+pub mod config_paths;
+pub mod config_writes;
+pub mod copilot;
+pub mod gemini;
+pub mod kilo;
+pub mod opencode;
+pub mod pi;
+pub mod switching;
+pub mod vscode_extension;
+#[cfg(test)]
+pub mod test_support;
 
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -29,6 +40,12 @@ pub enum AppType {
     Antigravity,
     Gemini,
     OpenCode,
+    /// Kilo CLI (fork of OpenCode; shares `~/.config/opencode/opencode.json`).
+    KiloCli,
+    /// Claude Code VS Code extension (`anthropic.claude-code`).
+    ClaudeVsCode,
+    /// Kilo Code VS Code extension (`kilocode.kilo-code`).
+    KiloVsCode,
     OpenClaw,
     Hermes,
     GrokBuild,
@@ -46,6 +63,9 @@ impl AppType {
             "antigravity" => Ok(Self::Antigravity),
             "gemini" => Ok(Self::Gemini),
             "opencode" => Ok(Self::OpenCode),
+            "kilo_cli" => Ok(Self::KiloCli),
+            "claude_vscode" => Ok(Self::ClaudeVsCode),
+            "kilo_vscode" => Ok(Self::KiloVsCode),
             "openclaw" => Ok(Self::OpenClaw),
             "hermes" => Ok(Self::Hermes),
             "grok_build" => Ok(Self::GrokBuild),
@@ -67,6 +87,9 @@ impl AppType {
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
+            Self::KiloCli => "kilo_cli",
+            Self::ClaudeVsCode => "claude_vscode",
+            Self::KiloVsCode => "kilo_vscode",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::GrokBuild => "grok_build",
@@ -84,6 +107,9 @@ impl AppType {
             Self::Antigravity => "Antigravity",
             Self::Gemini => "Gemini CLI",
             Self::OpenCode => "OpenCode",
+            Self::KiloCli => "Kilo CLI",
+            Self::ClaudeVsCode => "Claude Code (VS Code)",
+            Self::KiloVsCode => "Kilo Code (VS Code)",
             Self::OpenClaw => "OpenClaw",
             Self::Hermes => "Hermes",
             Self::GrokBuild => "Grok Build",
@@ -108,6 +134,9 @@ pub struct LiveWriteResult {
 ///
 /// `codex_cli_home` optionally overrides the Codex config directory (isolated
 /// CODEX_HOME); only used for `AppType::Codex`. `None` = default `~/.codex`.
+///
+/// VS Code extensions (`claude_vscode`, `kilo_vscode`) use AAG as the
+/// unified upstream — see [`crate::services::provider::vscode_extension`].
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live_snapshot(
     app_type: AppType,
@@ -118,17 +147,23 @@ pub fn write_live_snapshot(
         AppType::ClaudeCode => claude_code::write_live(provider),
         AppType::Codex => codex::write_live(provider, codex_cli_home),
         AppType::Copilot => copilot::write_live(provider),
+        AppType::Gemini => gemini::write_live(provider),
         AppType::Pi => pi::write_live(provider),
         AppType::Antigravity => antigravity::write_live(provider),
-        AppType::ClaudeDesktop
-        | AppType::Gemini
-        | AppType::OpenCode
-        | AppType::OpenClaw
-        | AppType::Hermes
-        | AppType::GrokBuild => Err(AppError::Message(format!(
+        AppType::OpenCode => opencode::write_live(provider),
+        AppType::KiloCli => kilo::write_live(provider),
+        AppType::ClaudeVsCode => {
+            vscode_extension::write_live(vscode_extension::VsCodeApp::ClaudeCode, provider)
+        }
+        AppType::KiloVsCode => {
+            vscode_extension::write_live(vscode_extension::VsCodeApp::KiloCode, provider)
+        }
+        AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Hermes | AppType::GrokBuild => {
+            Err(AppError::Message(format!(
             "live config writing for {} not yet implemented (Phase 1 covers Claude Code + Codex)",
             app_type.display_name()
-        ))),
+        )))
+        }
     }
 }
 
@@ -139,8 +174,12 @@ pub fn detect_app(app_type: AppType) -> bool {
         AppType::ClaudeCode => claude_code::detect(),
         AppType::Codex => codex::detect(),
         AppType::Copilot => copilot::detect(),
+        AppType::Gemini => gemini::detect(),
         AppType::Pi => pi::detect(),
         AppType::Antigravity => antigravity::detect(),
+        AppType::OpenCode => opencode::detect(),
+        AppType::KiloCli => kilo::detect(),
+        AppType::ClaudeVsCode | AppType::KiloVsCode => vscode_extension::detect(),
         _ => false,
     }
 }
@@ -160,6 +199,9 @@ mod tests {
             ("antigravity", AppType::Antigravity),
             ("gemini", AppType::Gemini),
             ("opencode", AppType::OpenCode),
+            ("kilo_cli", AppType::KiloCli),
+            ("claude_vscode", AppType::ClaudeVsCode),
+            ("kilo_vscode", AppType::KiloVsCode),
             ("openclaw", AppType::OpenClaw),
             ("hermes", AppType::Hermes),
             ("grok_build", AppType::GrokBuild),

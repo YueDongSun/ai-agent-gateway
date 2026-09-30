@@ -27,7 +27,12 @@ pub struct MockProvider {
 }
 
 impl MockProvider {
-    pub fn new(id: String, models: Vec<String>, enabled: bool, cb_cfg: CircuitBreakerConfig) -> Self {
+    pub fn new(
+        id: String,
+        models: Vec<String>,
+        enabled: bool,
+        cb_cfg: CircuitBreakerConfig,
+    ) -> Self {
         Self {
             id,
             models,
@@ -47,29 +52,44 @@ fn build_reply(provider_id: &str, model: &str, text: &str) -> String {
 
 #[async_trait]
 impl Provider for MockProvider {
-    fn id(&self) -> &str { &self.id }
-    fn enabled(&self) -> bool { self.enabled }
-    fn models(&self) -> &[String] { &self.models }
-    fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    fn models(&self) -> &[String] {
+        &self.models
+    }
+    fn breaker(&self) -> &CircuitBreaker {
+        &self.breaker
+    }
 
-    async fn complete(&self, req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
-        if req.model == "mock-fail" {
+    async fn complete(
+        &self,
+        req: &ChatCompletionRequest,
+        upstream_model: &str,
+    ) -> Result<OAIChatResponse, ProviderError> {
+        if upstream_model == "mock-fail" {
             return Err(canonical::make_error(
-                format!("mock provider {} forced failure for model \"{}\"", self.id, req.model),
+                format!(
+                    "mock provider {} forced failure for model \"{}\"",
+                    self.id, upstream_model
+                ),
                 Some(503),
                 Some(true),
             ));
         }
-        if req.model == "mock-slow" {
+        if upstream_model == "mock-slow" {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         let text = canonical::extract_text(req);
-        let reply = build_reply(&self.id, &req.model, &text);
+        let reply = build_reply(&self.id, upstream_model, &text);
         Ok(OAIChatResponse {
             id: mock_id(),
             object: "chat.completion".into(),
             created: chrono::Utc::now().timestamp(),
-            model: req.model.clone(),
+            model: upstream_model.to_string(),
             choices: vec![OAIChoice {
                 index: 0,
                 message: OAIMessage {
@@ -80,20 +100,25 @@ impl Provider for MockProvider {
                     extra: Default::default(),
                 },
                 finish_reason: Some("stop".into()),
+                extra: Default::default(),
             }],
             usage: Some(Usage {
                 prompt_tokens: text.len() as u32,
                 completion_tokens: reply.len() as u32,
                 total_tokens: (text.len() + reply.len()) as u32,
+                extra: Default::default(),
             }),
+            source_anthropic_response: None,
+            extra: Default::default(),
         })
     }
 
     async fn stream(
         &self,
         req: &ChatCompletionRequest,
+        upstream_model: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
-        if req.model == "mock-fail" {
+        if upstream_model == "mock-fail" {
             return Err(canonical::make_error(
                 format!("mock {} forced stream failure", self.id),
                 Some(503),
@@ -101,7 +126,7 @@ impl Provider for MockProvider {
             ));
         }
         let id = mock_id();
-        let model = req.model.clone();
+        let model = upstream_model.to_string();
         let text = canonical::extract_text(req);
         let reply = build_reply(&self.id, &model, &text);
 
@@ -117,17 +142,32 @@ impl Provider for MockProvider {
                 if c.is_whitespace() {
                     let mut s = String::new();
                     while let Some(&c) = chars.peek() {
-                        if c.is_whitespace() { s.push(c); chars.next(); } else { break; }
+                        if c.is_whitespace() {
+                            s.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
                     }
                     toks.push(s);
                 } else {
                     let mut s = String::new();
                     while let Some(&c) = chars.peek() {
-                        if !c.is_whitespace() { s.push(c); chars.next(); } else { break; }
+                        if !c.is_whitespace() {
+                            s.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
                     }
                     // attach trailing whitespace to the token (greedy \S+\s*)
                     while let Some(&c) = chars.peek() {
-                        if c.is_whitespace() { s.push(c); chars.next(); } else { break; }
+                        if c.is_whitespace() {
+                            s.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
                     }
                     toks.push(s);
                 }
@@ -140,20 +180,20 @@ impl Provider for MockProvider {
             // leading role chunk
             yield crate::proxy::converter::make_stream_chunk(
                 &id, &model,
-                StreamDelta { role: Some("assistant".into()), content: None, tool_calls: None, reasoning: None },
+                StreamDelta { role: Some("assistant".into()), content: None, tool_calls: None, reasoning: None, extra: Default::default() },
                 None,
             );
             for tok in tokens {
                 if slow { tokio::time::sleep(std::time::Duration::from_millis(120)).await; }
                 yield crate::proxy::converter::make_stream_chunk(
                     &id, &model,
-                    StreamDelta { role: None, content: Some(tok), tool_calls: None, reasoning: None },
+                    StreamDelta { role: None, content: Some(tok), tool_calls: None, reasoning: None, extra: Default::default() },
                     None,
                 );
             }
             yield crate::proxy::converter::make_stream_chunk(
                 &id, &model,
-                StreamDelta { role: None, content: None, tool_calls: None, reasoning: None },
+                StreamDelta { role: None, content: None, tool_calls: None, reasoning: None, extra: Default::default() },
                 Some("stop".into()),
             );
         }

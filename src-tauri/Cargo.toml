@@ -2,10 +2,10 @@
 name = "ai-agent-gateway"
 version = "0.2.0"
 description = "Unified local gateway and configuration switcher for AI coding agents"
-authors = ["Yuedong Sun"]
+authors = ["AAG Contributors"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.0"
+rust-version = "1.88"
 
 [lib]
 name = "ai_agent_gateway_lib"
@@ -25,6 +25,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
 log = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -48,6 +49,8 @@ bytes = "1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+getrandom = "0.2"
+tempfile = "3"
 # Deep-link parser (Phase 9 Step 4) — URL parsing for aag:// scheme
 url = "2"
 # Desktop integration (Phase 9) — single-instance + deep link
@@ -56,6 +59,10 @@ tauri-plugin-deep-link = "2"
 # Auto-update (Phase 9 Step 3) — optional; falls back gracefully when no
 # endpoint is configured (returns Ok(None) from .check()).
 tauri-plugin-updater = "2"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+# Login startup registration for the installed desktop executable.
+tauri-plugin-autostart = "2"
 
 [features]
 default = ["custom-protocol"]

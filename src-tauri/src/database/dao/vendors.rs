@@ -81,7 +81,15 @@ impl Database {
                 api_key = excluded.api_key,
                 protocols = excluded.protocols,
                 endpoints = excluded.endpoints",
-            params![v.id, v.name, v.base_url, v.api_key, protocols_json, endpoints_json, now],
+            params![
+                v.id,
+                v.name,
+                v.base_url,
+                v.api_key,
+                protocols_json,
+                endpoints_json,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -108,7 +116,10 @@ mod tests {
     fn vendor_roundtrip() {
         let db = test_db();
         let mut endpoints = HashMap::new();
-        endpoints.insert("anthropic".to_string(), "https://api.example.com/anthropic".to_string());
+        endpoints.insert(
+            "anthropic".to_string(),
+            "https://api.example.com/anthropic".to_string(),
+        );
         let v = Vendor {
             id: "acme".into(),
             name: "Acme Relay".into(),

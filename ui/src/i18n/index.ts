@@ -23,7 +23,7 @@ export function t(locale: Locale, key: MessageKey | string, vars?: Record<string
   });
 }
 
-/** Read persisted locale or detect from browser language. */
+/** Read an explicit locale choice; new workspaces start in English. */
 function detectInitialLocale(): Locale {
   if (typeof window === 'undefined') return 'en';
   try {
@@ -32,8 +32,6 @@ function detectInitialLocale(): Locale {
   } catch {
     /* ignore quota / disabled storage */
   }
-  const navLang = navigator.language.toLowerCase();
-  if (navLang.startsWith('zh')) return 'zh';
   return 'en';
 }
 

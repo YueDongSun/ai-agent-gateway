@@ -122,9 +122,18 @@ impl Database {
                 enabled_claude=excluded.enabled_claude, enabled_codex=excluded.enabled_codex,
                 updated_at=?12",
             params![
-                s.id, s.name, s.description, s.directory, s.repo_owner, s.repo_name,
-                s.repo_branch, s.content_hash, s.enabled_claude, s.enabled_codex,
-                s.installed_at, now,
+                s.id,
+                s.name,
+                s.description,
+                s.directory,
+                s.repo_owner,
+                s.repo_name,
+                s.repo_branch,
+                s.content_hash,
+                s.enabled_claude,
+                s.enabled_codex,
+                s.installed_at,
+                now,
             ],
         )?;
         Ok(())
@@ -188,6 +197,9 @@ mod tests {
         s.updated_at = 0;
         db.save_skill(&s).unwrap();
         let fetched = db.get_skill("s1").unwrap().unwrap();
-        assert!(fetched.updated_at > 0, "save_skill should set updated_at to now");
+        assert!(
+            fetched.updated_at > 0,
+            "save_skill should set updated_at to now"
+        );
     }
 }

@@ -6,7 +6,7 @@
   "maximum_text_file_bytes": 33554432,
   "maximum_history_bytes": 268435456,
   "generated_asset_limits": {
-    "shared/dsh_market_catalog.json": 9437184
+    "shared/dsh_market_catalog.json": 12582912
   },
   "required_ignored_paths": [
     ".env",
@@ -84,5 +84,27 @@
     ".tar.gz",
     ".tgz",
     ".zip"
+  ],
+  "link_check_exempt_targets": [
+    "PROGRESS.md",
+    ".claude",
+    ".claude/",
+    ".kilo",
+    ".kilo/",
+    ".kilo/skills/README.md",
+    ".claude/README.md",
+    "docs/PHASE-ARCHIVE.md",
+    "docs/progress",
+    "docs/progress/",
+    "docs/progress/README.md",
+    "docs/progress/phase_22_23_history.md",
+    "docs/reviews",
+    "docs/reviews/",
+    "docs/reviews/README.md",
+    "docs/reviews/phase_23_review.md",
+    "docs/reviews/frontend_product_polish.md",
+    "src-tauri/icons",
+    "src-tauri/src/services/launcher",
+    "ui/public"
   ]
 }

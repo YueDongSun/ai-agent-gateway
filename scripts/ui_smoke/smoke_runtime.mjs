@@ -1,27 +1,64 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
-const browser_candidates = [
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-];
+const browser_candidates = {
+  win32: [
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  ],
+  darwin: [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  ],
+  linux: ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'],
+};
 const startup_timeout_ms = 20_000;
 const shutdown_timeout_ms = 5_000;
 const poll_interval_ms = 100;
 const dev_vite_port = 5173;
 const built_demo_vite_port = 5183;
 const profile_prefix = 'aag_ui_smoke_';
+const profile_cleanup_timeout_ms = 6_000;
+const profile_cleanup_command_timeout_ms = 5_000;
+const windows_profile_environment_key = 'AAG_UI_SMOKE_PROFILE';
+const windows_profile_cleanup_script = '$profile_path = [Environment]::GetEnvironmentVariable("AAG_UI_SMOKE_PROFILE"); if ([string]::IsNullOrWhiteSpace($profile_path)) { throw "AAG_UI_SMOKE_PROFILE is unavailable" }; $comparison = [StringComparison]::OrdinalIgnoreCase; Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($profile_path, $comparison) -ge 0 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
+const exec_file = promisify(execFile);
 
 export const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-export function find_browser() {
-  return browser_candidates.find((candidate) => existsSync(candidate)) ?? null;
+function browser_executable(candidate, platform) {
+  try {
+    if (!isAbsolute(candidate) || !statSync(candidate).isFile()) return false;
+    accessSync(candidate, platform === 'win32' ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch { return false; }
+}
+
+export function find_browser(platform = process.platform, path_exists, {
+  home = homedir(), path = process.env.PATH, browser_path = process.env.AAG_BROWSER_PATH,
+} = {}) {
+  const usable = path_exists ?? ((candidate) => browser_executable(candidate, platform));
+  if (!browser_candidates[platform]) return null;
+  if (browser_path) return isAbsolute(browser_path) && usable(browser_path) ? browser_path : null;
+  const candidates = [...browser_candidates[platform]];
+  if (platform === 'darwin' && isAbsolute(home)) {
+    candidates.push(...browser_candidates.darwin.map((candidate) => join(home, candidate.slice(1))));
+  }
+  const names = platform === 'win32' ? ['chrome.exe', 'msedge.exe', 'chromium.exe']
+    : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge'];
+  for (const directory of (path ?? '').split(platform === 'win32' ? ';' : ':').slice(0, 128)) {
+    if (isAbsolute(directory)) candidates.push(...names.map((name) => join(directory, name)));
+  }
+  return [...new Set(candidates)].find(usable) ?? null;
 }
 
 function resolve_vite_module() {
@@ -30,36 +67,124 @@ function resolve_vite_module() {
   return join(dirname(package_path), 'dist', 'node', 'index.js');
 }
 
-function validate_profile_directory(profile_directory) {
+export function validate_profile_directory(profile_directory) {
   const resolved_profile = resolve(profile_directory);
   return dirname(resolved_profile) === resolve(tmpdir()) &&
     basename(resolved_profile).startsWith(profile_prefix);
 }
 
-function remove_profile_directory(profile_directory) {
+export function windows_taskkill_path(system_root = process.env.SystemRoot, path_exists = existsSync) {
+  if (!system_root) throw new Error('Windows SystemRoot is unavailable');
+  const taskkill_path = join(system_root, 'System32', 'taskkill.exe');
+  if (!path_exists(taskkill_path)) throw new Error('Windows taskkill.exe is unavailable');
+  return taskkill_path;
+}
+
+export function windows_powershell_path(system_root = process.env.SystemRoot, path_exists = existsSync) {
+  if (!system_root) throw new Error('Windows SystemRoot is unavailable');
+  const powershell_path = join(system_root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  if (!path_exists(powershell_path)) throw new Error('Windows PowerShell is unavailable');
+  return powershell_path;
+}
+
+export function format_error(error) {
+  if (error instanceof AggregateError) {
+    const nested = error.errors.map(format_error).filter(Boolean);
+    return nested.length ? error.message + ': ' + nested.join('; ') : error.message;
+  }
+  return error?.message ?? String(error);
+}
+
+export async function terminate_windows_profile_processes(profile_directory) {
+  if (!validate_profile_directory(profile_directory)) {
+    throw new Error('refusing to clean processes for unexpected browser profile path: ' + profile_directory);
+  }
+  await exec_file(windows_powershell_path(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    windows_profile_cleanup_script,
+  ], {
+    windowsHide: true,
+    timeout: profile_cleanup_command_timeout_ms,
+    env: { ...process.env, [windows_profile_environment_key]: resolve(profile_directory) },
+  });
+}
+
+async function remove_profile_directory(profile_directory) {
   if (!validate_profile_directory(profile_directory)) {
     throw new Error('refusing to remove unexpected browser profile path: ' + profile_directory);
   }
-  rmSync(profile_directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+  const deadline = Date.now() + profile_cleanup_timeout_ms;
+  let last_error = new Error('cleanup deadline expired before first attempt');
+  while (Date.now() < deadline) {
+    try {
+      await rm(profile_directory, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      last_error = error;
+      await sleep(Math.max(0, Math.min(200, deadline - Date.now())));
+    }
+  }
+  throw last_error;
 }
 
-async function stop_owned_browser(browser_process, profile_directory) {
-  if (browser_process.pid && browser_process.exitCode === null && browser_process.signalCode === null) {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        browser_process.removeListener('exit', on_exit);
-        reject(new Error('owned browser did not exit within shutdown timeout'));
-      }, shutdown_timeout_ms);
-      const on_exit = () => { clearTimeout(timer); resolve(); };
-      browser_process.once('exit', on_exit);
-      if (!browser_process.kill()) {
-        clearTimeout(timer);
-        browser_process.removeListener('exit', on_exit);
-        reject(new Error('could not stop owned browser'));
-      }
-    });
+function browser_has_exited(browser_process) {
+  return browser_process.exitCode !== null || browser_process.signalCode !== null;
+}
+
+async function wait_for_browser_exit(browser_process) {
+  if (browser_has_exited(browser_process)) return;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      browser_process.removeListener('exit', on_exit);
+      reject(new Error('owned browser did not exit within shutdown timeout'));
+    }, shutdown_timeout_ms);
+    const on_exit = () => { clearTimeout(timer); resolve(); };
+    browser_process.once('exit', on_exit);
+  });
+}
+
+export async function stop_owned_browser(browser_process, profile_directory) {
+  if (!validate_profile_directory(profile_directory)) {
+    throw new Error('refusing to stop browser for unexpected profile path: ' + profile_directory);
   }
-  remove_profile_directory(profile_directory);
+  const termination_errors = [];
+  if (browser_process.pid && !browser_has_exited(browser_process)) {
+    if (process.platform === 'win32') {
+      try {
+        await exec_file(windows_taskkill_path(), ['/PID', String(browser_process.pid), '/T', '/F'], {
+          windowsHide: true,
+          timeout: shutdown_timeout_ms,
+        });
+      } catch (error) {
+        termination_errors.push(error);
+      }
+    } else if (!browser_process.kill() && !browser_has_exited(browser_process)) {
+      termination_errors.push(new Error('could not stop owned browser'));
+    }
+  }
+  if (process.platform === 'win32') {
+    try {
+      // The root can exit before Chromium descendants release the profile.
+      await terminate_windows_profile_processes(profile_directory);
+    } catch (error) {
+      termination_errors.push(error);
+    }
+  }
+  if (browser_process.pid && !browser_has_exited(browser_process)) {
+    try {
+      await wait_for_browser_exit(browser_process);
+    } catch (error) {
+      termination_errors.push(error);
+      throw new AggregateError(termination_errors, 'could not stop owned browser');
+    }
+  }
+  try {
+    await remove_profile_directory(profile_directory);
+  } catch (error) {
+    throw new AggregateError([...termination_errors, error], 'could not stop owned browser');
+  }
 }
 
 async function start_dev_vite_server() {
@@ -106,11 +231,33 @@ async function start_built_demo_server() {
   return { vite_server: preview_server, demo_url };
 }
 
-function read_cdp_origin(profile_directory) {
+export function read_cdp_origin(profile_directory, read_file = readFileSync) {
   const file_path = join(profile_directory, 'DevToolsActivePort');
-  if (!existsSync(file_path)) return null;
-  const [port] = readFileSync(file_path, 'utf8').split(/\r?\n/);
-  return /^\d+$/.test(port) ? 'http://127.0.0.1:' + port : null;
+  let contents;
+  try { contents = read_file(file_path, 'utf8'); }
+  catch (error) {
+    // Chromium can create, replace or exclusively open this file during boot.
+    // Only these transient states return to the existing bounded startup poll.
+    if (error?.code === 'ENOENT' || error?.code === 'EBUSY') return null;
+    throw error;
+  }
+  const [port] = contents.split(/\r?\n/);
+  const port_number = Number(port);
+  return /^\d+$/.test(port) && Number.isInteger(port_number) && port_number >= 1 && port_number <= 65535
+    ? 'http://127.0.0.1:' + port : null;
+}
+
+export async function wait_for_cdp_origin(profile_directory, browser_process, {
+  read_file = readFileSync, read_spawn_error = () => null, now = Date.now, pause = sleep,
+} = {}) {
+  const deadline = now() + startup_timeout_ms;
+  while (now() < deadline) {
+    const cdp_origin = read_cdp_origin(profile_directory, read_file);
+    if (cdp_origin) return cdp_origin;
+    if (read_spawn_error() || browser_process.exitCode !== null) break;
+    await pause(poll_interval_ms);
+  }
+  throw read_spawn_error() ?? new Error('owned headless browser did not expose DevToolsActivePort within 20s');
 }
 
 async function start_browser(browser_path) {
@@ -129,14 +276,8 @@ async function start_browser(browser_path) {
     spawn_error = error;
   });
   try {
-    const deadline = Date.now() + startup_timeout_ms;
-    while (Date.now() < deadline) {
-      const cdp_origin = read_cdp_origin(profile_directory);
-      if (cdp_origin) return { browser_process, profile_directory, cdp_origin };
-      if (spawn_error || browser_process.exitCode !== null) break;
-      await sleep(poll_interval_ms);
-    }
-    throw spawn_error ?? new Error('owned headless browser did not expose DevToolsActivePort within 20s');
+    const cdp_origin = await wait_for_cdp_origin(profile_directory, browser_process, { read_spawn_error: () => spawn_error });
+    return { browser_process, profile_directory, cdp_origin };
   } catch (error) {
     try {
       await stop_owned_browser(browser_process, profile_directory);

@@ -19,8 +19,11 @@
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import { mockIPC } from '@tauri-apps/api/mocks';
 import { app_version, is_demo_build } from '../build_info.js';
-import type { Provider } from '../api/types';
+import type { Provider, Provider_config_status } from '../api/types';
 import type { ProxyProvider, Route } from '../api/proxy';
+import { mock_dsh_command } from './dsh.js';
+import { mock_dsh_market_command } from './dsh_market.js';
+import { mock_mcp_command } from './mcp.js';
 
 interface TauriInternals {
   runCallback: (id: number, data: unknown) => void;
@@ -43,6 +46,38 @@ export const isDemo =
 
 const providers = new Map<string, Provider[]>();
 const currentByApp = new Map<string, string>();
+const demo_written_config = new Set<string>();
+
+/** Synthetic locations only; browser demo never discovers or writes native files. */
+function demo_provider_config_status(app_type: string): Provider_config_status {
+  const config_paths: Record<string, string[]> = {
+    claude_code: ['~/.claude-cli/settings.json'],
+    codex: [`${settings.get('codex_cli_home') || '~/.codex-cli'}/config.toml`, `${settings.get('codex_cli_home') || '~/.codex-cli'}/auth.json`],
+    copilot: ['~/.copilot/settings.json'],
+    gemini: ['~/.gemini/.env', '~/.gemini/settings.json'],
+    opencode: ['~/.config/opencode/opencode.json'],
+    pi: ['~/.pi/agent/models.json', '~/.pi/agent/settings.json'],
+    kilo_cli: ['~/.config/kilo/kilo.jsonc'],
+    claude_vscode: [],
+    kilo_vscode: ['~/.config/kilo/kilo.jsonc'],
+  };
+  const supported = Object.prototype.hasOwnProperty.call(config_paths, app_type);
+  const existing = supported && (app_type === 'claude_code'
+    ? settings.get('claude_mirror_written') === '1'
+    : demo_written_config.has(app_type) || currentByApp.has(app_type));
+  return {
+    appType: app_type,
+    platform: 'browser',
+    supported,
+    mode: !supported ? 'unsupported' : app_type === 'claude_code' || app_type === 'codex'
+      ? 'mirror' : app_type === 'claude_vscode' ? 'environment' : 'config',
+    source: !supported ? 'unsupported' : app_type === 'codex' && settings.get('codex_cli_home')
+      ? 'setting' : existing ? 'existing' : 'default',
+    configPaths: supported ? config_paths[app_type] : [],
+    existing,
+    reason: null,
+  };
+}
 
 function seedProviders() {
   providers.set('claude_code', [
@@ -112,6 +147,60 @@ function seedProviders() {
       createdAt: Math.floor(Date.now() / 1000) - 86400 * 3,
     },
   ]);
+  providers.set('opencode', [
+    {
+      id: 'opencode-aag',
+      name: 'OpenCode via AAG',
+      settingsConfig: {
+        npm: '@ai-sdk/openai-compatible',
+        options: { baseURL: 'http://127.0.0.1:8989/v1', apiKey: 'demo' },
+        models: { 'claude-sonnet-5': { name: 'claude-sonnet-5' } },
+      },
+      inFailoverQueue: true,
+      createdAt: Math.floor(Date.now() / 1000) - 86400,
+    },
+  ]);
+  providers.set('kilo_cli', [
+    {
+      id: 'kilo-aag',
+      name: 'Kilo via AAG',
+      settingsConfig: {
+        npm: '@ai-sdk/openai-compatible',
+        options: { baseURL: 'http://127.0.0.1:8989/v1', apiKey: 'demo' },
+        models: { 'claude-sonnet-5': { name: 'claude-sonnet-5' } },
+      },
+      inFailoverQueue: true,
+      createdAt: Math.floor(Date.now() / 1000) - 86400,
+    },
+  ]);
+  providers.set('claude_vscode', [
+    {
+      id: 'claude-vscode-aag',
+      name: 'Claude Code (VS Code) via AAG',
+      settingsConfig: {
+        env: {
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8989',
+          ANTHROPIC_AUTH_TOKEN: 'demo',
+        },
+        model: 'claude-sonnet-5',
+      },
+      inFailoverQueue: true,
+      createdAt: Math.floor(Date.now() / 1000) - 86400,
+    },
+  ]);
+  providers.set('kilo_vscode', [
+    {
+      id: 'kilo-vscode-aag',
+      name: 'Kilo Code (VS Code) via AAG',
+      settingsConfig: {
+        npm: '@ai-sdk/openai-compatible',
+        options: { baseURL: 'http://127.0.0.1:8989/v1', apiKey: 'demo' },
+        models: { 'claude-sonnet-5': { name: 'claude-sonnet-5' } },
+      },
+      inFailoverQueue: true,
+      createdAt: Math.floor(Date.now() / 1000) - 86400,
+    },
+  ]);
   providers.set('pi', [
     {
       id: 'pi-1',
@@ -140,6 +229,8 @@ const proxyConfig = {
 };
 
 let pinnedProvider: string | null = null;
+/** /v1/responses chain-of-thought prompt toggle (Codex surface). */
+let responsesCotEnabled = false;
 
 const proxyProviders: ProxyProvider[] = [
   {
@@ -154,6 +245,7 @@ const proxyProviders: ProxyProvider[] = [
     weight: 1,
     circuitBreaker: { failureThreshold: 3, cooldownMs: 5_000, halfOpenRetries: 1, successThreshold: 2 },
     modelMapping: {},
+    extraHeaders: {},
   },
   {
     id: 'openai-fallback',
@@ -167,6 +259,38 @@ const proxyProviders: ProxyProvider[] = [
     weight: 1,
     circuitBreaker: { failureThreshold: 5, cooldownMs: 10_000, halfOpenRetries: 1, successThreshold: 2 },
     modelMapping: { 'claude-sonnet-5': 'gpt-5' },
+    extraHeaders: {},
+  },
+  // Linked upstreams (ccs-<presetId> convention) so the unified provider
+  // cards demo the preset ↔ upstream pairing. claude-2 is deliberately
+  // preset-only: its base URL is AAG itself (self-loop, no upstream row).
+  {
+    id: 'ccs-claude-1',
+    name: 'Claude Sonnet 5',
+    type: 'anthropic',
+    apiKey: 'sk-ant-demo',
+    baseURL: 'https://api.anthropic.com',
+    models: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5'],
+    enabled: true,
+    timeoutMs: 60_000,
+    weight: 1,
+    circuitBreaker: { failureThreshold: 3, cooldownMs: 5_000, halfOpenRetries: 1, successThreshold: 2 },
+    modelMapping: {},
+    extraHeaders: {},
+  },
+  {
+    id: 'ccs-codex-oai',
+    name: 'OpenAI GPT-5',
+    type: 'openai',
+    apiKey: 'sk-demo',
+    baseURL: 'https://api.openai.com',
+    models: ['gpt-5', 'gpt-4o'],
+    enabled: true,
+    timeoutMs: 60_000,
+    weight: 1,
+    circuitBreaker: { failureThreshold: 3, cooldownMs: 5_000, halfOpenRetries: 1, successThreshold: 2 },
+    modelMapping: {},
+    extraHeaders: {},
   },
 ];
 
@@ -198,16 +322,43 @@ const settings = new Map<string, string>([
   ['outbound_proxy', ''],
 ]);
 
+let diagnosticsDebugExpiresAt: number | null = null;
+
+function diagnosticsState() {
+  if (diagnosticsDebugExpiresAt && diagnosticsDebugExpiresAt <= Math.floor(Date.now() / 1000)) {
+    diagnosticsDebugExpiresAt = null;
+  }
+  return {
+    debug_enabled: diagnosticsDebugExpiresAt !== null,
+    debug_expires_at: diagnosticsDebugExpiresAt,
+    log_directory: 'C:\\Demo\\AI Agent Gateway\\logs',
+    max_file_size_bytes: 2 * 1024 * 1024,
+    retained_file_count: 5,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Forced-error debug hook
 // ---------------------------------------------------------------------------
 
 let forcedError: string | null = null;
+const forcedErrorCodes: Readonly<Record<string, string>> = Object.freeze({
+  dsh_discover_runtime: 'demo_forced_dsh_discover_runtime',
+  dsh_execute_operation: 'demo_forced_dsh_execute_operation',
+  dsh_get_snapshot: 'demo_forced_dsh_get_snapshot',
+  dsh_market_refresh: 'demo_forced_dsh_market_refresh',
+  mcp_list_servers: 'demo_forced_mcp_list_servers',
+  provider_list: 'demo_forced_provider_list',
+  provider_config_status: 'demo_forced_provider_config_status',
+  provider_switch: 'demo_forced_provider_switch',
+  claude_open_cli_terminal: 'demo_forced_claude_open_cli_terminal',
+  proxy_status: 'demo_forced_proxy_status',
+});
 function setMockError(cmd: string | null) {
   forcedError = cmd;
 }
 function fail(cmd: string): never {
-  throw new Error(`forced demo error for "${cmd}"`);
+  throw new Error(forcedErrorCodes[cmd] ?? 'demo_forced_error');
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +371,9 @@ export function installMockBackend() {
   mockIPC(async (cmd: string, payload: InvokeArgs = {}) => {
     if (forcedError && forcedError === cmd) fail(cmd);
     const p = payload as Args;
+    if (cmd.startsWith('mcp_')) return mock_mcp_command(cmd, p);
+    if (cmd.startsWith('dsh_market_') || cmd === 'dsh_open_marketplace') return mock_dsh_market_command(cmd);
+    if (cmd.startsWith('dsh_')) return mock_dsh_command(cmd, p);
 
     switch (cmd) {
       // ---- app ----
@@ -227,15 +381,36 @@ export function installMockBackend() {
         return { name: 'AI Agent Gateway', version: app_version, phase: '16' };
       case 'app_check_update':
         return null;
+      case 'diagnostics_get':
+        return diagnosticsState();
+      case 'diagnostics_enable_debug':
+        diagnosticsDebugExpiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+        return diagnosticsState();
+      case 'diagnostics_disable_debug':
+        diagnosticsDebugExpiresAt = null;
+        return diagnosticsState();
+      case 'diagnostics_open_log_dir':
+      case 'diagnostics_record_frontend_error':
+        return null;
+      case 'diagnostics_get_summary':
+        return 'AI Agent Gateway demo\nplatform=browser\ndebug_enabled=' +
+          String(diagnosticsState().debug_enabled);
 
       // ---- providers ----
+      // List/get commands return a fresh clone per invoke — real Tauri IPC
+      // serializes a new array on every call. Returning the stored instance
+      // would let in-place mutations (provider_save etc.) collide with
+      // React's identical-reference setState bailout: refresh() would set
+      // the exact array already in state and the UI would never re-render.
       case 'provider_list':
-        return providers.get(String(p.appType)) ?? [];
+        return structuredClone(providers.get(String(p.appType)) ?? []);
       case 'provider_current':
         return currentByApp.get(String(p.appType)) ?? null;
+      case 'provider_config_status':
+        return demo_provider_config_status(String(p.appType));
       case 'provider_get': {
         const list = providers.get(String(p.appType)) ?? [];
-        return list.find((x) => x.id === p.id) ?? null;
+        return structuredClone(list.find((x) => x.id === p.id) ?? null);
       }
       case 'provider_save': {
         const appType = p.appType as string;
@@ -259,14 +434,12 @@ export function installMockBackend() {
         if (!(providers.get(appType) ?? []).some((x) => x.id === id)) {
           throw new Error(`provider "${id}" not found for app "${appType}"`);
         }
+        const status = demo_provider_config_status(appType);
+        if (!status.supported) throw new Error('provider_config_unsupported');
+        const written = status.configPaths;
+        if (appType === 'claude_code') settings.set('claude_mirror_written', '1');
+        if (written.length > 0) demo_written_config.add(appType);
         currentByApp.set(appType, id);
-        // Mirror the Rust live-write split (Phase 17): codex writes the
-        // mirror CODEX_HOME, copilot merges settings.json, pi writes
-        // models.json + settings.json, claude_code writes nothing.
-        const written: string[] = [];
-        if (appType === 'codex') written.push('~/.codex-cli/config.toml', '~/.codex-cli/auth.json');
-        else if (appType === 'copilot') written.push('~/.copilot/settings.json');
-        else if (appType === 'pi') written.push('~/.pi/agent/models.json', '~/.pi/agent/settings.json');
         return { app_type: appType, provider_id: id, written, backup: null };
       }
       case 'provider_set_failover_queue': {
@@ -279,12 +452,31 @@ export function installMockBackend() {
         target.inFailoverQueue = inQueue;
         return null;
       }
+      case 'provider_reorder': {
+        const appType = String(p.appType);
+        const orderedIds = (p.orderedIds as string[]) ?? [];
+        const list = providers.get(appType) ?? [];
+        const byId = new Map(list.map((x) => [x.id, x]));
+        const reordered: Provider[] = [];
+        for (const id of orderedIds) {
+          const row = byId.get(id);
+          if (row) {
+            reordered.push(row);
+            byId.delete(id);
+          }
+        }
+        // Rows not named in the list keep their relative order after the
+        // reordered ones (mirrors the DAO's sort_index semantics).
+        providers.set(appType, [...reordered, ...byId.values()]);
+        return null;
+      }
 
       // ---- import_cc_switch_providers ----
 // Demo mode can't open the user's cc-switch SQLite DB. Return a
 // small synthetic payload so the import button showcases the Phase 22
-// report toast (imported + skipped counts + auto-seeded routes) —
-// empty reports in the UI make the feature look broken.
+// report toast (imported + skipped counts + auto-seeded routes +
+// auto-queued + passthrough + restart suffixes) — empty reports in the
+// UI make the feature look broken.
 case 'import_cc_switch_providers':
   return {
     sourceDb: '(demo: synthetic cc-switch payload)',
@@ -298,7 +490,18 @@ case 'import_cc_switch_providers':
     skippedExisting: [],
     skippedNoKey: [],
     totalInSource: 1,
-    importedRoutes: ['claude-fable-5', 'claude-sonnet-5'],
+    importedRoutes: [
+      { alias: 'claude-fable-5', provider: 'ccs-demo-anthropic', model: 'demo-fable' },
+      { alias: 'claude-sonnet-5', provider: 'ccs-demo-anthropic', model: 'demo-sonnet' },
+    ],
+    queuedProviders: [
+      {
+        id: 'ccs-demo-anthropic',
+        appType: 'claude_code',
+        name: 'cc-switch · Anthropic demo',
+      },
+    ],
+    passthroughProviders: [],
   };
 
       // ---- proxy ----
@@ -317,8 +520,9 @@ case 'import_cc_switch_providers':
         return null;
 
       // ---- proxy providers + routes (failover chain editor) ----
+      // Fresh clone per call — see the provider_list note above.
       case 'proxy_provider_list':
-        return proxyProviders;
+        return structuredClone(proxyProviders);
       case 'proxy_provider_save': {
         const provider = p.provider as ProxyProvider;
         const idx = proxyProviders.findIndex((x) => x.id === provider.id);
@@ -333,10 +537,26 @@ case 'import_cc_switch_providers':
         proxyProviders.splice(idx, 1);
         return null;
       }
+      // Demo mock: minimal-chat connectivity probe returns a canned success
+      // so the per-card test button is exercisable without a real upstream.
+      case 'proxy_test_provider':
+        return {
+          success: true,
+          latencyMs: 214,
+          model: 'claude-sonnet-5',
+          reply: 'AAG_TEST_OK (demo)',
+          providerId: String(p.providerId ?? ''),
+        };
       case 'proxy_get_pinned_provider':
         return pinnedProvider;
       case 'proxy_set_pinned_provider': {
         pinnedProvider = p.providerId ? String(p.providerId) : null;
+        return null;
+      }
+      case 'proxy_get_responses_cot':
+        return responsesCotEnabled;
+      case 'proxy_set_responses_cot': {
+        responsesCotEnabled = Boolean(p.enabled);
         return null;
       }
       // Demo mock: simulate fetching upstream models from a provider.
@@ -355,7 +575,7 @@ case 'import_cc_switch_providers':
           { id: 'glm-5.3[1M]', owned_by: 'zhipu' },
         ];
       case 'route_list':
-        return routes;
+        return structuredClone(routes);
       case 'route_save': {
         const r = p.route as Route;
         const idx = routes.findIndex((x) => x.alias === r.alias);
@@ -408,6 +628,8 @@ case 'import_cc_switch_providers':
           currentProviderName:
             (providers.get('codex') ?? []).find((p) => p.id === currentByApp.get('codex'))?.name ??
             null,
+          mirrorMode: settings.get('codex_mirror_mode') || 'exclusive',
+          desktopSupported: true,
         };
       case 'codex_open_cli_terminal':
         return {
@@ -426,6 +648,60 @@ case 'import_cc_switch_providers':
           mirror: true,
           store: true,
         };
+      case 'codex_mirror_set_mode': {
+        const mode = String(p.mode ?? '');
+        if (mode !== 'exclusive' && mode !== 'coexist') {
+          throw new Error('codex_mirror_mode_invalid');
+        }
+        settings.set('codex_mirror_mode', mode);
+        return {
+          mode,
+          written: (providers.get('codex') ?? []).length > 0 ? ['<mirror>/config.toml'] : [],
+        };
+      }
+
+      // ---- claude mirror (CLAUDE_CONFIG_DIR) ----
+      case 'claude_mirror_status':
+        return {
+          mirrorDir: '~/.claude-cli',
+          initialized: settings.get('claude_mirror_written') === '1',
+          baseUrlWritten: settings.get('claude_mirror_written') === '1',
+          authTokenWritten:
+            settings.get('claude_mirror_written') === '1' &&
+            settings.get('claude_mirror_mode') !== 'passthrough',
+          mode: settings.get('claude_mirror_mode') || 'token',
+          claudeBinary: 'C:\\Users\\demo\\AppData\\Local\\AnthropicClaude\\claude.exe',
+          desktopSupported: true,
+        };
+      case 'claude_mirror_set_mode': {
+        const mode = String(p.mode ?? '');
+        if (mode !== 'token' && mode !== 'passthrough') {
+          throw new Error('claude_mirror_mode_invalid');
+        }
+        settings.set('claude_mirror_mode', mode);
+        return {
+          mode,
+          written: settings.get('claude_mirror_written') === '1' ? ['<mirror>/settings.json'] : [],
+        };
+      }
+      case 'claude_open_desktop':
+        settings.set('claude_mirror_written', '1');
+        return {
+          claudeHome: '~/.claude-cli',
+          claudeBinary: 'C:\\Users\\demo\\AppData\\Local\\AnthropicClaude\\claude.exe',
+          mirror: true,
+        };
+      case 'claude_open_cli_terminal':
+        settings.set('claude_mirror_written', '1');
+        return {
+          claudeHome: '~/.claude-cli',
+          claudeBinary: 'claude',
+          env: [
+            ['CLAUDE_CONFIG_DIR', '<redacted>'],
+            ['ANTHROPIC_BASE_URL', '<redacted>'],
+            ['ANTHROPIC_AUTH_TOKEN', '<redacted>'],
+          ],
+        };
 
       // ---- copilot cli ----
       case 'copilot_open_cli_terminal':
@@ -440,8 +716,8 @@ case 'import_cc_switch_providers':
         };
 
       default:
-        console.warn(`[aag-demo] unhandled command: ${cmd}`, p);
-        throw new Error(`unknown command "${cmd}" (demo backend)`);
+        console.warn('[aag-demo] unsupported_command');
+        throw new Error('demo_command_unsupported');
     }
   });
 }

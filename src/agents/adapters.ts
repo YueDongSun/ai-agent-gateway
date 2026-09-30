@@ -49,8 +49,11 @@ export function defaultAgentTargets(): AgentTarget[] {
       name: 'Kilo Code',
       format: 'openai',
       configPaths: [
+        join(HOME, '.config', 'kilo', 'kilo.jsonc'),
+        join(HOME, '.config', 'kilo', 'kilo.json'),
+        join(HOME, '.config', 'kilo', 'opencode.jsonc'),
+        join(HOME, '.config', 'kilo', 'opencode.json'),
         join(HOME, '.kilo', 'config.json'),
-        join(HOME, '.config', 'kilo', 'config.json'),
       ],
       pointedAtGateway: false,
       activeProfileId: '',
@@ -246,16 +249,50 @@ export class CopilotAdapter extends JsonAgentAdapter {
 
 export class KiloAdapter extends JsonAgentAdapter {
   buildJson(gw: string, tok: string, model: string) {
-    return {
-      apiProvider: 'openai',
-      baseURL: `${gw}/v1`,
-      apiKey: tok || 'gateway',
-      defaultModel: model,
-      models: [model],
-    };
+    return { model: `aag/${model}`, provider: { aag: { npm: '@ai-sdk/openai-compatible', options: { baseURL: `${gw}/v1`, apiKey: tok || 'gateway' }, models: { [model]: { name: model } } } } };
   }
   buildDirectJson(baseURL: string, apiKey: string, model: string) {
-    return { apiProvider: 'openai', baseURL, apiKey, defaultModel: model, models: [model] };
+    return { model: `aag/${model}`, provider: { aag: { npm: '@ai-sdk/openai-compatible', options: { baseURL, apiKey }, models: { [model]: { name: model } } } } };
+  }
+  read(): string | undefined {
+    const raw = super.read();
+    if (!raw) return undefined;
+    return raw.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  write(content: string): void {
+    const p = this.resolveConfigPath();
+    if (!p) throw new Error('no config path for agent ' + this.target.id);
+    const dir = dirname(p);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    let merged: Record<string, unknown> = {};
+    const existing = this.read();
+    if (existing) {
+      const parsed: unknown = JSON.parse(existing);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Kilo config must be a JSON object');
+      merged = parsed as Record<string, unknown>;
+      if (merged.provider !== undefined && (!merged.provider || typeof merged.provider !== 'object' || Array.isArray(merged.provider))) throw new Error('Kilo config provider must be an object');
+    }
+    const patch = JSON.parse(content) as Record<string, unknown>;
+    if (!patch.provider || typeof patch.provider !== 'object' || Array.isArray(patch.provider)) throw new Error('Kilo provider patch must contain an object provider');
+    const providers = (merged.provider as Record<string, unknown> | undefined) ?? {};
+    merged.provider = { ...providers, ...(patch.provider as Record<string, unknown>) };
+    if (typeof patch.model === 'string' && patch.model) merged.model = patch.model;
+    writeFileSync(p, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  }
+
+  detectCurrentBaseURL(): string | undefined {
+    const raw = this.read();
+    if (!raw) return undefined;
+    try {
+      const cfg = JSON.parse(raw) as Record<string, unknown>;
+      const providers = cfg.provider as Record<string, unknown> | undefined;
+      const aag = providers?.aag as Record<string, unknown> | undefined;
+      const options = aag?.options as Record<string, unknown> | undefined;
+      return String(options?.baseURL ?? aag?.baseURL ?? '') || undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
 

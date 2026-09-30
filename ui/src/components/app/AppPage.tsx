@@ -20,6 +20,8 @@ import {
   fetchProxyHealth,
   getPinnedProvider,
   setPinnedProvider,
+  getResponsesCot,
+  setResponsesCot,
   testProvider,
   listRoutes,
   saveRoute,
@@ -28,6 +30,7 @@ import {
   saveProxyConfig,
   fetchProviderModels,
   type ProxyProvider,
+  type CircuitBreakerConfig,
   type ProxyHealth,
   type TestResult,
   type Route,
@@ -36,50 +39,114 @@ import {
 import { importCcSwitchProviders } from '../../lib/api/import';
 import {
   codexCliStatus,
+  codexMirrorSetMode,
   codexOpenCliTerminal,
   codexOpenDesktopWindow,
   type CodexCliStatus,
 } from '../../lib/api/codexCli';
+import {
+  claudeMirrorSetMode,
+  claudeMirrorStatus,
+  claudeOpenDesktop,
+  open_claude_cli_terminal,
+  type ClaudeMirrorStatus,
+} from '../../lib/api/claudeMirror';
 import { copilotOpenCliTerminal } from '../../lib/api/copilot';
+import { vscodeOpenWithExtension } from '../../lib/api/vscode';
 import { APP_PAGES, CLAUDE_MODELS, CODEX_MODELS, type AppPageConfig } from '../../lib/appPages';
 import type { AppType, Provider } from '../../lib/api/types';
-import { useT } from '../../lib/ctx';
-import { ModelSuggest } from '../ModelSuggest';
-import { TestIcon } from '../Icons';
-import { Launchers } from './Launchers';
-import { GatewayPanel } from './GatewayPanel';
-import { ProviderChain } from './ProviderChain';
-import { UpstreamList } from './UpstreamList';
-import { UpstreamPool } from './UpstreamPool';
 import {
-  ProxyPoolActionsProvider,
-  ProxyPoolDataProvider,
-  type ProxyPoolActionsState,
-  type ProxyPoolDataState,
-} from './proxy_pool_state.js';
+  defaultUpstreamTypeFor,
+  mergeProviderCards,
+  slugifyProviderId,
+  upstreamIdOf,
+  type UnifiedCard,
+} from '../../lib/unified_providers.js';
+import { useT } from '../../lib/ctx';
+import { Launchers } from './Launchers';
+import { Client_config_status } from './client_config_status';
+import { GatewayPanel } from './GatewayPanel';
+import {
+  ProvidersActionsProvider,
+  ProvidersDataProvider,
+  type ProvidersActionsState,
+  type ProvidersDataState,
+} from './providers_state.js';
+import { ProvidersPanel } from './providers_panel.js';
+import { ProviderModal, type ProviderFormState } from './provider_modal.js';
+import { AdvancedRoutes } from './advanced_routes.js';
 import {
   RoutesActionsProvider,
   RoutesDataProvider,
   type RoutesActionsState,
   type RoutesDataState,
 } from './routes_state.js';
-import { RouteEditor } from './RouteEditor';
 
-interface FormState {
-  id: string;
-  name: string;
-  values: Record<string, string>;
+/** Upstream defaults for newly created linked rows (matches the seeded
+ *  pool's breaker shape; edits preserve the stored values verbatim). */
+const DEFAULT_CIRCUIT_BREAKER: CircuitBreakerConfig = {
+  failureThreshold: 3,
+  cooldownMs: 5000,
+  halfOpenRetries: 1,
+  successThreshold: 2,
+};
+
+/** Parse the models textarea (comma/newline separated) into a list. */
+function parseModelList(raw: string): string[] {
+  return raw
+    .split(/[,\n]/)
+    .map((m) => m.trim())
+    .filter(Boolean);
 }
 
-function emptyForm(cfg: AppPageConfig, gatewayUrl: string): FormState {
+/** Render a modelMapping object as editable JSON text (empty string when
+ *  the mapping has no entries, so the textarea starts clean). */
+function formatModelMapping(mapping: Record<string, string> | undefined): string {
+  return mapping && Object.keys(mapping).length > 0
+    ? JSON.stringify(mapping, null, 2)
+    : '';
+}
+
+/** Render an extraHeaders object as editable JSON text (same contract as
+ *  `formatModelMapping`: empty string when there are no headers). */
+function formatHeaderJson(headers: Record<string, string> | undefined): string {
+  return headers && Object.keys(headers).length > 0
+    ? JSON.stringify(headers, null, 2)
+    : '';
+}
+
+function emptyProviderForm(
+  cfg: AppPageConfig,
+  gatewayUrl: string,
+  appType: AppType,
+): ProviderFormState {
   const values: Record<string, string> = {};
   for (const f of cfg.fields) {
     if (f.key === 'baseUrl') values.baseUrl = gatewayUrl;
     else if (f.type === 'select' && f.options?.length) values[f.key] = f.options[0];
     else values[f.key] = '';
   }
-  return { id: '', name: '', values };
+  return {
+    id: '',
+    name: '',
+    values,
+    icon: '',
+    iconColor: '',
+    websiteUrl: '',
+    notes: '',
+    upstreamType: defaultUpstreamTypeFor(appType),
+    upstreamBaseURL: '',
+    upstreamAPIKey: '',
+    upstreamModels: '',
+    upstreamModelMapping: '',
+    upstreamExtraHeaders: '',
+  };
 }
+
+/** Advanced-routes open state per app. Module-scoped so tab switches
+ *  (which remount the page) don't re-collapse a section the user opened;
+ *  resets on app restart, same as the route edit cache. */
+const advancedRoutesOpenByApp = new Map<string, boolean>();
 
 /**
  * Unified per-app provider-chain page (cc-switch style). Every app gets the
@@ -105,15 +172,26 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
   /** Last error from `codexCliStatus` (null = never failed or
    *  recovered). The mirror row renders a warning chip when set. */
   const [cliStatusError, setCliStatusError] = useState<string | null>(null);
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeMirrorStatus | null>(null);
+  /** Last error from `claudeMirrorStatus` — mirrors cliStatusError. */
+  const [claudeStatusError, setClaudeStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState<FormState>(() => emptyForm(cfg, ''));
-  const [editing, setEditing] = useState<Provider | null>(null);
+  const [config_refresh_version, set_config_refresh_version] = useState(0);
+  const refresh_client_config = () => set_config_refresh_version((version) => version + 1);
+  /** Unified provider modal (preset identity + connection + upstream). */
+  const [showProviderModal, setShowProviderModal] = useState(false);
+  const [providerForm, setProviderForm] = useState<ProviderFormState>(() =>
+    emptyProviderForm(cfg, '', appType),
+  );
+  /** Card being edited in the unified modal (null = create). */
+  const [editingCard, setEditingCard] = useState<UnifiedCard | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
-  /** Proxy providers (upstream pool) — used in the model catalog editor dropdown + Claude upstream pool. */
+  /** Proxy providers (upstream pool, global) — linked `ccs-*` rows pair
+   *  with presets on the unified cards; standalones render on routing
+   *  pages and feed the hop-provider dropdowns. */
   const [proxyProviders, setProxyProviders] = useState<ProxyProvider[]>([]);
   /** Live health data (breaker states) from the proxy /health endpoint. */
   const [health, setHealth] = useState<ProxyHealth | null>(null);
@@ -134,21 +212,16 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     () => JSON.stringify(routes) !== JSON.stringify(baselineRef.current),
     [routes],
   );
-  /** Proxy provider edit modal (Claude upstream pool). `models` is the raw
-   *  textarea text (one id per line / comma separated) — parsed on save. */
-  const [showProxyModal, setShowProxyModal] = useState(false);
   /** Gateway settings modal (bind host + port + auth token). */
   const [showGatewayModal, setShowGatewayModal] = useState(false);
   const [gatewayForm, setGatewayForm] = useState({ host: '', port: '', authToken: '' });
-  const [editingProxy, setEditingProxy] = useState<ProxyProvider | null>(null);
-  const [proxyForm, setProxyForm] = useState({
-    id: '',
-    name: '',
-    type: 'anthropic',
-    baseURL: '',
-    apiKey: '',
-    models: '',
-  });
+  /** Built-in chain-of-thought prompt toggle for /v1/responses (Codex
+   *  surface). Live: flipping it updates the running proxy immediately. */
+  const [cotOn, setCotOn] = useState(false);
+  /** Advanced-routes section expanded (per app; see module map above). */
+  const [advancedRoutesOpen, setAdvancedRoutesOpen] = useState(
+    () => advancedRoutesOpenByApp.get(appType) ?? false,
+  );
   /** Route editor: aliases selected for batch delete. */
   const [selectedAliases, setSelectedAliases] = useState<Set<string>>(new Set());
   /** Route editor: aliases whose hop list is collapsed. */
@@ -170,6 +243,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
   };
 
   const refresh = async () => {
+    refresh_client_config();
     try {
       const [list, cur, pc, st] = await Promise.all([
         listProviders(appType),
@@ -182,19 +256,25 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
       setGatewayUrl(`http://${pc.host}:${pc.port}`);
       setAuthToken(pc.authToken);
       setRunning(st.running);
-      // Load proxy providers + health for Claude and Codex (upstream pool + breaker viz).
-      if (appType === 'claude_code' || appType === 'codex') {
-        try {
-          const [pp, pin] = await Promise.all([listProxyProviders(), getPinnedProvider()]);
-          setProxyProviders(pp);
-          setPinnedId(pin);
-        } catch { /* optional */ }
+      // The upstream pool is global — load it on every page so linked
+      // `ccs-*` rows render on the unified cards wherever their preset
+      // lives.
+      try {
+        const [pp, pin, cot] = await Promise.all([
+          listProxyProviders(),
+          getPinnedProvider(),
+          getResponsesCot(),
+        ]);
+        setProxyProviders(pp);
+        setPinnedId(pin);
+        setCotOn(cot);
+      } catch { /* optional */ }
+      // Health (breaker states) + routes are routing-page concerns:
+      // Claude, Codex, and Gemini.
+      if (appType === 'claude_code' || appType === 'codex' || appType === 'gemini') {
         if (st.running) {
           try { setHealth(await fetchProxyHealth(pc)); } catch { setHealth(null); }
         }
-      }
-      // Load routes for Claude and Codex (route editor).
-      if (appType === 'claude_code' || appType === 'codex') {
         // If we have cached unsaved edits for this app type, restore them
         // instead of overwriting from the backend.
         const cached = routeCacheRef.current[appType];
@@ -225,6 +305,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
         routeCacheRef.current[prevAppRef.current] = routes;
       }
       prevAppRef.current = appType;
+      setAdvancedRoutesOpen(advancedRoutesOpenByApp.get(appType) ?? false);
     }
     void refresh();
     if (cfg.launchers === 'codex') {
@@ -238,6 +319,17 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
           setCliStatusError(String(e));
         });
     }
+    if (cfg.launchers === 'claude') {
+      claudeMirrorStatus()
+        .then((s) => {
+          setClaudeStatus(s);
+          setClaudeStatusError(null);
+        })
+        .catch((e) => {
+          setClaudeStatus(null);
+          setClaudeStatusError(String(e));
+        });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appType]);
 
@@ -246,7 +338,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
    *  (Claude + Codex), and paused when the tab is hidden. */
   useEffect(() => {
     const pollsHealth =
-      (appType === 'claude_code' || appType === 'codex') && running;
+      (appType === 'claude_code' || appType === 'codex' || appType === 'gemini') && running;
     if (!pollsHealth) return;
     let alive = true;
     const tick = async () => {
@@ -314,6 +406,40 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     };
   }, [cfg.launchers]);
 
+  /** Same 10 s staleness fix for the Claude mirror status row. */
+  useEffect(() => {
+    if (cfg.launchers !== 'claude') return;
+    const tick = () => {
+      claudeMirrorStatus()
+        .then((s) => {
+          setClaudeStatus(s);
+          setClaudeStatusError(null);
+        })
+        .catch((e) => {
+          setClaudeStatus(null);
+          setClaudeStatusError(String(e));
+        });
+    };
+    let intervalId: number | null = null;
+    const start = () => {
+      if (intervalId !== null) return;
+      intervalId = window.setInterval(tick, 10_000);
+    };
+    const stop = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+    if (document.visibilityState !== 'hidden') start();
+    const onVis = () => (document.visibilityState === 'hidden' ? stop() : start());
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [cfg.launchers]);
+
   /** Memoized pool value is defined further down, after its handler
    *  dependencies (breakerOf / breakerOfClass / handleTestProvider /
    *  clearTestResult) — a `const` useMemo above those declarations hits
@@ -344,7 +470,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     } catch (e) {
       const raw = String(e);
       setError(
-        raw.includes('no free port')
+        raw.includes('proxy_bind_exhausted') || raw.includes('no free port')
           ? t('app.gateway.portConflict', { message: raw })
           : raw,
       );
@@ -439,71 +565,207 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
       const report = await importCcSwitchProviders();
       const noKeyCount = report.skippedNoKey?.length ?? 0;
       if (report.imported.length === 0 && report.skippedExisting.length === 0 && noKeyCount === 0) {
-        flash(t('chain.importCcSwitch.empty'));
+        flash(t('providers.importCcSwitch.empty'));
       } else {
         // importedRoutes may be empty for non-Claude imports — only
         // include the suffix when cc-switch actually wrote something
         // useful (i.e. ANTHROPIC_DEFAULT_* mapping landed).
         const routes = report.importedRoutes ?? [];
         const routeCount = new Set(routes.map((r) => r.alias)).size;
+        const queuedCount = report.queuedProviders?.length ?? 0;
+        const passthroughCount = report.passthroughProviders?.length ?? 0;
+        // The router snapshot is immutable between restarts: when the
+        // gateway is running and the import actually changed something,
+        // restart it in place so the new queue/routes take effect without
+        // a manual stop/start.
+        let restarted = false;
+        if (running && report.imported.length > 0) {
+          try { await stopProxy(); } catch { /* wasn't running */ }
+          await startProxy();
+          restarted = true;
+        }
         flash(
-          t('chain.importCcSwitch.report', {
+          t('providers.importCcSwitch.report', {
             imported: String(report.imported.length),
             skipped: String(report.skippedExisting.length),
             total: String(report.totalInSource),
           }) +
-            (routeCount > 0 ? ` · ${t('chain.importCcSwitch.routes', { n: String(routeCount) })}` : '') +
-            (noKeyCount > 0 ? ` · ${t('chain.importCcSwitch.noKey', { n: String(noKeyCount) })}` : ''),
+            (routeCount > 0 ? ` · ${t('providers.importCcSwitch.routes', { n: String(routeCount) })}` : '') +
+            (noKeyCount > 0 ? ` · ${t('providers.importCcSwitch.noKey', { n: String(noKeyCount) })}` : '') +
+            (queuedCount > 0 ? ` · ${t('providers.importCcSwitch.queued', { n: String(queuedCount) })}` : '') +
+            (passthroughCount > 0 ? ` · ${t('providers.importCcSwitch.passthrough', { n: String(passthroughCount) })}` : '') +
+            (restarted ? ` · ${t('providers.importCcSwitch.restarted')}` : ''),
         );
       }
       await refresh();
     } catch (e) {
-      setError(t('chain.importCcSwitch.failed', { message: String(e) }));
+      setError(t('providers.importCcSwitch.failed', { message: String(e) }));
     } finally {
       setImporting(false);
     }
   };
 
-  const openModal = (p?: Provider) => {
-    if (p) {
-      setEditing(p);
-      setForm({
-        id: p.id,
-        name: p.name,
-        values: { ...cfg.extractForm(p) },
+  // ---- Unified provider cards (presets + linked upstreams) ----
+
+  /** Open the unified modal: `card` omitted = create a new preset card. */
+  const openProviderModal = (card?: UnifiedCard) => {
+    if (card?.preset) {
+      const preset = card.preset;
+      setProviderForm({
+        id: preset.id,
+        name: preset.name,
+        values: { ...cfg.extractForm(preset) },
+        icon: preset.icon ?? '',
+        iconColor: preset.iconColor ?? '',
+        websiteUrl: preset.websiteUrl ?? '',
+        notes: preset.notes ?? '',
+        upstreamType: card.upstream?.type ?? defaultUpstreamTypeFor(appType),
+        upstreamBaseURL: '',
+        upstreamAPIKey: '',
+        upstreamModels: (card.upstream?.models ?? []).join(', '),
+        upstreamModelMapping: formatModelMapping(card.upstream?.modelMapping),
+        upstreamExtraHeaders: formatHeaderJson(card.upstream?.extraHeaders),
       });
+      setEditingCard(card);
+    } else if (card?.upstream) {
+      // Standalone upstream card: identity + upstream section only.
+      const upstream = card.upstream;
+      setProviderForm({
+        id: upstream.id,
+        name: upstream.name,
+        values: {},
+        icon: '',
+        iconColor: '',
+        websiteUrl: '',
+        notes: '',
+        upstreamType: upstream.type,
+        upstreamBaseURL: upstream.baseURL,
+        upstreamAPIKey: upstream.apiKey,
+        upstreamModels: (upstream.models ?? []).join(', '),
+        upstreamModelMapping: formatModelMapping(upstream.modelMapping),
+        upstreamExtraHeaders: formatHeaderJson(upstream.extraHeaders),
+      });
+      setEditingCard(card);
     } else {
-      setEditing(null);
-      setForm(emptyForm(cfg, gatewayUrl));
+      setProviderForm(emptyProviderForm(cfg, gatewayUrl, appType));
+      setEditingCard(null);
     }
-    setShowModal(true);
+    setShowProviderModal(true);
   };
 
-  const handleSave = async () => {
-    const id = form.id.trim() || form.name.trim().toLowerCase().replace(/\s+/g, '-');
-    const builtConfig = cfg.buildConfig(id, form.values);
-    const provider: Provider = {
-      id,
-      name: form.name.trim() || id,
-      settingsConfig: builtConfig,
-      createdAt: editing?.createdAt ?? Math.floor(Date.now() / 1000),
-      sortIndex: editing?.sortIndex ?? null,
-      notes: editing?.notes ?? null,
-      inFailoverQueue: editing?.inFailoverQueue ?? true,
-    };
+  /** Save the unified modal. Standalone cards write the pool row directly;
+   *  preset cards write the providers row, then sync the linked `ccs-<id>`
+   *  upstream (creating it when the connection fields carry a usable base
+   *  URL; skipped for empty or self-loop URLs, mirroring the importer's
+   *  self-loop guard). */
+  const handleSaveCard = async () => {
+    // Optional per-upstream model mapping (JSON textarea): empty keeps the
+    // stored mapping untouched; invalid JSON blocks the save.
+    let parsedModelMapping: Record<string, string> | undefined;
+    if (providerForm.upstreamModelMapping.trim()) {
+      try {
+        parsedModelMapping = JSON.parse(
+          providerForm.upstreamModelMapping,
+        ) as Record<string, string>;
+      } catch {
+        setError(t('providers.modal.modelMappingInvalid'));
+        return;
+      }
+    }
+    // Optional per-upstream extra headers (JSON textarea): empty keeps the
+    // stored headers untouched; invalid JSON blocks the save.
+    let parsedExtraHeaders: Record<string, string> | undefined;
+    if (providerForm.upstreamExtraHeaders.trim()) {
+      try {
+        parsedExtraHeaders = JSON.parse(
+          providerForm.upstreamExtraHeaders,
+        ) as Record<string, string>;
+      } catch {
+        setError(t('providers.modal.extraHeadersInvalid'));
+        return;
+      }
+    }
     try {
-      await saveProvider(appType, provider);
-      setShowModal(false);
+      if (editingCard?.kind === 'standalone') {
+        const existing = editingCard.upstream;
+        const id = providerForm.id.trim() || slugifyProviderId(providerForm.name);
+        await saveProxyProvider({
+          id,
+          name: providerForm.name.trim() || id,
+          type: providerForm.upstreamType,
+          apiKey: providerForm.upstreamAPIKey.trim(),
+          baseURL: providerForm.upstreamBaseURL.trim(),
+          models: parseModelList(providerForm.upstreamModels),
+          // Preserve the row's fields the modal does not expose — editing
+          // must not silently wipe enabled/breaker state.
+          enabled: existing?.enabled ?? true,
+          timeoutMs: existing?.timeoutMs ?? 60000,
+          weight: existing?.weight ?? 1,
+          circuitBreaker: existing?.circuitBreaker ?? DEFAULT_CIRCUIT_BREAKER,
+          modelMapping: parsedModelMapping ?? existing?.modelMapping ?? {},
+          extraHeaders: parsedExtraHeaders ?? existing?.extraHeaders ?? {},
+        });
+      } else {
+        const id = providerForm.id.trim() || slugifyProviderId(providerForm.name);
+        const builtConfig = cfg.buildConfig(id, providerForm.values);
+        const provider: Provider = {
+          id,
+          name: providerForm.name.trim() || id,
+          settingsConfig: builtConfig,
+          createdAt: editingCard?.preset?.createdAt ?? Math.floor(Date.now() / 1000),
+          sortIndex: editingCard?.preset?.sortIndex ?? null,
+          notes: providerForm.notes.trim() || null,
+          websiteUrl: providerForm.websiteUrl.trim() || null,
+          icon: providerForm.icon.trim() || null,
+          iconColor: providerForm.iconColor || null,
+          inFailoverQueue: editingCard?.preset?.inFailoverQueue ?? true,
+        };
+        await saveProvider(appType, provider);
+
+        const baseUrl = (providerForm.values.baseUrl ?? '').trim();
+        const apiKey = (providerForm.values.apiKey ?? '').trim();
+        const linkedUpstream =
+          editingCard?.upstream ??
+          proxyProviders.find((pp) => pp.id === upstreamIdOf(id)) ??
+          null;
+        const selfLoop = Boolean(gatewayUrl) && baseUrl === gatewayUrl;
+        if (linkedUpstream || (baseUrl && !selfLoop)) {
+          await saveProxyProvider({
+            id: upstreamIdOf(id),
+            name: provider.name,
+            type: providerForm.upstreamType,
+            apiKey,
+            baseURL: baseUrl,
+            models: parseModelList(providerForm.upstreamModels),
+            enabled: linkedUpstream?.enabled ?? true,
+            timeoutMs: linkedUpstream?.timeoutMs ?? 60000,
+            weight: linkedUpstream?.weight ?? 1,
+            circuitBreaker: linkedUpstream?.circuitBreaker ?? DEFAULT_CIRCUIT_BREAKER,
+            modelMapping: parsedModelMapping ?? linkedUpstream?.modelMapping ?? {},
+            extraHeaders: parsedExtraHeaders ?? linkedUpstream?.extraHeaders ?? {},
+          });
+        }
+      }
+      setShowProviderModal(false);
+      flash(t('providers.saved'));
       await refresh();
     } catch (e) {
       setError(String(e));
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm(t('chain.delete.confirm', { id }))) return;
+  /** Delete a unified card: both sides of a linked card go in one confirm. */
+  const handleDeleteCard = async (card: UnifiedCard) => {
+    const label = card.preset?.name || card.upstream?.name || card.key;
+    const confirmMsg =
+      card.preset && card.upstream
+        ? t('providers.delete.confirmLinked', { id: label, upstream: card.upstream.id })
+        : t('providers.delete.confirm', { id: label });
+    if (!window.confirm(confirmMsg)) return;
     try {
-      await deleteProvider(id, appType);
+      if (card.preset) await deleteProvider(card.preset.id, appType);
+      if (card.upstream) await deleteProxyProvider(card.upstream.id);
+      flash(t('providers.deleted'));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -511,14 +773,18 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
   };
 
   const handleSwitch = async (id: string) => {
+    if (busy !== null) return;
     setBusy(`switch-${id}`);
+    setError(null);
+    setNotice(null);
     try {
       const r = await switchProvider(id, appType);
+      setCurrent(r.provider_id);
       const name = providers.find((p) => p.id === id)?.name ?? id;
       flash(
         r.written.length > 0
-          ? t('chain.switched.wrote', { name, count: String(r.written.length) })
-          : t('chain.switched', { name }),
+          ? t('providers.switched.wrote', { name, count: String(r.written.length) })
+          : t('providers.switched.environment', { name }),
       );
       await refresh();
     } catch (e) {
@@ -528,9 +794,28 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     }
   };
 
-  const handleToggleQueue = async (p: Provider) => {
+  const handleToggleQueue = async (card: UnifiedCard) => {
+    if (!card.preset) return;
     try {
-      await setProviderFailoverQueue(p.id, appType, !p.inFailoverQueue);
+      await setProviderFailoverQueue(
+        card.preset.id,
+        appType,
+        card.preset.inFailoverQueue === false,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  /** Reorder preset cards (persisted chain order = failover priority). */
+  const handleReorderCards = async (fromIdx: number, toIdx: number) => {
+    const ids = providers.map((p) => p.id);
+    if (fromIdx === toIdx || fromIdx < 0 || fromIdx >= ids.length) return;
+    const [moved] = ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, moved);
+    try {
+      await reorderProviders(appType, ids);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -541,6 +826,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     setBusy('desktop');
     try {
       const r = await codexOpenDesktopWindow();
+      refresh_client_config();
       flash(t('codex.open.desktopLaunched', { dir: r.codexHome }));
     } catch (e) {
       setError(t('codex.open.failed', { message: String(e) }));
@@ -553,6 +839,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     setBusy('cli');
     try {
       const r = await codexOpenCliTerminal();
+      refresh_client_config();
       flash(t('codex.open.cliLaunched', { dir: r.codexHome }));
     } catch (e) {
       setError(t('codex.open.failed', { message: String(e) }));
@@ -565,9 +852,24 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     setBusy('copilot');
     try {
       const r = await copilotOpenCliTerminal();
+      refresh_client_config();
       flash(t('codex.open.copilotLaunched', { provider: r.providerId }));
     } catch (e) {
       setError(t('codex.open.failed', { message: String(e) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleOpenVscode = async () => {
+    if (appType !== 'claude_vscode' && appType !== 'kilo_vscode') return;
+    setBusy('vscode');
+    try {
+      const r = await vscodeOpenWithExtension(appType);
+      refresh_client_config();
+      flash(t('vscode.open.launched', { binary: r.binary }));
+    } catch (e) {
+      setError(t('vscode.open.failed', { message: String(e) }));
     } finally {
       setBusy(null);
     }
@@ -578,71 +880,100 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     [cfg.surface],
   );
 
-  // ---- Proxy provider CRUD (Claude upstream pool) ----
-  const openProxyModal = (p?: ProxyProvider) => {
-    if (p) {
-      setEditingProxy(p);
-      setProxyForm({
-        id: p.id,
-        name: p.name,
-        type: p.type,
-        baseURL: p.baseURL,
-        apiKey: p.apiKey,
-        models: (p.models ?? []).join(', '),
-      });
-    } else {
-      setEditingProxy(null);
-      setProxyForm({ id: '', name: '', type: 'anthropic', baseURL: '', apiKey: '', models: '' });
-    }
-    setShowProxyModal(true);
-  };
-
-  const handleSaveProxy = async () => {
-    const id = proxyForm.id.trim() || proxyForm.name.trim().toLowerCase().replace(/\s+/g, '-');
-    const pp: ProxyProvider = {
-      id,
-      name: proxyForm.name.trim() || id,
-      type: proxyForm.type,
-      apiKey: proxyForm.apiKey.trim(),
-      baseURL: proxyForm.baseURL.trim(),
-      // Preserve the model list: parse the textarea (comma/newline separated)
-      // instead of hardcoding [] — editing used to silently wipe it.
-      models: proxyForm.models
-        .split(/[,\n]/)
-        .map((m) => m.trim())
-        .filter(Boolean),
-      // Preserve the row's enabled bit — hardcoding true used to silently
-      // re-enable a deliberately disabled provider on edit.
-      enabled: editingProxy?.enabled ?? true,
-      timeoutMs: editingProxy?.timeoutMs ?? 60000,
-      weight: editingProxy?.weight ?? 1,
-      circuitBreaker: editingProxy?.circuitBreaker ?? { failureThreshold: 3, cooldownMs: 5000, halfOpenRetries: 1, successThreshold: 2 },
-      modelMapping: editingProxy?.modelMapping ?? {},
-    };
-    try {
-      await saveProxyProvider(pp);
-      setShowProxyModal(false);
-      flash(t('claude.saved'));
-      await refresh();
-    } catch (e) { setError(String(e)); }
-  };
-
-  const handleDeleteProxy = async (id: string) => {
-    if (!window.confirm(t('claude.deletePool.confirm'))) return;
-    try {
-      await deleteProxyProvider(id);
-      flash(t('claude.deleted'));
-      await refresh();
-    } catch (e) { setError(String(e)); }
-  };
-
   const handleTogglePin = async (id: string) => {
     const next = pinnedId === id ? '' : id;
     try {
       await setPinnedProvider(next);
       setPinnedId(next || null);
-      flash(next ? t('claude.upstream.pinned', { name: id }) : t('claude.upstream.unpinned'));
+      flash(next ? t('providers.pinned', { name: id }) : t('providers.unpinned'));
     } catch (e) { setError(String(e)); }
+  };
+
+  /** Flip the /v1/responses chain-of-thought prompt toggle. Optimistic —
+   *  the backend applies it to the running proxy immediately; roll back
+   *  locally only when the command fails. */
+  const handleToggleCot = async (next: boolean) => {
+    setCotOn(next);
+    try {
+      await setResponsesCot(next);
+    } catch (e) {
+      setCotOn(!next);
+      setError(String(e));
+      return;
+    }
+    flash(next ? t('app.gateway.cot.onFlash') : t('app.gateway.cot.offFlash'));
+  };
+
+  /** Flip the Codex mirror mode (exclusive ⇄ coexist). Optimistic — the
+   *  backend persists the setting and rewrites the mirror's config.toml
+   *  immediately; roll back locally only when the command fails. */
+  const handleToggleMirrorMode = async (coexist: boolean) => {
+    const prev = cliStatus;
+    const nextMode = coexist ? 'coexist' : 'exclusive';
+    setCliStatus((s) => (s ? { ...s, mirrorMode: nextMode } : s));
+    try {
+      await codexMirrorSetMode(nextMode);
+    } catch (e) {
+      setCliStatus(prev);
+      setError(String(e));
+      return;
+    }
+    flash(
+      coexist
+        ? t('codex.mirror.mode.coexistFlash')
+        : t('codex.mirror.mode.exclusiveFlash'),
+    );
+  };
+
+  /** Flip the Claude mirror mode (token ⇄ passthrough). Optimistic — the
+   *  backend persists the setting and rewrites the mirror's settings.json
+   *  immediately; roll back locally only when the command fails. */
+  const handleToggleClaudeMode = async (passthrough: boolean) => {
+    const prev = claudeStatus;
+    const nextMode = passthrough ? 'passthrough' : 'token';
+    setClaudeStatus((s) => (s ? { ...s, mode: nextMode } : s));
+    try {
+      await claudeMirrorSetMode(nextMode);
+    } catch (e) {
+      setClaudeStatus(prev);
+      setError(String(e));
+      return;
+    }
+    flash(
+      passthrough
+        ? t('claude.mirror.mode.passthroughFlash')
+        : t('claude.mirror.mode.tokenFlash'),
+    );
+  };
+
+  /** Open a Claude Desktop instance against AAG's CLAUDE_CONFIG_DIR
+   *  mirror (settings.json rewritten first; native ~/.claude untouched). */
+  const handleOpenClaudeDesktop = async () => {
+    setBusy('claude_desktop');
+    try {
+      const r = await claudeOpenDesktop();
+      refresh_client_config();
+      flash(t('claude.open.launched', { dir: r.claudeHome }));
+    } catch (e) {
+      setError(t('claude.open.failed', { message: String(e) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handle_open_claude_cli = async () => {
+    setBusy('claude_cli');
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await open_claude_cli_terminal();
+      refresh_client_config();
+      flash(t('claude.open.cli_launched', { dir: result.claudeHome }));
+    } catch (error) {
+      setError(t('claude.open.cli_failed', { message: String(error) }));
+    } finally {
+      setBusy(null);
+    }
   };
 
   /** Enable/disable an upstream provider. Optimistic: flip local state
@@ -1033,26 +1364,50 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
     });
   };
 
-  /** Pool data slice — providers / pins / health / test results. */
-  const proxyPoolDataValue = useMemo<ProxyPoolDataState>(
+  /** Unified card list — presets (chain order) + linked `ccs-*`
+   *  upstreams; standalone pool rows only on the routing pages, where
+   *  routes reference them. */
+  const cards = useMemo(
+    () =>
+      mergeProviderCards(providers, proxyProviders, {
+        includeStandalone: appType === 'claude_code' || appType === 'codex',
+      }),
+    [providers, proxyProviders, appType],
+  );
+
+  /** Card-panel data slice — cards / current / pins / health / test
+   *  results. (Memoized after its handler dependencies — see the
+   *  temporal-dead-zone note above.) */
+  const providersDataValue = useMemo<ProvidersDataState>(
     () => ({
-      providers: proxyProviders,
+      cards,
+      currentId: current,
       pinnedId,
       health,
       testResults,
       testingId,
+      running,
+      busy,
+      cfg,
       breakerOf,
       breakerOfClass,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [proxyProviders, pinnedId, health, testResults, testingId],
+    [cards, current, pinnedId, health, testResults, testingId, running, busy, cfg],
   );
 
-  const proxyPoolActionsValue: ProxyPoolActionsState = {
+  const providersActionsValue: ProvidersActionsState = {
+    onSwitch: handleSwitch,
+    onToggleQueue: handleToggleQueue,
+    onToggleEnabled: handleToggleEnabled,
+    onTogglePin: handleTogglePin,
     onTestProvider: handleTestProvider,
     onClearTestResult: clearTestResult,
-    onTogglePin: handleTogglePin,
-    onToggleEnabled: handleToggleEnabled,
+    onAdd: () => openProviderModal(),
+    onEditCard: (card) => openProviderModal(card),
+    onDeleteCard: handleDeleteCard,
+    onReorder: handleReorderCards,
+    onRefresh: () => refresh(),
   };
 
   return (
@@ -1069,7 +1424,7 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
            * header — it's not about the live gateway. */}
           {cfg.ccSwitchUpstream && (
             <button className="btn" onClick={handleImport} disabled={importing}>
-              {importing ? '…' : t('chain.importCcSwitch')}
+              {importing ? '…' : t('providers.importCcSwitch')}
             </button>
           )}
         </div>
@@ -1085,207 +1440,81 @@ export function AppPage({ appType, on_gateway_status_refresh }: App_page_props) 
         authToken={authToken}
         cliStatus={cliStatus}
         cliStatusError={cliStatusError}
+        claudeStatus={claudeStatus}
+        claudeStatusError={claudeStatusError}
         copied={copied}
         busy={busy}
+        cotOn={cotOn}
+        onToggleCot={handleToggleCot}
+        mirrorMode={cliStatus?.mirrorMode ?? 'exclusive'}
+        onToggleMirrorMode={handleToggleMirrorMode}
+        claudeMode={claudeStatus?.mode ?? 'token'}
+        onToggleClaudeMode={handleToggleClaudeMode}
         onCopy={copy}
         onStart={handleStart}
         onStop={handleStop}
         onEditSettings={openGatewayModal}
       />
 
-      {/* Upstream Providers pool + Upstream List share the ProxyPoolContext
-       * (providers, pin, breaker, test results) so both cards read from one
-       * slice instead of plumbing 6 props each. */}
-      {(appType === 'claude_code' || appType === 'codex') && (
-        <ProxyPoolDataProvider value={proxyPoolDataValue}>
-          <ProxyPoolActionsProvider value={proxyPoolActionsValue}>
-            <UpstreamPool
-              onRefresh={() => refresh()}
-              onAddProvider={() => openProxyModal()}
-            />
-          </ProxyPoolActionsProvider>
-        </ProxyPoolDataProvider>
-      )}
+      <Client_config_status app_type={appType} refresh_version={config_refresh_version} />
 
+      {/* Unified provider cards — the single failover-chain surface
+       * (per-app presets + linked `ccs-*` upstreams merged; standalone
+       * pool rows render after a divider on routing pages). Card order =
+       * failover priority, persisted via provider_reorder. */}
+      <ProvidersDataProvider value={providersDataValue}>
+        <ProvidersActionsProvider value={providersActionsValue}>
+          <ProvidersPanel />
+        </ProvidersActionsProvider>
+      </ProvidersDataProvider>
 
-      {/* Failover Route editor - consumes RoutesContext (state + handlers
-       * owned by AppPage so the tab-switch cache refs survive remounts). */}
-      {(appType === 'claude_code' || appType === 'codex') && (
+      {/* Advanced per-alias routing — collapsed by default; the card
+       * order above is the primary chain. Consumes RoutesContext (state +
+       * handlers owned by AppPage so the tab-switch cache refs survive
+       * remounts). */}
+      {(appType === 'claude_code' || appType === 'codex' || appType === 'gemini') && (
         <RoutesDataProvider value={routesDataValue}>
           <RoutesActionsProvider value={routesActionsValue}>
-            <RouteEditor />
+            <AdvancedRoutes
+              open={advancedRoutesOpen}
+              dirty={isRouteDirty}
+              onToggle={() =>
+                setAdvancedRoutesOpen((prev) => {
+                  const next = !prev;
+                  advancedRoutesOpenByApp.set(appType, next);
+                  return next;
+                })
+              }
+            />
           </RoutesActionsProvider>
         </RoutesDataProvider>
-      )}
-
-
-      {/* Editable provider list - its own card, full page width. Same
-       * ProxyPoolContext as the upstream pool above. */}
-      {(appType === 'claude_code' || appType === 'codex') && (
-        <ProxyPoolDataProvider value={proxyPoolDataValue}>
-          <ProxyPoolActionsProvider value={proxyPoolActionsValue}>
-            <UpstreamList
-              onAdd={() => openProxyModal()}
-              onEdit={openProxyModal}
-              onDelete={handleDeleteProxy}
-            />
-          </ProxyPoolActionsProvider>
-        </ProxyPoolDataProvider>
-      )}
-
-      {/* Provider chain — hidden for Claude (upstream pool replaces it) */}
-      {appType !== 'claude_code' && (
-        <ProviderChain
-          cfg={cfg}
-          providers={providers}
-          current={current}
-          busy={busy}
-          onAdd={() => openModal()}
-          onEdit={openModal}
-          onDelete={handleDelete}
-          onSwitch={handleSwitch}
-          onToggleQueue={handleToggleQueue}
-          onReorder={async (fromIdx, toIdx) => {
-            if (fromIdx === toIdx) return;
-            const ids = providers.map((p) => p.id);
-            const [moved] = ids.splice(fromIdx, 1);
-            ids.splice(toIdx, 0, moved);
-            try {
-              await reorderProviders(appType, ids);
-              await refresh();
-            } catch (e) {
-              setError(String(e));
-            }
-          }}
-        />
       )}
 
       <Launchers
         cfg={cfg}
         busy={busy}
+        codex_desktop_supported={cliStatus?.desktopSupported ?? false}
+        claude_desktop_supported={claudeStatus?.desktopSupported ?? false}
         onOpenDesktop={handleOpenDesktop}
         onOpenCli={handleOpenCli}
         onOpenCopilot={handleOpenCopilot}
+        onOpenVscode={handleOpenVscode}
+        onOpenClaudeDesktop={handleOpenClaudeDesktop}
+        on_open_claude_cli={handle_open_claude_cli}
       />
 
-      {/* Add/edit modal */}
-      {showModal && (
-        <div className="modal-backdrop" onClick={() => setShowModal(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>
-              {editing
-                ? t('chain.modal.edit', { name: editing.name || editing.id })
-                : t('chain.modal.add')}
-            </h3>
-            <label>
-              {t('chain.modal.name')}
-              <input
-                className="input"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
-            </label>
-            {cfg.fields.map((f) => (
-              <label key={f.key}>
-                {f.label}
-                {f.type === 'select' ? (
-                  <select
-                    className="input"
-                    value={form.values[f.key] ?? ''}
-                    onChange={(e) =>
-                      setForm({ ...form, values: { ...form.values, [f.key]: e.target.value } })
-                    }
-                  >
-                    {(f.options ?? []).map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="input"
-                    type={f.type === 'password' ? 'password' : 'text'}
-                    placeholder={f.placeholder}
-                    value={form.values[f.key] ?? ''}
-                    onChange={(e) =>
-                      setForm({ ...form, values: { ...form.values, [f.key]: e.target.value } })
-                    }
-                  />
-                )}
-              </label>
-            ))}
-            <div className="modal-actions">
-              <button className="btn" onClick={() => setShowModal(false)}>
-                {t('common.cancel')}
-              </button>
-              <button className="btn primary" onClick={handleSave}>
-                {t('common.save')}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Unified provider modal (identity + connection + upstream) */}
+      {showProviderModal && (
+        <ProviderModal
+          cfg={cfg}
+          editing={editingCard}
+          form={providerForm}
+          setForm={setProviderForm}
+          onSave={handleSaveCard}
+          onClose={() => setShowProviderModal(false)}
+        />
       )}
 
-      {/* Proxy provider edit modal (Claude upstream pool + model mapping) */}
-      {showProxyModal && (
-        <div className="modal-backdrop" onClick={() => setShowProxyModal(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>
-              {editingProxy
-                ? t('claude.upstream.modal.edit', { name: editingProxy.name || editingProxy.id })
-                : t('claude.upstream.modal.add')}
-            </h3>
-            <label>
-              {t('claude.upstream.modal.id')}
-              <input className="input" value={proxyForm.id} disabled={Boolean(editingProxy)}
-                onChange={(e) => setProxyForm({ ...proxyForm, id: e.target.value })} />
-            </label>
-            <label>
-              {t('claude.upstream.modal.name')}
-              <input className="input" value={proxyForm.name}
-                onChange={(e) => setProxyForm({ ...proxyForm, name: e.target.value })} />
-            </label>
-            <label>
-              {t('claude.upstream.modal.type')}
-              <select className="input" value={proxyForm.type}
-                onChange={(e) => setProxyForm({ ...proxyForm, type: e.target.value })}>
-                <option value="anthropic">anthropic</option>
-                <option value="openai">openai</option>
-                <option value="mock">mock</option>
-              </select>
-            </label>
-            <label>
-              {t('claude.upstream.modal.baseUrl')}
-              <input className="input" placeholder="https://api.deepseek.com/v1" value={proxyForm.baseURL}
-                onChange={(e) => setProxyForm({ ...proxyForm, baseURL: e.target.value })} />
-            </label>
-            <label>
-              {t('claude.upstream.modal.apiKey')}
-              <input className="input" type="password" value={proxyForm.apiKey}
-                onChange={(e) => setProxyForm({ ...proxyForm, apiKey: e.target.value })} />
-            </label>
-            <label>
-              {t('claude.upstream.modal.models')}
-              <textarea
-                className="input"
-                rows={3}
-                placeholder="model-a, model-b&#10;model-c"
-                value={proxyForm.models}
-                onChange={(e) => setProxyForm({ ...proxyForm, models: e.target.value })}
-              />
-            </label>
-            <div className="modal-actions">
-              <button className="btn" onClick={() => setShowProxyModal(false)}>
-                {t('common.cancel')}
-              </button>
-              <button className="btn primary" onClick={handleSaveProxy}>
-                {t('common.save')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {/* Gateway settings modal (port + auth token) */}
       {showGatewayModal && (
         <div className="modal-backdrop" onClick={() => setShowGatewayModal(false)}>

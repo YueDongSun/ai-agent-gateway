@@ -48,6 +48,22 @@ struct Inner {
     successes: u32,
     opened_at: i64, // unix millis, 0 if never opened
     half_open_in_flight: u32,
+    generation: u64,
+}
+
+/// An owned admission token. A stale attempt cannot settle or release a newer
+/// half-open generation after another request has reopened the breaker.
+#[allow(non_camel_case_types)]
+pub struct Circuit_permit {
+    generation: u64,
+    half_open: bool,
+}
+
+#[allow(non_camel_case_types)]
+pub enum Circuit_outcome {
+    Success,
+    Failure,
+    Cancelled,
 }
 
 pub struct CircuitBreaker {
@@ -65,6 +81,7 @@ impl CircuitBreaker {
                 successes: 0,
                 opened_at: 0,
                 half_open_in_flight: 0,
+                generation: 0,
             }),
         }
     }
@@ -76,81 +93,125 @@ impl CircuitBreaker {
             .unwrap_or(0)
     }
 
-    /// Whether a request is allowed to pass. Implements lazy open->half-open
-    /// transition when cooldown expires.
+    /// Readiness check retained for compatibility. Executing requests must use
+    /// `acquire` so half-open concurrency has a concrete owner.
     pub fn allow(&self) -> bool {
-        let mut g = self.inner.lock().unwrap();
-        match g.state {
-            CircuitState::Closed => true,
-            CircuitState::Open => {
-                let elapsed = Self::now_ms() - g.opened_at;
-                if elapsed >= self.cfg.cooldown_ms as i64 {
-                    g.state = CircuitState::HalfOpen;
-                    g.half_open_in_flight = 0;
-                    g.successes = 0;
-                    log::info!("circuit: breaker -> half-open (probing)");
-                    g.half_open_in_flight < self.cfg.half_open_retries
-                } else {
-                    false
-                }
+        let mut inner = self.inner.lock().unwrap();
+        self.admission_ready(&mut inner)
+    }
+
+    fn admission_ready(&self, inner: &mut Inner) -> bool {
+        if inner.state == CircuitState::Open {
+            let elapsed = Self::now_ms() - inner.opened_at;
+            if elapsed < self.cfg.cooldown_ms as i64 {
+                return false;
             }
-            CircuitState::HalfOpen => g.half_open_in_flight < self.cfg.half_open_retries,
+            inner.state = CircuitState::HalfOpen;
+            inner.generation = inner.generation.wrapping_add(1);
+            inner.half_open_in_flight = 0;
+            inner.successes = 0;
+            log::info!("circuit: breaker -> half-open (probing)");
+        }
+        inner.state == CircuitState::Closed
+            || inner.half_open_in_flight < self.cfg.half_open_retries
+    }
+
+    pub fn acquire(&self) -> Option<Circuit_permit> {
+        let mut inner = self.inner.lock().unwrap();
+        if !self.admission_ready(&mut inner) {
+            return None;
+        }
+        let half_open = inner.state == CircuitState::HalfOpen;
+        if half_open {
+            inner.half_open_in_flight += 1;
+        }
+        Some(Circuit_permit {
+            generation: inner.generation,
+            half_open,
+        })
+    }
+
+    pub fn settle(&self, permit: Circuit_permit, outcome: Circuit_outcome) {
+        let mut inner = self.inner.lock().unwrap();
+        if permit.generation != inner.generation {
+            return;
+        }
+        if permit.half_open {
+            inner.half_open_in_flight = inner.half_open_in_flight.saturating_sub(1);
+        }
+        match outcome {
+            Circuit_outcome::Success => self.success_locked(&mut inner),
+            Circuit_outcome::Failure => self.failure_locked(&mut inner),
+            Circuit_outcome::Cancelled => {}
         }
     }
 
     pub fn record_success(&self) {
-        let mut g = self.inner.lock().unwrap();
-        match g.state {
+        let mut inner = self.inner.lock().unwrap();
+        self.success_locked(&mut inner);
+    }
+
+    fn success_locked(&self, inner: &mut Inner) {
+        match inner.state {
             CircuitState::HalfOpen => {
-                g.successes += 1;
-                g.half_open_in_flight = g.half_open_in_flight.saturating_sub(1);
-                if g.successes >= self.cfg.success_threshold {
-                    g.state = CircuitState::Closed;
-                    g.failures = 0;
-                    g.successes = 0;
-                    g.half_open_in_flight = 0;
+                inner.successes += 1;
+                if inner.successes >= self.cfg.success_threshold {
+                    inner.state = CircuitState::Closed;
+                    inner.generation = inner.generation.wrapping_add(1);
+                    inner.failures = 0;
+                    inner.successes = 0;
+                    inner.half_open_in_flight = 0;
                     log::info!("circuit: breaker CLOSED (recovered)");
                 }
             }
-            CircuitState::Closed => {
-                g.failures = 0;
-            }
+            CircuitState::Closed => inner.failures = 0,
             CircuitState::Open => {}
         }
     }
 
     pub fn record_failure(&self) {
-        let mut g = self.inner.lock().unwrap();
-        match g.state {
+        let mut inner = self.inner.lock().unwrap();
+        self.failure_locked(&mut inner);
+    }
+
+    fn failure_locked(&self, inner: &mut Inner) {
+        match inner.state {
             CircuitState::HalfOpen => {
-                g.half_open_in_flight = g.half_open_in_flight.saturating_sub(1);
-                g.state = CircuitState::Open;
-                g.opened_at = Self::now_ms();
-                g.successes = 0;
-                g.half_open_in_flight = 0;
+                inner.state = CircuitState::Open;
+                inner.generation = inner.generation.wrapping_add(1);
+                inner.opened_at = Self::now_ms();
+                inner.successes = 0;
+                inner.half_open_in_flight = 0;
                 log::warn!("circuit: breaker re-OPENED (half-open failure)");
             }
             CircuitState::Closed => {
-                g.failures += 1;
-                if g.failures >= self.cfg.failure_threshold {
-                    g.state = CircuitState::Open;
-                    g.opened_at = Self::now_ms();
-                    g.successes = 0;
-                    g.half_open_in_flight = 0;
-                    log::warn!("circuit: breaker OPENED (after {} failures)", g.failures);
+                inner.failures += 1;
+                if inner.failures >= self.cfg.failure_threshold {
+                    inner.state = CircuitState::Open;
+                    inner.generation = inner.generation.wrapping_add(1);
+                    inner.opened_at = Self::now_ms();
+                    inner.successes = 0;
+                    inner.half_open_in_flight = 0;
+                    log::warn!(
+                        "circuit: breaker OPENED (after {} failures)",
+                        inner.failures
+                    );
                 }
             }
             CircuitState::Open => {}
         }
     }
-
     pub fn snapshot(&self) -> CircuitBreakerSnapshot {
         let g = self.inner.lock().unwrap();
         CircuitBreakerSnapshot {
             state: g.state,
             failures: g.failures,
             successes: g.successes,
-            opened_at: if g.opened_at > 0 { Some(g.opened_at) } else { None },
+            opened_at: if g.opened_at > 0 {
+                Some(g.opened_at)
+            } else {
+                None
+            },
             cooldown_ms: self.cfg.cooldown_ms,
         }
     }
@@ -159,6 +220,7 @@ impl CircuitBreaker {
     pub fn reset(&self) {
         let mut g = self.inner.lock().unwrap();
         g.state = CircuitState::Closed;
+        g.generation = g.generation.wrapping_add(1);
         g.failures = 0;
         g.successes = 0;
         g.half_open_in_flight = 0;
@@ -208,5 +270,24 @@ mod tests {
         assert!(b.allow()); // transitions to half-open, allows
         b.record_failure(); // re-opens
         assert_eq!(b.snapshot().state, CircuitState::Open);
+    }
+    #[test]
+    fn stale_cancel_cannot_release_another_generation_probe() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            cooldown_ms: 0,
+            half_open_retries: 1,
+            success_threshold: 1,
+        });
+        breaker.record_failure();
+        let stale = breaker.acquire().unwrap();
+        assert!(breaker.acquire().is_none());
+        breaker.record_failure();
+        let current = breaker.acquire().unwrap();
+        breaker.settle(stale, Circuit_outcome::Cancelled);
+        assert!(breaker.acquire().is_none());
+        breaker.settle(current, Circuit_outcome::Cancelled);
+        assert!(breaker.acquire().is_some());
+        assert_eq!(breaker.snapshot().successes, 0);
     }
 }

@@ -1,7 +1,7 @@
 import type { ProviderConfig, ChatCompletionRequest } from '../../config/schema.js';
 import { CircuitBreaker } from '../circuit-breaker.js';
 import type { OAIChatResponse, OAIStreamChunk, ProviderError } from '../canonical.js';
-import { makeError } from '../canonical.js';
+import { makeError, makeProviderError } from '../canonical.js';
 
 /** A provider speaks the canonical OpenAI chat-completion format. */
 export abstract class BaseProvider {
@@ -54,5 +54,5 @@ export abstract class BaseProvider {
   }
 }
 
-export { makeError };
+export { makeError, makeProviderError };
 export type { ProviderError };

@@ -28,9 +28,8 @@ impl Database {
     /// List all routes.
     pub fn get_all_routes(&self) -> Result<Vec<Route>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT alias, description, hops FROM routes ORDER BY alias ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT alias, description, hops FROM routes ORDER BY alias ASC")?;
         let rows = stmt.query_map([], |row| {
             let hops_str: String = row.get(2)?;
             let hops: Vec<RouteHop> = serde_json::from_str(&hops_str).unwrap_or_default();
@@ -50,9 +49,8 @@ impl Database {
     /// Get a single route by alias.
     pub fn get_route(&self, alias: &str) -> Result<Option<Route>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT alias, description, hops FROM routes WHERE alias = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT alias, description, hops FROM routes WHERE alias = ?1")?;
         let mut rows = stmt.query_map(params![alias], |row| {
             let hops_str: String = row.get(2)?;
             let hops: Vec<RouteHop> = serde_json::from_str(&hops_str).unwrap_or_default();

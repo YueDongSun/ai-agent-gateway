@@ -50,7 +50,26 @@ pub struct S3Result {
 /// True for AWS official endpoints (empty or contains "amazonaws.com").
 fn is_aws_endpoint(endpoint: &str) -> bool {
     let e = endpoint.trim();
-    e.is_empty() || e.contains("amazonaws.com")
+    if e.is_empty() {
+        return true;
+    }
+    let candidate = if e.contains("://") {
+        e.to_string()
+    } else {
+        format!("https://{e}")
+    };
+    reqwest::Url::parse(&candidate).ok().is_some_and(|url| {
+        let host = url.host_str().unwrap_or("");
+        url.scheme() == "https"
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.path(), "" | "/")
+            && (host == "s3.amazonaws.com"
+                || (host.starts_with("s3.") && host.ends_with(".amazonaws.com")))
+    })
 }
 
 /// Split `endpoint` into `(scheme, host)`. Defaults to `https` when bare.
@@ -65,33 +84,108 @@ fn split_scheme_host(endpoint: &str) -> (&str, &str) {
     }
 }
 
+fn validate_endpoint_security(creds: &S3Credentials) -> Result<(), AppError> {
+    let valid_region = !creds.region.is_empty()
+        && creds.region.len() <= 63
+        && creds.region.as_bytes()[0].is_ascii_lowercase()
+        && creds.region.as_bytes()[creds.region.len() - 1].is_ascii_alphanumeric()
+        && creds
+            .region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    let valid_bucket = (3..=63).contains(&creds.bucket.len())
+        && (creds.bucket.as_bytes()[0].is_ascii_lowercase()
+            || creds.bucket.as_bytes()[0].is_ascii_digit())
+        && creds.bucket.as_bytes()[creds.bucket.len() - 1].is_ascii_alphanumeric()
+        && creds.bucket.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-".contains(&byte)
+        })
+        && !creds.bucket.contains("..")
+        && creds.bucket.parse::<std::net::Ipv4Addr>().is_err();
+    if !valid_region || !valid_bucket {
+        return Err(AppError::InvalidInput("invalid S3 bucket or region".into()));
+    }
+    if is_aws_endpoint(&creds.endpoint) {
+        return Ok(());
+    }
+    let endpoint = creds.endpoint.trim().trim_end_matches('/');
+    let candidate = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{endpoint}")
+    };
+    let url = reqwest::Url::parse(&candidate)
+        .map_err(|_| AppError::InvalidInput("invalid S3 endpoint".into()))?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    );
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    {
+        return Err(AppError::InvalidInput(
+            "S3 endpoint requires HTTPS or explicit loopback HTTP".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_encrypted_payload() -> Result<(), AppError> {
+    Err(AppError::Message(
+        "cloud_sync_encryption_required: database transfer is disabled".into(),
+    ))
+}
+
 /// Build the full object URL.
 ///
 /// - AWS official: `https://{bucket}.s3.{region}.amazonaws.com/{key}`
 /// - Custom:       `{scheme}://{endpoint_host}/{bucket}/{key}`
-fn build_object_url(creds: &S3Credentials, key: &str) -> String {
+fn build_object_url(creds: &S3Credentials, key: &str) -> Result<String, AppError> {
     let key = key.trim_start_matches('/');
     if is_aws_endpoint(&creds.endpoint) {
-        format!(
+        return Ok(format!(
             "https://{}.s3.{}.amazonaws.com/{}",
-            creds.bucket, creds.region, key
-        )
-    } else {
-        let (scheme, host) = split_scheme_host(&creds.endpoint);
-        format!("{}://{}/{}/{}", scheme, host, creds.bucket, key)
+            creds.bucket,
+            creds.region,
+            uri_encode(key, false)
+        ));
     }
+    let (scheme, host) = split_scheme_host(&creds.endpoint);
+    let mut url = reqwest::Url::parse(&format!("{scheme}://{host}"))
+        .map_err(|_| AppError::InvalidInput("invalid S3 endpoint".into()))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| AppError::InvalidInput("invalid S3 endpoint".into()))?;
+        segments.pop_if_empty().push(&creds.bucket);
+        for segment in key.split('/').filter(|segment| !segment.is_empty()) {
+            segments.push(segment);
+        }
+    }
+    Ok(url.into())
 }
 
 /// Build the bucket-level URL (for HEAD bucket / test connection).
-fn build_bucket_url(creds: &S3Credentials) -> String {
+fn build_bucket_url(creds: &S3Credentials) -> Result<String, AppError> {
     if is_aws_endpoint(&creds.endpoint) {
-        format!(
+        Ok(format!(
             "https://{}.s3.{}.amazonaws.com/",
             creds.bucket, creds.region
-        )
+        ))
     } else {
         let (scheme, host) = split_scheme_host(&creds.endpoint);
-        format!("{}://{}/{}", scheme, host, creds.bucket)
+        let mut url = reqwest::Url::parse(&format!("{scheme}://{host}"))
+            .map_err(|_| AppError::InvalidInput("invalid S3 endpoint".into()))?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::InvalidInput("invalid S3 endpoint".into()))?
+            .pop_if_empty()
+            .push(&creds.bucket);
+        Ok(url.into())
     }
 }
 
@@ -155,7 +249,10 @@ fn sign_request(
         Some(p) => format!("{}:{}", url.host_str().unwrap_or(""), p),
         None => url.host_str().unwrap_or("").to_string(),
     };
-    headers.insert("host", HeaderValue::from_str(&host).map_err(invalid_header)?);
+    headers.insert(
+        "host",
+        HeaderValue::from_str(&host).map_err(invalid_header)?,
+    );
     headers.insert(
         "x-amz-date",
         HeaderValue::from_str(&timestamp).map_err(invalid_header)?,
@@ -185,10 +282,7 @@ fn sign_request(
         .join("&");
 
     // Canonical headers — sorted by lowercase name.
-    let mut names: Vec<String> = headers
-        .keys()
-        .map(|k| k.as_str().to_lowercase())
-        .collect();
+    let mut names: Vec<String> = headers.keys().map(|k| k.as_str().to_lowercase()).collect();
     names.sort();
     names.dedup();
     let canonical_headers = names
@@ -208,7 +302,10 @@ fn sign_request(
         method, canonical_uri, canonical_query, canonical_headers, signed_headers, body_hash_hex
     );
 
-    let scope = format!("{}/{}/{}/{}", datestamp, creds.region, SIGNED_SERVICE, SIGNED_REQUEST);
+    let scope = format!(
+        "{}/{}/{}/{}",
+        datestamp, creds.region, SIGNED_SERVICE, SIGNED_REQUEST
+    );
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{}\n{}\n{}",
         timestamp,
@@ -238,18 +335,19 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .map_err(|e| AppError::Message(format!("reqwest build failed: {e}")))
+        .map_err(|_| AppError::Message("s3_client_build_failed".into()))
 }
 
-fn status_error(op: &str, status: StatusCode, url: &str) -> AppError {
-    AppError::Message(format!("{op} rejected: HTTP {status} ({url})"))
+fn status_error(op: &str, status: StatusCode) -> AppError {
+    AppError::Message(format!("{op} rejected: HTTP {status}"))
 }
 
 /// HEAD the bucket to confirm the credentials + endpoint work.
 pub async fn check_connection(creds: &S3Credentials) -> Result<(), AppError> {
-    let url_str = build_bucket_url(creds);
+    validate_endpoint_security(creds)?;
+    let url_str = build_bucket_url(creds)?;
     let url = reqwest::Url::parse(&url_str)
-        .map_err(|e| AppError::InvalidInput(format!("invalid S3 URL: {e}")))?;
+        .map_err(|_| AppError::InvalidInput("invalid S3 URL".into()))?;
 
     let body_hash = sha256_hex(b"");
     let mut headers = HeaderMap::new();
@@ -261,23 +359,25 @@ pub async fn check_connection(creds: &S3Credentials) -> Result<(), AppError> {
         .headers(headers)
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("HEAD failed: {e}")))?;
+        .map_err(|_| AppError::Message("s3_head_failed".into()))?;
     let status = resp.status();
     match status {
         s if s.is_success() => Ok(()),
         StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED => {
             Err(AppError::Message(format!("auth rejected (HTTP {status})")))
         }
-        s => Err(status_error("HEAD bucket", s, &url_str)),
+        s => Err(status_error("HEAD bucket", s)),
     }
 }
 
 /// PUT local `aag.db` to the bucket as the `aag.db` key.
 pub async fn upload(creds: &S3Credentials) -> Result<S3Result, AppError> {
+    validate_endpoint_security(creds)?;
+    require_encrypted_payload()?;
     let key = "aag.db";
-    let url_str = build_object_url(creds, key);
+    let url_str = build_object_url(creds, key)?;
     let url = reqwest::Url::parse(&url_str)
-        .map_err(|e| AppError::InvalidInput(format!("invalid S3 URL: {e}")))?;
+        .map_err(|_| AppError::InvalidInput("invalid S3 URL".into()))?;
 
     let local = get_db_path();
     let bytes = std::fs::read(&local).map_err(|e| AppError::io(&local, e))?;
@@ -298,10 +398,10 @@ pub async fn upload(creds: &S3Credentials) -> Result<S3Result, AppError> {
         .body(bytes)
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("PUT failed: {e}")))?;
+        .map_err(|_| AppError::Message("s3_put_failed".into()))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(status_error("PUT", status, &url_str));
+        return Err(status_error("PUT", status));
     }
     Ok(S3Result {
         status: "uploaded",
@@ -312,10 +412,12 @@ pub async fn upload(creds: &S3Credentials) -> Result<S3Result, AppError> {
 /// GET the remote `aag.db` and atomically replace the local file. Returns
 /// `Err("remote file is empty")` if S3 returns 0 bytes.
 pub async fn download(creds: &S3Credentials) -> Result<S3Result, AppError> {
+    validate_endpoint_security(creds)?;
+    require_encrypted_payload()?;
     let key = "aag.db";
-    let url_str = build_object_url(creds, key);
+    let url_str = build_object_url(creds, key)?;
     let url = reqwest::Url::parse(&url_str)
-        .map_err(|e| AppError::InvalidInput(format!("invalid S3 URL: {e}")))?;
+        .map_err(|_| AppError::InvalidInput("invalid S3 URL".into()))?;
 
     let body_hash = sha256_hex(b"");
     let mut headers = HeaderMap::new();
@@ -327,22 +429,22 @@ pub async fn download(creds: &S3Credentials) -> Result<S3Result, AppError> {
         .headers(headers)
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("GET failed: {e}")))?;
+        .map_err(|_| AppError::Message("s3_get_failed".into()))?;
     let status = resp.status();
     match status {
         s if s.is_success() => {}
         StatusCode::NOT_FOUND => {
-            return Err(AppError::Message(format!(
-                "remote object not found (HTTP 404) at {url_str}"
-            )))
+            return Err(AppError::Message(
+                "remote object not found (HTTP 404)".into(),
+            ))
         }
-        s => return Err(status_error("GET", s, &url_str)),
+        s => return Err(status_error("GET", s)),
     }
 
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| AppError::Message(format!("read response body: {e}")))?;
+        .map_err(|_| AppError::Message("s3_response_read_failed".into()))?;
     let size = bytes.len() as u64;
     if size == 0 {
         return Err(AppError::Message("remote object is empty".into()));
@@ -376,20 +478,21 @@ pub async fn upload_and_stamp(db: &Database, creds: &S3Credentials) -> Result<S3
     result
 }
 
-pub async fn download_and_stamp(db: &Database, creds: &S3Credentials) -> Result<S3Result, AppError> {
+pub async fn download_and_stamp(
+    db: &Database,
+    creds: &S3Credentials,
+) -> Result<S3Result, AppError> {
     let result = download(creds).await;
     stamp_outcome(db, &result).await;
     result
 }
 
-async fn stamp_outcome<T, E: std::fmt::Display>(db: &Database, result: &Result<T, E>) {
+async fn stamp_outcome<T, E>(db: &Database, result: &Result<T, E>) {
     let target = crate::database::dao::sync_config::SyncTarget::S3;
-    let err_msg = match result {
-        Ok(_) => None,
-        Err(e) => Some(e.to_string()),
-    };
+    let err_msg = result.as_ref().err().map(|_| "sync_operation_failed");
     if let Err(stamp_err) = db.record_sync_result(target, err_msg.as_deref()) {
-        log::warn!("s3: failed to stamp sync result: {stamp_err}");
+        let _ = stamp_err;
+        log::warn!("s3: sync result stamp failed code=database_error");
     }
 }
 
@@ -431,18 +534,61 @@ mod tests {
     #[test]
     fn split_scheme_host_default_to_https() {
         assert_eq!(split_scheme_host("minio:9000"), ("https", "minio:9000"));
-        assert_eq!(split_scheme_host("http://minio:9000"), ("http", "minio:9000"));
+        assert_eq!(
+            split_scheme_host("http://minio:9000"),
+            ("http", "minio:9000")
+        );
         assert_eq!(split_scheme_host("https://x.com"), ("https", "x.com"));
         assert_eq!(split_scheme_host("x.com/"), ("https", "x.com"));
     }
 
     #[test]
+    fn custom_endpoint_requires_https_or_loopback() {
+        let mut creds = custom_creds();
+        creds.endpoint = "http://storage.example.test:9000".into();
+        assert!(validate_endpoint_security(&creds).is_err());
+        creds.endpoint = "http://127.0.0.1:9000".into();
+        assert!(validate_endpoint_security(&creds).is_ok());
+        creds.endpoint = format!("https://{}:{}@{}", "user", "secret", "storage.example.test");
+        assert!(validate_endpoint_security(&creds).is_err());
+        creds.endpoint = "https://storage.example.test/?token=private".into();
+        assert!(validate_endpoint_security(&creds).is_err());
+    }
+
+    #[test]
+    fn bucket_and_region_cannot_change_the_signed_request_host() {
+        let mut creds = aws_creds();
+        for bucket in [
+            "attacker.example/path",
+            "name@attacker.example",
+            "127.0.0.1",
+        ] {
+            creds.bucket = bucket.into();
+            assert!(validate_endpoint_security(&creds).is_err());
+        }
+        creds = aws_creds();
+        for region in ["us-east-1/elsewhere", "us-east-1@attacker", "UPPER"] {
+            creds.region = region.into();
+            assert!(validate_endpoint_security(&creds).is_err());
+        }
+        creds = aws_creds();
+        validate_endpoint_security(&creds).unwrap();
+        let url = reqwest::Url::parse(&build_bucket_url(&creds).unwrap()).unwrap();
+        assert_eq!(url.host_str(), Some("my-bucket.s3.us-east-1.amazonaws.com"));
+    }
+
+    #[test]
+    fn database_transfer_requires_encrypted_payload_format() {
+        assert!(require_encrypted_payload().is_err());
+    }
+
+    #[test]
     fn build_object_url_uses_virtual_hosted_for_aws() {
-        let url = build_object_url(&aws_creds(), "aag.db");
+        let url = build_object_url(&aws_creds(), "aag.db").unwrap();
         assert_eq!(url, "https://my-bucket.s3.us-east-1.amazonaws.com/aag.db");
 
         // Subpath keys
-        let url = build_object_url(&aws_creds(), "sub/aag.db");
+        let url = build_object_url(&aws_creds(), "sub/aag.db").unwrap();
         assert_eq!(
             url,
             "https://my-bucket.s3.us-east-1.amazonaws.com/sub/aag.db"
@@ -451,18 +597,18 @@ mod tests {
 
     #[test]
     fn build_object_url_uses_path_style_for_custom() {
-        let url = build_object_url(&custom_creds(), "aag.db");
+        let url = build_object_url(&custom_creds(), "aag.db").unwrap();
         assert_eq!(url, "http://minio.local:9000/my-bucket/aag.db");
     }
 
     #[test]
     fn build_bucket_url_works() {
         assert_eq!(
-            build_bucket_url(&aws_creds()),
+            build_bucket_url(&aws_creds()).unwrap(),
             "https://my-bucket.s3.us-east-1.amazonaws.com/"
         );
         assert_eq!(
-            build_bucket_url(&custom_creds()),
+            build_bucket_url(&custom_creds()).unwrap(),
             "http://minio.local:9000/my-bucket"
         );
     }
@@ -519,7 +665,8 @@ mod tests {
     #[test]
     fn sign_request_produces_authorization_header() {
         let creds = aws_creds();
-        let url: reqwest::Url = reqwest::Url::parse(&build_object_url(&creds, "aag.db")).unwrap();
+        let url: reqwest::Url =
+            reqwest::Url::parse(&build_object_url(&creds, "aag.db").unwrap()).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("content-type"),
@@ -551,7 +698,8 @@ mod tests {
     #[test]
     fn sign_request_is_deterministic() {
         let creds = aws_creds();
-        let url: reqwest::Url = reqwest::Url::parse(&build_object_url(&creds, "aag.db")).unwrap();
+        let url: reqwest::Url =
+            reqwest::Url::parse(&build_object_url(&creds, "aag.db").unwrap()).unwrap();
         let now = chrono::DateTime::parse_from_rfc3339("2024-01-15T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);

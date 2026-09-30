@@ -18,6 +18,10 @@ export interface ProxyProvider {
   /** Per-provider model mapping: display model -> upstream model.
    *  Example: { "claude-sonnet-5": "deepseek-v4-pro" } */
   modelMapping: Record<string, string>;
+  /** Per-provider extra request headers merged into every upstream request.
+   *  Reserved auth/content headers are never overridden.
+   *  Example: { "x-opencode-session": "..." } */
+  extraHeaders: Record<string, string>;
 }
 
 export interface CircuitBreakerConfig {
@@ -143,6 +147,18 @@ export async function getPinnedProvider(): Promise<string | null> {
 /// Set (or clear) the pinned proxy provider. Empty string clears (restores normal failover).
 export async function setPinnedProvider(providerId: string): Promise<void> {
   await invoke('proxy_set_pinned_provider', { providerId });
+}
+
+/// Read the `/v1/responses` chain-of-thought prompt toggle (true =
+/// built-in reasoning system prompt injected into Codex-surface requests).
+export async function getResponsesCot(): Promise<boolean> {
+  return invoke<boolean>('proxy_get_responses_cot');
+}
+
+/// Toggle the built-in chain-of-thought prompt for `/v1/responses`.
+/// Immediate effect on the running proxy; persisted for the next start.
+export async function setResponsesCot(enabled: boolean): Promise<void> {
+  await invoke('proxy_set_responses_cot', { enabled });
 }
 
 /// Test a proxy provider's connectivity by sending a minimal request.

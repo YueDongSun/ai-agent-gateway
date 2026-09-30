@@ -5,4 +5,6 @@ export * from './providers';
 export * from './proxy';
 export * from './codexCli';
 export * from './copilot';
+export * from './vscode';
 export * from './import';
+export * from './diagnostics';

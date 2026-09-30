@@ -1,7 +1,8 @@
 import type { ChatCompletionRequest } from '../../config/schema.js';
 import type { OAIChatResponse, OAIStreamChunk } from '../canonical.js';
-import { BaseProvider, makeError } from './base.js';
-import { logger } from '../../util/log.js';
+import { BaseProvider, makeProviderError } from './base.js';
+import { logger, safeLogRef } from '../../util/log.js';
+import { endpointUrl, modelsUrls } from './endpoint.js';
 
 /**
  * OpenAI-compatible provider.
@@ -10,46 +11,72 @@ import { logger } from '../../util/log.js';
  */
 export class OpenAIProvider extends BaseProvider {
   private endpoint(): string {
-    let base = this.config.baseURL.replace(/\/+$/, '');
-    if (!base) base = 'https://api.openai.com/v1';
-    if (!/\/v\d+$/.test(base) && !base.endsWith('/v1')) {
-      // don't force /v1 if user already included it
-    }
-    return `${base}/chat/completions`;
+    // Shared normalization: a base stored as a full
+    // `.../v1/chat/completions` endpoint is used as-is instead of being
+    // doubled, and a bare root gains `/v1` (see endpoint.ts).
+    return endpointUrl(this.config.baseURL, 'openai');
   }
 
   async complete(req: ChatCompletionRequest): Promise<OAIChatResponse> {
     const url = this.endpoint();
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify({ ...req, stream: false }),
-      signal: this.timeoutSignal(),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw makeError(
-        `${this.id} HTTP ${res.status}: ${body.slice(0, 300)}`,
-        { status: res.status, retriable: res.status >= 500 || res.status === 429 },
-      );
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({ ...req, stream: false }),
+        signal: this.timeoutSignal(),
+      });
+    } catch {
+      throw makeProviderError('upstream_transport_error', {
+        retriable: true,
+        stage: 'request_send',
+      });
     }
-    return (await res.json()) as OAIChatResponse;
+    if (!res.ok) {
+      const responseBytes = await responseByteLength(res);
+      throw makeProviderError('upstream_http_error', {
+        status: res.status,
+        retriable: res.status >= 500 || res.status === 429,
+        stage: 'response_status',
+        responseBytes,
+      });
+    }
+    try {
+      return (await res.json()) as OAIChatResponse;
+    } catch {
+      throw makeProviderError('upstream_decode_error', {
+        status: 502,
+        retriable: true,
+        stage: 'response_decode',
+      });
+    }
   }
 
   async *stream(req: ChatCompletionRequest): AsyncGenerator<OAIStreamChunk> {
     const url = this.endpoint();
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify({ ...req, stream: true }),
-      signal: this.timeoutSignal(),
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({ ...req, stream: true }),
+        signal: this.timeoutSignal(),
+      });
+    } catch {
+      throw makeProviderError('upstream_transport_error', {
+        retriable: true,
+        stage: 'stream_connect',
+      });
+    }
     if (!res.ok || !res.body) {
-      const body = await res.text().catch(() => '');
-      throw makeError(
-        `${this.id} stream HTTP ${res.status}: ${body.slice(0, 300)}`,
-        { status: res.status, retriable: res.status >= 500 || res.status === 429 },
-      );
+      const responseBytes = await responseByteLength(res);
+      throw makeProviderError('upstream_http_error', {
+        status: res.status || 502,
+        retriable: res.status >= 500 || res.status === 429,
+        stage: 'stream_status',
+        responseBytes,
+      });
     }
     yield* parseSSE<OAIStreamChunk>(res.body, this.id);
   }
@@ -65,9 +92,11 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   async health(): Promise<boolean> {
+    // Probe the first model-catalog candidate; full-endpoint bases are
+    // reduced to their root before /models is appended (see endpoint.ts).
+    const url = modelsUrls(this.config.baseURL || 'https://api.openai.com/v1', 'openai')[0];
+    if (!url) return false;
     try {
-      const base = this.config.baseURL.replace(/\/+$/, '');
-      const url = `${base}/models`;
       const res = await fetch(url, {
         headers: this.headers(),
         signal: AbortSignal.timeout(5000),
@@ -99,9 +128,21 @@ export async function* parseSSE<T>(
       if (!data) continue;
       try {
         yield JSON.parse(data) as T;
-      } catch (e) {
-        logger.debug(tag, `skipping unparseable SSE line: ${data.slice(0, 120)}`);
+      } catch {
+        logger.debug('openai', 'sse_parse_failed', {
+          provider_ref: safeLogRef(tag),
+          data_bytes: new TextEncoder().encode(data).byteLength,
+          stage: 'stream_decode',
+        });
       }
     }
+  }
+}
+
+async function responseByteLength(response: Response): Promise<number> {
+  try {
+    return (await response.arrayBuffer()).byteLength;
+  } catch {
+    return 0;
   }
 }

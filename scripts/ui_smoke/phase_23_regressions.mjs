@@ -76,12 +76,13 @@ export async function run_phase_23_regressions({ cdp, check_in_page, check, slee
     const baseline = structuredClone(await api.listProxyProviders());
     const provider = baseline[0];
     if (!provider) return 'no-provider';
-    const toggle = document.querySelector('[data-testid="upstream-toggle-' + CSS.escape(provider.id) + '"]');
+    const toggle_selector = () => '[data-testid="provider-toggle-' + CSS.escape(provider.id) + '"]';
+    const toggle = document.querySelector(toggle_selector());
     if (!toggle) return 'no-upstream-toggle';
     toggle.click();
     await new Promise((resolve) => setTimeout(resolve, 500));
     const disabled = (await api.listProxyProviders()).find((candidate) => candidate.id === provider.id);
-    document.querySelector('[data-testid="upstream-toggle-' + CSS.escape(provider.id) + '"]')?.click();
+    document.querySelector(toggle_selector())?.click();
     await new Promise((resolve) => setTimeout(resolve, 500));
     const enabled = (await api.listProxyProviders()).find((candidate) => candidate.id === provider.id);
     return { ok: disabled?.enabled === !provider.enabled && enabled?.enabled === provider.enabled, detail: 'baseline=' + provider.enabled + ' disabled=' + disabled?.enabled + ' enabled=' + enabled?.enabled };
@@ -90,12 +91,13 @@ export async function run_phase_23_regressions({ cdp, check_in_page, check, slee
   await check_in_page(cdp, check, 'upstream pin then unpin persists backend state', async () => {
     const api = window.__aag_smoke_api;
     const provider = (await api.listProxyProviders())[0];
-    const pin_toggle = document.querySelector('.failover-flow .toggle-switch input');
+    const pin_selector = () => '[data-testid="provider-pin-' + CSS.escape(provider.id) + '"]';
+    const pin_toggle = document.querySelector(pin_selector());
     if (!provider || !pin_toggle) return 'no-pin-toggle';
     pin_toggle.click();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const pinned = await api.getPinnedProvider();
-    document.querySelector('.failover-flow .toggle-switch input')?.click();
+    document.querySelector(pin_selector())?.click();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const unpinned = await api.getPinnedProvider();
     return { ok: pinned === provider.id && unpinned === null, detail: 'pin=' + pinned + ' unpin=' + unpinned };
@@ -127,4 +129,18 @@ export async function run_phase_23_regressions({ cdp, check_in_page, check, slee
     await cdp.eval_value("document.querySelector('[data-testid=\"route-discard\"]')?.click(); 1");
     await sleep(settle_ms);
   }
+
+  // Claude mirror (CLAUDE_CONFIG_DIR) surface: the auth-mode toggle and
+  // the Open Claude Desktop launcher must render on the Claude page.
+  await check_in_page(cdp, check, 'claude mirror rows render on the claude page', async () => {
+    const mode_toggle = document.querySelector('[data-testid="claude-mirror-mode-toggle"]');
+    const open_button = document.querySelector('[data-testid="claude-open-desktop"]');
+    const home_row = [...document.querySelectorAll('.endpoint-label')].some((label) =>
+      (label.textContent || '').includes('CLAUDE_CONFIG_DIR'),
+    );
+    return {
+      ok: Boolean(mode_toggle) && Boolean(open_button) && home_row,
+      detail: 'mode=' + Boolean(mode_toggle) + ' open=' + Boolean(open_button) + ' home=' + home_row,
+    };
+  });
 }

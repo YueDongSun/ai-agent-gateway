@@ -41,8 +41,8 @@ pub fn emit_urls<R: Runtime>(app: &AppHandle<R>, urls: Vec<String>) {
         return;
     }
     let payload = DeeplinkPayload { urls };
-    if let Err(e) = app.emit(EVENT_NAME, payload) {
-        log::warn!("deeplink: failed to emit event: {e}");
+    if app.emit(EVENT_NAME, payload).is_err() {
+        log::warn!("deeplink: event emit failed");
     }
 }
 
@@ -93,11 +93,7 @@ mod tests {
 
     #[test]
     fn extract_aag_urls_returns_empty_when_no_match() {
-        let argv = vec![
-            "aag.exe".into(),
-            "--something".into(),
-            "https://x".into(),
-        ];
+        let argv = vec!["aag.exe".into(), "--something".into(), "https://x".into()];
         assert!(extract_aag_urls(&argv).is_empty());
     }
 

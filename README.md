@@ -1,961 +1,182 @@
 # AI Agent Gateway (AAG)
 
-Unified **Gateway Proxy** + **Config Switcher** for AI Coding Agents
+AAG is a local gateway and configuration manager for AI coding tools. It
+provides OpenAI and Anthropic compatible HTTP endpoints, ordered provider
+failover, circuit breakers, and a Tauri desktop interface for managing routes
+and agent integrations.
 
-The current desktop distribution is **v0.2.0 Preview**. Start with the
-[release notes](docs/releases/v0_2_0.md) and [build and platform guide](docs/desktop_release.md). The Windows preview is unsigned; native
-acceptance on other operating systems and automatic updates are not complete.
-The feature descriptions below also include the retained Node CLI and historical
-migration scope; they are not a platform certification checklist.
+The current release line is the unsigned `v0.2.0` desktop preview. The Node
+gateway and CLI remain independently runnable for headless use.
 
-A comprehensive solution inspired by `cc-switch` capabilities, with broader agent support and enhanced proxy infrastructure. Supports Copilot, Kilo, Cursor, Zcode, MiniMax, Kimi agents while providing a local OpenAI & Anthropic compatible proxy with **circuit-breaker auto-failover** mechanism.
+## What it provides
 
-> **Desktop app (primary):** AAG is now a **Tauri 2 desktop app** (`src-tauri/` +
-> `ui/`), feature-complete through Phase 10 — SQLite SSOT, provider switching
-> for Claude Code / Codex (including **isolated Codex CLI CODEX_HOME** that
-> keeps the CLI separate from the Codex desktop app's `~/.codex`), a local
-> proxy with streaming SSE + circuit breaker + failover, backup/restore, MCP,
-> Skills, Sessions, Usage dashboard, S3/WebDAV sync, deep links, tray and
-> auto-update. See `DESIGN.md` / `PROGRESS.md` for details.
->
-> **Legacy CLI:** the original Node proxy (`src/`) still works standalone via
-> `npm run gateway` for headless / scripted use.
->
-> **Note on `cc-switch/`:** This repository no longer carries the upstream `cc-switch` source as a git submodule. The `cc-switch/` directory is a placeholder you can populate yourself (e.g. `git clone <cc-switch-url> cc-switch/`) if you want to compare or vendor its behavior. `src/agents/switcher.ts` already implements an equivalent config-rewriting flow for every supported agent.
+- OpenAI-compatible `POST /v1/chat/completions`.
+- Anthropic-compatible `POST /v1/messages`.
+- OpenAI Responses-compatible `POST /v1/responses` (Codex CLI native protocol).
+- `GET /v1/models` and `GET /health`.
+- Ordered route hops with retriable-error failover (network, 429, 5xx).
+- Per-provider `closed`, `open`, and `half-open` circuit breakers.
+- Provider, vendor, route, backup, MCP, skills, sessions, and usage
+  management in the desktop UI.
+- cc-switch import and coexistence detection. Claude Code chains through AAG
+  via cc-switch; Codex CLI runs natively against AAG in an isolated
+  `CODEX_HOME` mirror.
+- Claude Code, Codex, Copilot CLI, Gemini, Kilo, OpenCode, and Pi adapters with automatic platform config-path resolution; Antigravity remains detect-only
+  surfaces where implemented.
+- System tray with show/hide/quit and close-to-tray behavior.
+- Lossless Anthropic thinking/signature relay for Anthropic-compatible
+  upstreams, with normalized streaming usage and reusable upstream connections.
+- Local product diagnostics with 30-minute Debug mode, bounded log rotation,
+  request-stage timing, and native/frontend crash evidence.
+- Deep links (`aag://switch/<id>`, `aag://provider/<id>`, `aag://mcp/<id>`,
+  `aag://skill/<id>`).
+- Experimental S3 and WebDAV connection helpers. Database transfer is disabled
+  until an authenticated client-side encrypted payload format exists.
+- Browser demo mode with synthetic IPC for safe UI exploration.
 
-## Features
+Streaming failover is one-shot: the first chunk is probed before the router
+commits to a provider. A later stream error is returned to the client.
 
-### Gateway Proxy
-- **Unified Endpoint** — Single local proxy server that speaks multiple protocols:
-  - `POST /v1/chat/completions` — OpenAI Chat Compat API
-  - `POST /v1/messages` — Anthropic Messages API  
-  - `GET /v1/models` — Available models listing
-  - `GET /health` — Health check endpoint
-- **Multi-Protocol Support** — Simultaneously handles OpenAI and Anthropic request formats
-- **Streaming Support** — Full SSE streaming support for both protocols
-- **Request/Response Transformation** — Automatic bidirectional format conversion
+## Surfaces
 
-### Circuit Breaker System
-- **Per-Provider Breakers** — Individual circuit breaker for each provider instance
-- **Failure Threshold** — Configurable consecutive failure count before opening breaker
-- **Automatic Failover** — Seamlessly routes to next provider in chain after breaker opens
-- **Half-Open Probing** — After cooldown period, allows limited trial requests to test recovery
-- **State Management** — Three states: `closed` (normal), `open` (rejecting), `half-open` (testing)
-- **Recovery Detection** — Configurable success threshold to close breaker and resume normal operation
+| Surface | Start here | Owns |
+| --- | --- | --- |
+| Desktop | `npm run desktop:dev` | Tauri, SQLite, React UI, Rust proxy |
+| Browser demo | `npm run ui:demo` | React UI with synthetic IPC |
+| Node gateway | `npm run gateway` | Headless Hono gateway and JSON config |
+| Node TUI | `npm run dev` | Legacy interactive CLI |
+| Read-only MCP companion | `node scripts/mcp/aag_mcp.mjs` | Static AAG workflows and verification plans; no live state or writes |
 
-### Intelligent Model Routing
-- **Alias Mapping** — Map client-facing model aliases (e.g., `claude-sonnet-4`) to internal model chains
-- **Ordered Hops** — Define fallback chains of `(provider, model)` combinations
-- **Sequential Attempt** — Tries each hop in order until successful response received
-- **Route Optimization** — Intelligent retry logic with exponential backoff support
+See [the architecture guide](docs/architecture.md) for module ownership and
+[the development guide](docs/development.md) for setup and verification.
 
-### Advanced Configuration System
-- **Agent Config Switcher** — Dynamically rewrite agent configuration files:
-  - Point agents to unified gateway proxy
-  - Configure direct provider connections
-  - Bulk operations for multiple agents
-- **Profile Management** — Reusable credential sets (baseURL + apiKey + models) across agents
-- **Hot-Swapping** — Runtime configuration changes without service restart
-- **Backup & Restore** — Automatic configuration backup and restore functionality
+## Quick start
 
-### Development & Testing
-- **Mock Provider** — Complete simulation layer for testing without API keys
-- **Comprehensive Logging** — Detailed request/response logging with configurable levels
-- **Metrics & Monitoring** — Health checks, performance metrics, and circuit breaker status
-- **TUI Interface** — Interactive terminal user interface with real-time status
-- **CLI Commands** — Scriptable command-line interface for automation
+Install both dependency sets from the repository root:
 
-## Quick Start
+```text
+npm ci --ignore-scripts
+npm ci --prefix ui --ignore-scripts
+```
 
-### Desktop app (primary)
+Run the desktop application:
 
-```bash
-npm install
-npm run ui:install
-npm run ui:build
+```text
 npm run desktop:dev
 ```
 
-Run all commands above from the repository root. `npm run ui:demo` opens the
-browser UI from source, and `npm run ui:preview` rebuilds and serves the browser
-demo bundle. `npm run desktop:build` rebuilds the native UI and creates bundles
-for the host OS. The root `npm run dev` still launches the legacy Node TUI.
+Run the browser-only demo:
 
-Data lives in `~/.aag/aag.db` (SQLite). Override locations with
-`AAG_CONFIG_DIR` (app data + DB) and `AAG_HOME_DIR` (agent config paths) for
-portable installs / testing.
-
-#### Installer location (Windows)
-
-`npm run tauri:build` produces the release bundle under
-`src-tauri/target/release/bundle/`:
-
-- `nsis/AI Agent Gateway_<version>_x64-setup.exe` — user-friendly setup wizard (recommended)
-- `msi/AI Agent Gateway_<version>_x64_en-US.msi` — MSI for IT-managed deployment
-
-Install either and launch "AI Agent Gateway" from the Start menu. The app keeps
-its data in `~/.aag/aag.db` (SQLite) and writes live agent config under the
-user home — see the Codex CLI page for isolating the Codex CLI from the Codex
-desktop app's shared `~/.codex`.
-
-#### Browser-only demo mode (no Tauri)
-
-The React UI can run in a plain browser without the Rust backend, which is
-useful for UI development and demos:
-
-```bash
-cd ui && npm run dev     # then open http://localhost:1420
-# or: npm run demo       # same server, auto-opens the browser
+```text
+npm run ui:demo
 ```
 
-When the Tauri bridge (`window.__TAURI_INTERNALS__`) is absent,
-`ui/src/lib/mock/backend.ts` installs an in-browser mock IPC backend that
-implements every command the UI invokes (with realistic seed data for all 11
-tabs) and intercepts the proxy page's direct `fetch` calls. Inside the Tauri
-webview the mock is a no-op and the real Rust backend wins, so production is
-unaffected.
+The browser demo uses synthetic provider data and does not send real upstream
+requests or write live agent configuration.
 
-Debug hooks in the browser console:
+## MCP workspace, verification, and DSH
 
-- `window.__aagDemoSetError(cmd | null)` — force a command to reject so UI error paths can be exercised
-- `window.__aagDemoSeedDeeplink('aag://switch/<id>?app=<type>')` — fire a deep-link event
-- URL param `?deeplink=aag://...` — seed one deep link on page load
+The desktop UI includes an MCP registry for stdio and HTTP definitions; client
+selections stay in AAG until reviewed (see [MCP management](docs/mcp_management.md)).
+The read-only companion shares its feature catalog with the local verification
+runner: `npm run verify:features -- --scope all`, add `--run` to execute the
+trusted, isolated local checks (see [MCP companion](docs/mcp_companion.md)).
+The managed DSH extension stays isolated from native agent files (see
+[DSH hardening](docs/dsh_hardening.md)).
 
-### Legacy CLI (Node)
+## Node gateway
 
-```bash
-npm install
-npm run dev              # Interactive TUI Menu (recommended)
-npm run gateway          # Start proxy server on default port 8787
-npm run gateway -p 9000  # Start on custom port
-npm run test             # Run comprehensive e2e test suite
-npm run typecheck        # TypeScript type checking
+The legacy Node gateway defaults to `127.0.0.1:8787` and reads
+`~/.ai-agent-gateway/config.json`. Set `AAG_CONFIG_DIR` to use another config
+directory.
+
+```text
+npm run gateway
+npm run gateway -- --host 127.0.0.1 --port 9000
 ```
 
-### Configuration
-First-time setup creates default configuration at `~/.ai-agent-gateway/config.json`:
-```jsonc
-{
-  "gateway": { "host": "127.0.0.1", "port": 8787 },
-  "providers": [
-    {
-      "id": "mock-provider",
-      "name": "Mock Provider",
-      "type": "mock",
-      "enabled": true
-    }
-  ]
-}
+The Node HTTP surface is:
+
+```text
+GET  /health
+GET  /v1/models
+POST /v1/chat/completions
+POST /v1/messages
 ```
 
-## Command Line Interface
-
-### Core Commands
-```bash
-aag                           # Interactive TUI menu (default)
-aag gateway                   # Start gateway server
-aag gateway -p 9000           # Start on custom port
-aag gateway --host 0.0.0.0    # Bind to all interfaces
-aag status                    # Show system status and configuration
-aag health                    # Detailed health check report
-```
-
-### Configuration Management
-```bash
-aag config-path              # Print configuration file location
-aag config-validate          # Validate configuration syntax
-aag config-backup            # Create configuration backup
-aag config-restore           # Restore from backup
-```
-
-### Provider & Model Management
-```bash
-aag models                   # List available models (gateway required)
-aag providers                # List configured providers
-aag provider add <id>        # Add new provider
-aag provider remove <id>      # Remove provider
-aag provider test <id>       # Test provider connectivity
-```
-
-### Agent Configuration
-```bash
-aag switch cursor            # Point Cursor to gateway (interactive)
-aag switch cursor --direct   # Point Cursor to direct provider
-aag switch kimi --to direct --base-url https://api.moonshot.cn/v1 --api-key sk-xxx
-aag switch copilot --to gateway -m claude-sonnet-4
-aag switch all --to-gateway # Point all agents to gateway
-aag agents                   # List detected agents and their status
-```
-
-### Testing & Debugging
-```bash
-aag test                     # Run mock test request
-aag test gpt-4o              # Test specific model
-aag test --stream            # Test streaming response
-aag test --verbose           # Detailed test output
-aag logs                     # Show application logs
-aag logs --follow            # Follow log output in real-time
-```
-
-### Circuit Breaker Operations
-```bash
-aag breaker status           # Show circuit breaker states
-aag breaker reset <provider>  # Reset specific circuit breaker
-aag breaker stats            # Detailed breaker statistics
-```
-
-## Configuration
-
-The system uses JSON configuration stored at `~/.ai-agent-gateway/config.json`. Configuration can be managed through the TUI interface or manually edited.
-
-### Configuration Structure
-
-```jsonc
-{
-  "version": 1,
-  "gateway": {
-    "host": "127.0.0.1",
-    "port": 8787,
-    "authToken": "",
-    "logLevel": "info",
-    "maxRequestSize": "10mb",
-    "timeoutMs": 30000
-  },
-  "providers": [
-    {
-      "id": "openai-prod",
-      "name": "OpenAI Production",
-      "type": "openai",
-      "apiKey": "sk-...",
-      "baseURL": "https://api.openai.com/v1",
-      "models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20241022"],
-      "enabled": true,
-      "timeoutMs": 60000,
-      "weight": 1,
-      "retryAttempts": 3,
-      "retryDelayMs": 1000,
-      "circuitBreaker": {
-        "failureThreshold": 5,
-        "cooldownMs": 30000,
-        "halfOpenRetries": 1,
-        "successThreshold": 2,
-        "expectedErrorRate": 0.1
-      }
-    }
-  ],
-  "routes": [
-    {
-      "alias": "claude-sonnet-4",
-      "description": "Production Claude model with OpenAI fallback",
-      "hops": [
-        { "provider": "anthropic-prod", "model": "claude-3-5-sonnet-20241022" },
-        { "provider": "openai-prod", "model": "gpt-4o" }
-      ],
-      "timeoutMs": 120000
-    }
-  ],
-  "profiles": [
-    {
-      "id": "enterprise-account",
-      "name": "Enterprise API Access",
-      "baseURL": "https://api.enterprise.openai.com/v1",
-      "apiKey": "<enterprise-api-key>",
-      "models": ["gpt-4", "gpt-4-turbo"]
-    }
-  ],
-  "agents": [
-    {
-      "name": "cursor",
-      "installed": true,
-      "configPath": "%APPDATA%\\Cursor\\User\\settings.json",
-      "pointedAtGateway": true,
-      "lastSynced": "2024-01-15T10:30:00Z"
-    }
-  ]
-}
-```
-
-### Provider Types
-
-#### OpenAI Provider
-```jsonc
-{
-  "type": "openai",
-  "apiKey": "sk-...",
-  "baseURL": "https://api.openai.com/v1",
-  "models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20241022"],
-  "headers": {
-    "OpenAI-Beta": "assistants=v2"
-  }
-}
-```
-
-#### Anthropic Provider
-```jsonc
-{
-  "type": "anthropic",
-  "apiKey": "sk-ant-...",
-  "baseURL": "https://api.anthropic.com",
-  "models": ["claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
-  "maxTokens": 4096,
-  "temperature": 0.7
-}
-```
-
-#### Mock Provider
-```jsonc
-{
-  "type": "mock",
-  "models": ["mock-gpt-4", "mock-claude"],
-  "responseDelayMs": 100,
-  "successRate": 1.0,
-  "simulateErrors": false
-}
-```
-
-### Circuit Breaker Configuration
-
-The circuit breaker system prevents cascading failures and provides automatic recovery:
-
-- **failureThreshold**: Number of consecutive failures before opening breaker
-- **cooldownMs**: Duration to wait before attempting recovery (half-open state)
-- **halfOpenRetries**: Maximum trial requests allowed during recovery phase
-- **successThreshold**: Number of successful requests needed to close breaker
-- **expectedErrorRate**: Normal error rate threshold (0.0-1.0)
-
-### Agent Configuration Paths
-
-| Agent | Configuration Path (Windows) | Configuration Path (Unix/macOS) |
-|-------|------------------------------|--------------------------------|
-| Cursor | `%APPDATA%\Cursor\User\settings.json` | `~/.config/cursor/settings.json` |
-| Copilot | `%APPDATA%\GitHub CLI\hosts.yml` | `~/.config/gh/hosts.yml` |
-| Kilo | `~/.kilo/config.json` | `~/.kilo/config.json` |
-| Zcode | `~/.zcode/config.json` | `~/.zcode/config.json` |
-| MiniMax | `~/.minimax/config.json` | `~/.minimax/config.json` |
-| Kimi | `~/.kimi/config.json` | `~/.kimi/config.json` |
-
-## Failover Mechanism
-
-### Request Flow Architecture
-
-```
-Client Request
-    ↓
-Gateway Router (/v1/chat/completions)
-    ↓
-Alias Resolution ("claude-sonnet-4")
-    ↓
-Route Chain Processing
-    ↓
-┌─────────────────┐    ┌─────────────────┐
-│ Provider 0      │    │ Provider 1      │
-│ Anthropic Prod  │ →  │ OpenAI Prod     │
-│ Claude-3.5-Sonnet│    │ GPT-4o          │
-└─────────────────┘    └─────────────────┘
-    ↓                        ↓
-Circuit Breaker Check    Circuit Breaker Check
-    ↓                        ↓
-Request Execution    Request Execution
-    ↓                        ↓
-500 Error → Retry    200 OK → Success
-    ↓                        ↓
-Failure Count      Success Response
-    ↑                        ↑
-└─── Failover ────────────────────────┘
-```
-
-### Circuit Breaker States
-
-#### Closed State (Normal Operation)
-- All requests pass through normally
-- Failure counter tracks consecutive failures
-- Success counter tracks consecutive successes
-- Gateway continues routing requests to this provider
-
-#### Open State (Failure Mode)
-- All requests immediately rejected (no network calls)
-- Failure counter exceeds threshold
-- Cooldown timer starts (`cooldownMs`)
-- Requests automatically routed to next provider in chain
-
-#### Half-Open State (Recovery Testing)
-- Limited trial requests allowed (`halfOpenRetries`)
-- Each success increases success counter
-- Each failure immediately re-opens breaker
-- Success threshold reached returns to closed state
-
-### Failover Algorithm
-
-```typescript
-interface Hop {
-  provider: string;
-  model: string;
-  timeoutMs: number;
-}
-
-interface Route {
-  alias: string;
-  hops: Hop[];
-  timeoutMs: number;
-}
-
-function processRequest(route: Route, request: Request): Promise<Response> {
-  for (const hop of route.hops) {
-    const provider = getProvider(hop.provider);
-    const breaker = provider.circuitBreaker;
-    
-    if (breaker.allow()) {
-      try {
-        const response = await fetchProvider(provider, hop.model, request);
-        breaker.recordSuccess();
-        return response;
-      } catch (error) {
-        breaker.recordFailure();
-        
-        // Check if we should try next hop
-        if (isRetriable(error) && hasMoreHops(hop)) {
-          continue; // Try next provider
-        }
-        throw error; // No more hops or non-retriable error
-      }
-    }
-    // Circuit breaker is open, skip to next hop
-  }
-  throw new Error('All providers in route chain failed');
-}
-```
-
-### Error Handling Strategy
-
-#### Retriable Errors
-- Network timeouts
-- 5xx server errors
-- Rate limiting (429)
-- Temporary service unavailability
-
-#### Non-Retriable Errors
-- Authentication failures (401)
-- Invalid requests (400, 422)
-- Permission denied (403)
-- Resource not found (404)
-
-### Recovery Process
-
-1. **Failure Detection** - Consecutive failures trigger breaker opening
-2. **Cooldown Period** - Wait time before attempting recovery
-3. **Half-Open Testing** - Limited trial requests test provider health
-4. **Success Accumulation** - Successful responses gradually restore service
-5. **Full Recovery** - Success threshold returns breaker to closed state
-
-### Performance Optimization
-
-- **Lazy State Transitions** - State changes occur on actual request processing
-- **Concurrent Processing** - Multiple providers can be tested in parallel (experimental)
-- **Request Batching** - Multiple requests can share circuit breaker state
-- **Health Probing** - Background health checks for faster recovery detection
-
-## Provider Types
-
-### OpenAI-Compatible Providers
-| Provider Type | API Endpoint | Wire Format | Supported Models | Features |
-|--------------|-------------|------------|-----------------|----------|
-| **OpenAI** | `https://api.openai.com/v1` | `/v1/chat/completions` | gpt-4o, gpt-4-turbo, gpt-4o-mini | Streaming, Tools, Vision |
-| **DeepSeek** | `https://api.deepseek.com/v1` | `/v1/chat/completions` | deepseek-coder, deepseek-chat | Code optimization, Python focus |
-| **Kimi/Moonshot** | `https://api.moonshot.cn/v1` | `/v1/chat/completions` | moonshot-v1-8k, moonshot-v1-32k | Chinese optimization, Long context |
-| **Together** | `https://api.together.xyz/v1` | `/v1/chat/completions` | llama-3-70b, mistral-7b | Open-source models, Research focus |
-| **vLLM** | `http://localhost:8000/v1` | `/v1/chat/completions` | Custom models | High-throughput, PagedAttention |
-| **Ollama** | `http://localhost:11434/v1` | `/v1/chat/completions` | llama3, mistral, codellama | Local inference, GGUF format |
-
-### Anthropic-Compatible Providers
-| Provider Type | API Endpoint | Wire Format | Supported Models | Features |
-|--------------|-------------|------------|-----------------|----------|
-| **Anthropic Claude** | `https://api.anthropic.com` | `/v1/messages` | claude-3-5-sonnet, claude-3-haiku | Constitutional AI, Long context |
-| **Bedrock Claude** | `https://bedrock-runtime.us-east-1.amazonaws.com` | `/v1/messages` | claude-3-sonnet-20240229 | AWS integration, Enterprise features |
-| **GLM (Zhipu AI)** | `https://open.bigmodel.cn/api/anthropic` | `/v1/messages` | glm-4, glm-3-turbo | Chinese optimization, Research models |
-
-### Mock Provider
-| Provider Type | API Endpoint | Wire Format | Features |
-|--------------|-------------|------------|----------|
-| **Mock** | In-process | Custom simulation | Configurable delays, Error simulation, Load testing |
-
-### Request Format Support
-
-#### OpenAI Format (`/v1/chat/completions`)
-```json
-{
-  "model": "claude-sonnet-4",
-  "messages": [{"role": "user", "content": "Hello"}],
-  "temperature": 0.7,
-  "stream": false,
-  "tools": [...],
-  "tool_choice": "auto"
-}
-```
-
-#### Anthropic Format (`/v1/messages`)
-```json
-{
-  "model": "claude-3-5-sonnet-20241022",
-  "max_tokens": 1024,
-  "messages": [{"role": "user", "content": "Hello"}],
-  "system": "You are a helpful assistant",
-  "stream": false
-}
-```
-
-## Agent Integration
-
-### Supported AI Coding Agents
-
-| Agent | Platform | Configuration Method | Features |
-|-------|----------|-------------------|----------|
-| **Cursor** | Desktop | JSON settings file | VS Code integration, Git integration |
-| **Copilot** | CLI/IDE | GitHub CLI hosts | GitHub integration, Enterprise support |
-| **Kilo** | CLI | JSON config file | Terminal-based, Script automation |
-| **Zcode** | Desktop | JSON config file | IDE integration, Project management |
-| **MiniMax** | Web/Desktop | JSON config file | Chinese optimization, API access |
-| **Kimi** | Web/Desktop | JSON config file | Chinese focus, Long context |
-
-### Configuration Management
-
-#### Auto-Detection System
-The system automatically detects installed agents by checking standard configuration paths:
-- **Windows**: `%APPDATA%` and program files directories
-- **Unix/macOS**: `~/.config/` and home directory
-- **Cross-platform**: Environment variables and registry keys
-
-#### Switch Operations
-```bash
-# Point agent to gateway proxy
-aag switch cursor --to-gateway
-aag switch kimi --to-gateway --model claude-sonnet-4
-
-# Point agent to direct provider
-aag switch copilot --to-direct --base-url https://api.openai.com/v1 --api-key sk-xxx
-
-# Bulk operations
-aag switch all --to-gateway
-aag switch enterprise-agents --to-direct --profile enterprise-account
-```
-
-#### Configuration File Structure
-
-**Cursor Configuration (`%APPDATA%\Cursor\User\settings.json`)**
-```json
-{
-  "cursorai.general.openaiBaseUrl": "http://127.0.0.1:8787/v1",
-  "cursorai.general.openaiApiKey": "proxy-managed",
-  "cursorai.general.model": "claude-sonnet-4",
-  "window.autoDetectColorScheme": true
-}
-```
-
-**Copilot Configuration (GitHub CLI hosts)**
-```yaml
-githubcopilot:
-  proxies:
-    http://api.githubcopilot.com: v1
-    https://api.githubcopilot.com: v1
-```
-
-### Status Monitoring
-
-```bash
-aag agents                    # List all detected agents
-aag agents --status            # Show detailed status
-aag agents --sync              # Force configuration sync
-aag agents --validate          # Validate configurations
-```
-
-### Backup & Restore
-
-```bash
-aag backup                    # Create configuration backup
-aag restore                   # Restore from backup
-aag backup --agents-only      # Backup only agent configurations
-aag backup --full             # Complete system backup
-```
-
-## Test
-
-```bash
-npm test              # vitest e2e suite (mock, 8 tests)
-npm run typecheck     # tsc --noEmit
-```
-
-## Testing & Quality Assurance
-
-### Test Suite
-
-```bash
-# Run comprehensive test suite
-npm test                    # Full e2e test suite (mock providers, no API keys required)
-
-# Specific test categories
-npm run test:unit           # Unit tests only
-npm run test:integration    # Integration tests
-npm run test:e2e            # End-to-end tests
-npm run test:performance     # Performance benchmarks
-
-# Test with specific configurations
-npm test -- --grep "circuit breaker"  # Run specific tests
-npm test -- --verbose        # Detailed test output
-npm test -- --coverage       # Code coverage report
-```
-
-### Test Coverage
-
-The comprehensive test suite covers:
-
-#### Core Functionality Tests
-- **Health Check Endpoints** - Gateway health, provider health, circuit breaker status
-- **Model Discovery** - Available models listing, model validation
-- **Request Routing** - Alias resolution, hop selection, failover logic
-- **Configuration Management** - Load, save, validate, backup/restore operations
-
-#### Protocol Conversion Tests
-- **OpenAI ↔ Anthropic Bidirectional** - Request format conversion
-- **Streaming Support** - SSE streaming for both protocols
-- **Error Handling** - Proper error conversion between formats
-- **Edge Cases** - Large requests, special characters, unicode handling
-
-#### Circuit Breaker Tests
-- **State Transitions** - Closed → Open → Half-Open → Closed
-- **Failure Scenarios** - Network errors, timeouts, server errors
-- **Recovery Testing** - Automatic recovery after cooldown
-- **Concurrent Requests** - Thread safety under load
-
-#### Agent Integration Tests
-- **Configuration Switching** - Gateway/Direct provider switching
-- **Auto-Detection** - Agent discovery and validation
-- **File Operations** - Safe read/write operations
-- **Backup/Restore** - Configuration persistence
-
-#### Performance Tests
-- **Request Throughput** - Requests per second under load
-- **Latency Measurement** - Response time percentiles
-- **Memory Usage** - Heap allocation, garbage collection
-- **Connection Pooling** - Connection reuse and management
-
-### Mock Testing Environment
-
-The system includes a comprehensive mock provider for testing without API keys:
-
-```typescript
-// Mock Provider Configuration
-{
-  "type": "mock",
-  "models": ["mock-gpt-4", "mock-claude", "mock-error"],
-  "simulation": {
-    "successRate": 0.95,
-    "responseDelayMs": 100,
-    "errorTypes": ["timeout", "network_error", "rate_limit"],
-    "simulateLatency": true
-  }
-}
-```
-
-### Test Examples
-
-#### Health Check Test
-```bash
-# Test gateway health endpoint
-curl http://localhost:8787/health
-
-# Expected response
-{
-  "status": "healthy",
-  "providers": [
-    {"id": "mock", "status": "healthy", "responseTimeMs": 45}
-  ],
-  "uptime": 3600
-}
-```
-
-#### Model Listing Test
-```bash
-# Test models endpoint
-curl http://localhost:8787/v1/models
-
-# Expected response
-{
-  "data": [
-    {
-      "id": "claude-sonnet-4",
-      "object": "model",
-      "created": 1640995200,
-      "owned_by": "anthropic"
-    }
-  ]
-}
-```
-
-#### Circuit Breaker Test
-```bash
-# Simulate provider failures
-for i in {1..10}; do
-  curl -X POST http://localhost:8787/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"test"}]}'
-  sleep 0.1
-done
-
-# Check breaker status
-curl http://localhost:8787/health | jq '.providers[] | select(.id=="test-provider")'
-```
-
-## Architecture
-
-## System Architecture
-
-### High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        AI Agent Gateway                        │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-│  │   External      │  │   Agent         │  │   Configuration │ │
-│  │   Agents        │  │   Integrations  │  │   Manager       │ │
-│  │                 │  │                 │  │                 │ │
-│  │ • Cursor        │  │ • Copilot       │  │ • Schema        │ │
-│  │ • Kilo          │  │ • GitHub CLI    │  │ • Store         │ │
-│  │ • Zcode         │  │ • Terminal      │  │ • Manager       │ │
-│  │ • MiniMax       │  │ • IDE Plugins   │  │                 │ │
-│  │ • Kimi          │  │                 │  │                 │ │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
-│           │                   │                   │            │
-│           └───────────────────┼───────────────────┘            │
-│                                 │                              │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    Gateway Core                         │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │   │
-│  │  │   Router    │  │  Converter   │  │ Circuit      │   │   │
-│  │  │             │  │             │  │ Breaker      │   │   │
-│  │  │ • Alias     │  │ • OpenAI ↔  │  │ • Per-      │   │   │
-│  │  │ • Route     │  │ • Anthropic  │  │   Provider   │   │   │
-│  │  │ • Failover  │  │ • Streaming  │  │ • Recovery   │   │   │
-│  │  │             │  │             │  │ • Monitoring │   │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘   │   │
-│  │                                                         │   │
-│  │  ┌─────────────────────────────────────────────────────┐ │   │
-│  │  │                   HTTP Server                      │ │   │
-│  │  ├─────────────────────────────────────────────────────┤ │   │
-│  │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │ │   │
-│  │  │  │   /v1/      │  │   /v1/      │  │   /health   │ │ │   │
-│  │  │  │ chat/       │  │ messages    │  │             │ │ │   │
-│  │  │  │ completions │  │             │  │             │ │ │   │
-│  │  │  │             │  │             │  │             │ │ │   │
-│  │  │  │ OpenAI      │  │ Anthropic   │  │ Status      │ │ │   │
-│  │  │  │ Compatible  │  │ Compatible  │  │ Monitoring  │ │ │   │
-│  │  │  │             │  │             │  │             │ │ │   │
-│  │  │  └─────────────┘  └─────────────┘  └─────────────┘ │ │   │
-│  │  └─────────────────────────────────────────────────────┘ │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                 │                              │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                  Provider Layer                         │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │   │
-│  │  │   OpenAI     │  │   Anthropic  │  │    Mock     │   │   │
-│  │  │   Provider   │  │   Provider   │  │   Provider  │   │   │
-│  │  │             │  │             │  │             │   │   │
-│  │  │ • API Keys  │  │ • API Keys  │  │ • Testing   │   │   │
-│  │  │ • Endpoints │  │ • Endpoints │  │ • Simulation │   │   │
-│  │  │ • Models    │  │ • Models    │  │ • Config    │   │   │
-│  │  │ • Auth      │  │ • Auth      │  │             │   │   │
-│  │  │ • Retry     │  │ • Retry     │  │             │   │   │
-│  │  │             │  │             │  │             │   │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘   │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Directory Structure
-
-```
-src/
-├── config/                    # Configuration Management
-│   ├── schema.ts             # Zod schemas + TypeScript types
-│   ├── store.ts              # JSON config load/save operations
-│   ├── manager.ts            # Configuration mutation helpers
-│   └── types.ts              # Type definitions
-├── gateway/                   # Core Gateway Logic
-│   ├── canonical.ts          # Internal OpenAI-shaped types + error helpers
-│   ├── circuit-breaker.ts    # Circuit breaker implementation
-│   ├── converter.ts          # OpenAI ↔ Anthropic format conversion
-│   ├── router.ts             # Route resolution + failover logic
-│   ├── server.ts             # Hono app: HTTP routes + SSE streaming
-│   ├── providers/            # Provider implementations
-│   │   ├── base.ts           # Base provider abstract class
-│   │   ├── mock.ts           # Mock provider for testing
-│   │   ├── openai.ts         # OpenAI-compatible provider
-│   │   ├── anthropic.ts      # Anthropic-compatible provider
-│   │   └── index.ts         # Provider factory + registry
-│   ├── handlers/             # Request handlers
-│   │   ├── base.ts           # Base handler logic
-│   │   ├── openai.ts         # OpenAI format handlers
-│   │   ├── anthropic.ts      # Anthropic format handlers
-│   │   └── external.ts       # External agent handlers
-│   └── types.ts              # Gateway-specific types
-├── agents/                    # Agent Integration
-│   ├── adapters.ts           # Per-agent config read/write + JSON builders
-│   ├── switcher.ts          # Gateway/Direct provider switching
-│   ├── detectors.ts          # Agent installation detection
-│   └── types.ts              # Agent-related types
-├── cli/                       # Command Line Interface
-│   ├── menu.ts               # Interactive TUI (Inquirer.js)
-│   ├── commands.ts           # Commander CLI subcommands
-│   ├── utils.ts              # CLI utilities
-│   └── types.ts              # CLI types
-├── types/                    # Shared TypeScript types
-├── utils/                    # Utility functions
-│   ├── log.ts                # Logging utilities
-│   ├── error.ts              # Error handling
-│   ├── crypto.ts             # Cryptographic utilities
-│   └── http.ts               # HTTP utilities
-└── index.ts                  # Main entry point
-
-tests/                        # Test Suite
-├── e2e.test.ts               # End-to-end tests
-├── unit/                     # Unit tests
-│   ├── gateway.test.ts
-│   ├── providers.test.ts
-│   ├── circuit-breaker.test.ts
-│   └── converter.test.ts
-├── integration/              # Integration tests
-│   ├── routing.test.ts
-│   ├── agents.test.ts
-│   └── configuration.test.ts
-├── fixtures/                 # Test fixtures and mock data
-└── utils.ts                  # Test utilities
-
-docs/                        # Documentation
-├── user-manual/              # User documentation
-├── api/                      # API documentation
-├── development/              # Development guides
-└── examples/                 # Usage examples
-```
-
-### Key Components
-
-#### Configuration System
-- **Schema Validation** - Zod schemas for type-safe configuration
-- **JSON Storage** - Atomic read/write operations with backup
-- **Hot Reload** - Runtime configuration updates
-- **Environment Integration** - Environment variable support
-
-#### Gateway Core
-- **Protocol Router** - Intelligent request routing based on model aliases
-- **Format Converter** - Bidirectional OpenAI ↔ Anthropic translation
-- **Circuit Breaker** - Per-provider failure isolation and recovery
-- **Streaming Support** - Full SSE streaming implementation
-
-#### Provider Layer
-- **Abstract Base** - Common interface for all providers
-- **HTTP Client** - Configurable HTTP client with retries
-- **Authentication** - API key and token management
-- **Rate Limiting** - Configurable rate limiting and backoff
-
-#### Agent Integration
-- **Auto-Detection** - Automatic agent installation detection
-- **Configuration Management** - Safe read/write operations
-- **Backup System** - Automatic configuration backup and restore
-- **Status Monitoring** - Real-time agent status tracking
-
-### Data Flow
-
-1. **Request Ingestion**
-   - HTTP request received at gateway endpoint
-   - Authentication and validation
-   - Request format detection (OpenAI vs Anthropic)
-
-2. **Route Resolution**
-   - Model alias lookup in route configuration
-   - Provider chain selection based on route hops
-   - Circuit breaker state evaluation
-
-3. **Request Processing**
-   - Format conversion if needed
-   - Provider-specific request preparation
-   - Circuit breaker state management
-
-4. **Response Handling**
-   - Response format conversion if needed
-   - Error handling and transformation
-   - Streaming response chunking
-
-5. **State Updates**
-   - Circuit breaker state updates
-   - Success/failure recording
-   - Metrics and logging
-
-### Performance Characteristics
-
-#### Concurrency
-- **Connection Pooling** - Reusable HTTP connections
-- **Request Batching** - Multiple requests processed in parallel
-- **Async Processing** - Non-blocking I/O operations
-
-#### Memory Management
-- **Stream Processing** - Memory-efficient streaming
-- **Object Reuse** - Object pooling for frequently allocated items
-- **Garbage Collection** - Optimized for high-frequency allocations
-
-#### Network Optimization
-- **Keep-Alive** - Persistent HTTP connections
-- **Compression** - Request/response compression
-- **Caching** - Response caching where appropriate
-
-### Security Considerations
-
-#### Authentication
-- **API Key Validation** - Secure key storage and validation
-- **Token Management** - Secure token handling and refresh
-- **Access Control** - Configurable access restrictions
-
-#### Data Protection
-- **Secure Storage** - Encrypted configuration storage
-- **Input Validation** - Comprehensive input sanitization
-- **Output Filtering** - Sensitive data filtering in logs
-
-#### Network Security
-- **HTTPS Support** - Secure communication endpoints
-- **CORS Configuration** - Configurable cross-origin policies
-- **Rate Limiting** - DDoS protection and abuse prevention
-
-### Monitoring & Observability
-
-#### Health Monitoring
-- **Endpoint Health** - Real-time health check endpoints
-- **Provider Status** - Individual provider health tracking
-- **Circuit Breaker** - Detailed breaker state monitoring
-
-#### Metrics Collection
-- **Request Metrics** - Request count, latency, error rates
-- **Provider Metrics** - Provider-specific performance metrics
-- **System Metrics** - Memory, CPU, network usage
-
-#### Logging
-- **Structured Logging** - JSON-formatted log entries
-- **Log Levels** - Configurable log verbosity
-- **Log Rotation** - Automatic log file management
-
-### Development Workflow
-
-#### Code Organization
-- **Modular Architecture** - Clear separation of concerns
-- **Type Safety** - Comprehensive TypeScript coverage
-- **Error Handling** - Consistent error handling patterns
-
-#### Testing Strategy
-- **Unit Tests** - Individual component testing
-- **Integration Tests** - Component interaction testing
-- **E2E Tests** - Full system testing with mock providers
-- **Performance Tests** - Load and stress testing
-
-#### Quality Assurance
-- **Code Review** - Peer review process
-- **Automated Testing** - CI/CD pipeline with automated testing
-- **Documentation** - Comprehensive inline documentation
+When `gateway.authToken` is non-empty, `/v1/*` requires either an Authorization
+Bearer token or `x-api-key` with the same value.
+
+## Module map
+
+Each subtree owns a coherent piece of the product and has a README at its root
+describing what lives there and which files to read first. Ownership rules,
+UI state boundaries, and test/build boundaries are collected in
+[docs/project_structure.md](docs/project_structure.md).
+
+- [src/](src/README.md) — legacy Node gateway, CLI/TUI, config store, and
+  agent adapters. Independently runnable headless surface.
+- [src-tauri/](src-tauri/README.md) — Tauri 2 desktop shell: SQLite, IPC
+  commands, Axum proxy, services, native lifecycle, and tray.
+- [ui/](ui/README.md) — React desktop UI plus the browser demo with
+  synthetic IPC.
+- [scripts/](scripts/README.md) — desktop dev/build runners, icon generator,
+  release preflight, and the owned browser smoke runner.
+- [tests/](tests/README.md) — Vitest suites for the Node surface and the
+  desktop runner/build helpers.
+- [docs/](docs/README.md) — architecture, development, release notes, reviews,
+  historical phase archive.
+- [.github/](.github/README.md) — agent instructions and CI workflow.
+
+Repo metadata:
+
+
+## Runtime paths
+
+The Rust database is at `~/.aag/aag.db`. Provider and route edits are applied
+to the Rust proxy on the next `proxy_start`, because the router uses a startup
+snapshot. Live agent configuration writes are atomic and back up existing files.
+
+## Verification
+
+The full gate and its evidence boundaries are documented in
+[the development guide](docs/development.md). Use the smallest relevant subset
+for local changes; browser smoke is synthetic and must use its owned browser
+profile and server.
+
+## Security and limitations
+
+- Never log or commit API keys, auth tokens, databases, or live agent files.
+- Real provider requests, live CLI switching, native WebView2 behavior, signing,
+  installation, upgrades, and updater delivery require separate acceptance.
+- The current preview is unsigned. See [desktop release preparation](docs/desktop_release.md).
+- Root/UI npm lockfiles and `src-tauri/Cargo.lock` are tracked. CI uses locked,
+  script-disabled dependency restoration; lockfiles are not an SBOM or signature.
+- Public publication must use the history-free process in
+  [Privacy-safe public snapshot](docs/public_release_privacy.md).
+
+## Documentation map
+
+### Project docs
+
+- [Architecture](docs/architecture.md) — module ownership, data flow,
+  persistence, and compatibility boundaries.
+- [Development](docs/development.md) — setup, commands, verification gate,
+  and release boundary.
+- [Project structure](docs/project_structure.md) — ownership rules, UI state
+  boundaries, and test/build boundaries.
+- [Desktop release](docs/desktop_release.md) — native build matrix, signing,
+  notarization, manual acceptance, and rollback.
+- [Privacy-safe public snapshot](docs/public_release_privacy.md) — automated
+  privacy audit, history-free export, and new-repository procedure.
+- [Migration design](DESIGN.md) — durable design decisions and migration
+  summary.
+- [v0.2.0 preview notes](docs/releases/v0_2_0.md) — preview changes,
+  verification, and distribution boundary.
+
+### Agent guides
+
+- [AGENTS.md](AGENTS.md) — repository rules for coding agents.
+- [CLAUDE.md](CLAUDE.md) — Claude Code repository guide.
+- [GEMINI.md](GEMINI.md) — Gemini project context.
+- [GitHub Copilot instructions](.github/copilot-instructions.md).

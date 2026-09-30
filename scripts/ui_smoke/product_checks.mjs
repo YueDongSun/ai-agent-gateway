@@ -144,15 +144,17 @@ export async function run_product_initial_checks({ cdp, check_in_page, check, sl
         const viewport_width = document.documentElement.clientWidth;
         const header = document.querySelector('.aag-header')?.getBoundingClientRect();
         const navigation = document.querySelector('.app-switcher')?.getBoundingClientRect();
+        const sidebar = document.querySelector('[data-testid="workspace_sidebar"]')?.getBoundingClientRect();
         const main = document.querySelector('.aag-main')?.getBoundingClientRect();
         const table_region = document.querySelector('.hop_table_wrap');
         if (!header || !navigation || !main || !table_region) return 'missing-layout-landmark';
         const page_fits = document.documentElement.scrollWidth <= viewport_width + 1;
-        const navigation_fits = navigation.left >= 0 && navigation.right <= viewport_width + 1 && navigation.bottom <= header.bottom + 1;
+        const navigation_fits = navigation.left >= 0 && navigation.right <= viewport_width + 1 && (sidebar ? navigation.bottom <= sidebar.bottom + 1 : navigation.bottom <= header.bottom + 1);
+        const sidebar_fits = !sidebar || (viewport_width > 900 ? main.left >= sidebar.right - 1 : header.top >= sidebar.bottom - 1);
         const header_fits = main.top >= header.bottom - 1;
         const table_scrolls = viewport_width >= 600 || table_region.scrollWidth > table_region.clientWidth;
         return {
-          ok: page_fits && navigation_fits && header_fits && table_scrolls,
+          ok: page_fits && navigation_fits && header_fits && sidebar_fits && table_scrolls,
           detail: 'viewport=' + viewport_width + ' document=' + document.documentElement.scrollWidth + ' nav=' + navigation_fits + ' header=' + header_fits + ' table=' + table_scrolls,
         };
       });
@@ -214,7 +216,7 @@ export async function run_gateway_feedback_checks({ cdp, check_in_page, check })
 
   await check_in_page(cdp, check, 'failed health is degraded and recovers without claiming stopped', async () => {
     const original_fetch = window.fetch;
-    const refresh_button = () => [...document.querySelectorAll('.card-head button')].find((button) => /^(Refresh|刷新)$/.test(button.textContent.trim()));
+    const refresh_button = () => document.querySelector('[data-testid="providers-refresh"]');
     const button = refresh_button();
     if (!button) return 'missing-refresh-button';
     let degraded = false;
@@ -250,7 +252,7 @@ export async function run_gateway_feedback_checks({ cdp, check_in_page, check })
       }
     } finally {
       window.__aagDemoSetError(null);
-      [...document.querySelectorAll('.card-head button')].find((button) => /^(Refresh|刷新)$/.test(button.textContent.trim()))?.click();
+      document.querySelector('[data-testid="providers-refresh"]')?.click();
     }
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));

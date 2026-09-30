@@ -4,9 +4,9 @@
 //! providers (`mock-primary` with low breaker threshold, `mock-fallback`) and
 //! three routes (`claude-sonnet-4`, `gpt-4o`, `mock-fail`).
 
-use crate::database::{lock_conn, Database};
 use crate::database::dao::proxy_providers::{CircuitBreakerConfig, ProxyProvider};
 use crate::database::dao::routes::{Route, RouteHop};
+use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use rusqlite::params;
 
@@ -33,7 +33,9 @@ impl Database {
             let mut stmt = conn.prepare("SELECT id FROM proxy_providers")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             let mut ids = Vec::new();
-            for r in rows { ids.push(r?); }
+            for r in rows {
+                ids.push(r?);
+            }
             ids
         };
         if existing.is_empty() {
@@ -43,7 +45,12 @@ impl Database {
                 provider_type: "mock".into(),
                 api_key: "mock".into(),
                 base_url: "mock://primary".into(),
-                models: vec!["mock-fast".into(), "mock-slow".into(), "claude-sonnet-4".into(), "gpt-4o".into()],
+                models: vec![
+                    "mock-fast".into(),
+                    "mock-slow".into(),
+                    "claude-sonnet-4".into(),
+                    "gpt-4o".into(),
+                ],
                 enabled: true,
                 timeout_ms: 60_000,
                 weight: 1,
@@ -54,6 +61,7 @@ impl Database {
                     success_threshold: 2,
                 },
                 model_mapping: Default::default(),
+                extra_headers: Default::default(),
             })?;
             self.save_proxy_provider(&ProxyProvider {
                 id: MOCK_FALLBACK.into(),
@@ -61,7 +69,11 @@ impl Database {
                 provider_type: "mock".into(),
                 api_key: "mock".into(),
                 base_url: "mock://fallback".into(),
-                models: vec!["claude-sonnet-4".into(), "gpt-4o".into(), "mock-fast".into()],
+                models: vec![
+                    "claude-sonnet-4".into(),
+                    "gpt-4o".into(),
+                    "mock-fast".into(),
+                ],
                 enabled: true,
                 timeout_ms: 60_000,
                 weight: 1,
@@ -72,6 +84,7 @@ impl Database {
                     success_threshold: 2,
                 },
                 model_mapping: Default::default(),
+                extra_headers: Default::default(),
             })?;
         }
 
@@ -85,24 +98,42 @@ impl Database {
                 alias: "claude-sonnet-4".into(),
                 description: "Sonnet via mock chain (primary -> fallback)".into(),
                 hops: vec![
-                    RouteHop { provider: MOCK_PRIMARY.into(), model: "claude-sonnet-4".into() },
-                    RouteHop { provider: MOCK_FALLBACK.into(), model: "claude-sonnet-4".into() },
+                    RouteHop {
+                        provider: MOCK_PRIMARY.into(),
+                        model: "claude-sonnet-4".into(),
+                    },
+                    RouteHop {
+                        provider: MOCK_FALLBACK.into(),
+                        model: "claude-sonnet-4".into(),
+                    },
                 ],
             })?;
             self.save_route(&Route {
                 alias: "gpt-4o".into(),
                 description: "GPT-4o via mock chain".into(),
                 hops: vec![
-                    RouteHop { provider: MOCK_PRIMARY.into(), model: "gpt-4o".into() },
-                    RouteHop { provider: MOCK_FALLBACK.into(), model: "gpt-4o".into() },
+                    RouteHop {
+                        provider: MOCK_PRIMARY.into(),
+                        model: "gpt-4o".into(),
+                    },
+                    RouteHop {
+                        provider: MOCK_FALLBACK.into(),
+                        model: "gpt-4o".into(),
+                    },
                 ],
             })?;
             self.save_route(&Route {
                 alias: "mock-fail".into(),
                 description: "Forces failures on primary to demo circuit-breaker".into(),
                 hops: vec![
-                    RouteHop { provider: MOCK_PRIMARY.into(), model: "mock-fail".into() },
-                    RouteHop { provider: MOCK_FALLBACK.into(), model: "mock-fast".into() },
+                    RouteHop {
+                        provider: MOCK_PRIMARY.into(),
+                        model: "mock-fail".into(),
+                    },
+                    RouteHop {
+                        provider: MOCK_FALLBACK.into(),
+                        model: "mock-fast".into(),
+                    },
                 ],
             })?;
         }
@@ -131,8 +162,14 @@ impl Database {
                         m.display_name
                     ),
                     hops: vec![
-                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
-                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
+                        RouteHop {
+                            provider: MOCK_PRIMARY.into(),
+                            model: m.id.into(),
+                        },
+                        RouteHop {
+                            provider: MOCK_FALLBACK.into(),
+                            model: m.id.into(),
+                        },
                     ],
                 })?;
             }
@@ -156,8 +193,14 @@ impl Database {
                         m.display_name
                     ),
                     hops: vec![
-                        RouteHop { provider: MOCK_PRIMARY.into(), model: m.id.into() },
-                        RouteHop { provider: MOCK_FALLBACK.into(), model: m.id.into() },
+                        RouteHop {
+                            provider: MOCK_PRIMARY.into(),
+                            model: m.id.into(),
+                        },
+                        RouteHop {
+                            provider: MOCK_FALLBACK.into(),
+                            model: m.id.into(),
+                        },
                     ],
                 })?;
             }

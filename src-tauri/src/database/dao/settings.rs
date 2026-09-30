@@ -49,6 +49,31 @@ pub const KEY_CCSWITCH_LAST_STATUS: &str = "ccswitch_last_status_json";
 /// requests are forced through that provider (bypassing the failover chain).
 /// Cleared by setting to empty string.
 pub const KEY_PROXY_PINNED_PROVIDER: &str = "proxy_pinned_provider";
+/// Well-known setting key: when `"1"`, `/v1/responses` requests get the
+/// built-in chain-of-thought system prompt injected as their first message.
+/// Absent (or any other value) = disabled. Live-toggled via
+/// `proxy_set_responses_cot` — no proxy restart needed; cleared by setting
+/// to empty string (row delete).
+pub const KEY_PROXY_RESPONSES_COT_ENABLED: &str = "proxy_responses_cot_enabled";
+/// Well-known setting key: how the Codex mirror's config.toml exposes AAG.
+/// `"exclusive"` (absent/unknown — historic default) forces the top-level
+/// `model_provider = "aag"`; `"coexist"` keeps the builtin openai provider
+/// as the default (a ChatGPT login works for official models) and exposes
+/// AAG via `[model_providers.aag]` + a `[profiles.aag]` profile for manual
+/// switching. Cleared by setting to empty string.
+pub const KEY_CODEX_MIRROR_MODE: &str = "codex_mirror_mode";
+/// Well-known setting key: the Claude mirror config directory
+/// (CLAUDE_CONFIG_DIR override). When set, AAG writes the Claude mirror's
+/// `settings.json` there instead of the default `~/.claude-cli`; a value
+/// resolving to the native `~/.claude` is refused.
+pub const KEY_CLAUDE_CLI_HOME: &str = "claude_cli_home";
+/// Well-known setting key: how the Claude mirror authenticates to AAG.
+/// `"token"` (absent/unknown — default) writes `ANTHROPIC_AUTH_TOKEN` with
+/// AAG's proxy token into the mirror `settings.json`; `"passthrough"`
+/// omits the key so a subscription login made inside the mirror flows to
+/// AAG verbatim (relayed by `anthropic_passthrough` pool rows). Cleared
+/// by setting to empty string.
+pub const KEY_CLAUDE_MIRROR_MODE: &str = "claude_mirror_mode";
 
 impl Database {
     /// Read a setting value. Returns `Ok(None)` if the key is absent.
@@ -98,7 +123,8 @@ mod tests {
             Some("C:\\Users\\me\\.codex-cli")
         );
         // upsert
-        db.set_setting(KEY_CODEX_CLI_HOME, "/home/me/.codex-cli").unwrap();
+        db.set_setting(KEY_CODEX_CLI_HOME, "/home/me/.codex-cli")
+            .unwrap();
         assert_eq!(
             db.get_setting(KEY_CODEX_CLI_HOME).unwrap().as_deref(),
             Some("/home/me/.codex-cli")

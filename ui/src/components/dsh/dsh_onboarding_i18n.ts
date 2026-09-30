@@ -1,0 +1,83 @@
+import { useCtx } from '../../lib/ctx.js';
+
+const english = {
+  eyebrow: 'Quick setup',
+  title: 'Connect your existing DSH',
+  subtitle: 'Detect local tools, review the connection, then save an isolated AAG setup.',
+  read_only: 'Detection is read-only: no install, executable launch, provider request or configuration write.',
+  discover: 'Detect again', discovering: 'Inspecting existing runtime paths…', discovery_error: 'Runtime discovery failed. Manual settings remain available below.',
+  detected: 'Recognized', unsupported: 'Unsupported', missing: 'Not found', node: 'Node.js', dsh: 'DeepSeek Harness', pnpm: 'pnpm',
+  detected_path: 'Detected path', reported_version: 'Package version', version_unknown: 'Not executed; version unverified', provenance: 'Discovery source', validation: 'Evidence',
+  metadata_only: 'Package metadata only', binary_only: 'Binary format only', unverified: 'Runtime execution not verified',
+  scan_limited: 'The bounded scan reached its limit. Use manual runtime paths for tools installed elsewhere.',
+  scan_summary: 'Locations inspected', candidates: 'Candidates found',
+  runtime_missing: 'Some runtime components are missing or unsupported. Detection will not download replacements or change your installed versions.',
+  missing_guidance: 'Use an existing supported installation, then detect again. Advanced settings accept explicit paths; installation remains a separate action.',
+  supported_versions: 'Supported package metadata: DSH 0.1.1-rc.2 · pnpm 10.34.5. Node executable identity and version are checked only when you explicitly run DSH.',
+  proposed_connection: 'Proposed connection', source: 'Existing provider', model: 'Model ID', select_source: 'Let AAG propose a provider (review first)', select_model: 'Choose or enter a model ID',
+  source_preserved: 'Your saved provider is preserved. Change it in Connection & personalization if needed.',
+  model_preserved: 'Your saved model is preserved.',
+  source_ambiguous: 'AAG proposes the current native Claude provider or a sole available source. Ambiguous choices require an explicit selection in the review.',
+  source_none: 'No supported provider is available. Add a provider in AAG, then refresh the DSH inventory.',
+  recommendation_note: 'Recommendations use saved configuration only; they do not test upstream connectivity or model availability.',
+  review: 'Auto setup', saved: 'Managed setup is ready. Start DSH explicitly when you want to use it.',
+  dirty_block: 'You have unsaved settings. Save or discard that draft before quick setup; detection will not overwrite it.',
+  stale_block: 'Saved settings changed elsewhere. Reload them before reviewing quick setup.',
+  review_title: 'Review managed DSH setup', planned_settings: 'Settings to save', blockers: 'Resolve before applying',
+  no_install: 'Only AAG-managed settings and the isolated profile change. Existing Claude and DSH configuration files stay untouched. No packages are installed and no runtime starts.',
+  initialize_separately: 'If needed, setup creates an isolated managed home. Starting DSH remains a separate explicit action.',
+  preview_bound: 'The setup plan is tied to the current settings and detected file identities; expiry or changes require a new review.',
+  no_changes: 'Detected paths and connection already match the saved settings.',
+  source_existing: 'Preserve saved connection', source_current: 'Current native Claude provider', source_unique: 'Only available provider', source_explicit: 'Your explicit selection', source_unresolved: 'Selection required',
+  all_candidates: 'Inspect all detected candidates', empty_candidates: 'No recognizable runtime paths were found.',
+  protocol: 'Protocol compatibility', source_native: 'Native Claude', source_pool: 'AAG provider', source_gateway: 'AAG local gateway', unavailable: 'Unavailable',
+  protocol_anthropic: 'Anthropic Messages', protocol_openai: 'OpenAI Chat Completions', protocol_responses: 'OpenAI Responses',
+  protocol_unknown: 'Unsupported protocol',
+  anthropic_hint: 'Compatible Anthropic-to-Anthropic routes preserve original thinking blocks and opaque signatures. Protocol conversion cannot manufacture valid Anthropic signatures.',
+  openai_hint: 'Compatible Chat Completions routes preserve reasoning fields supplied by the upstream. Reasoning support still depends on the selected model and provider.',
+  responses_hint: 'This DSH connection does not currently support the OpenAI Responses protocol.',
+  transport_hint: 'A gateway route may convert protocols. Availability and reasoning behavior require an explicit end-to-end check.',
+} as const;
+
+type Onboarding_key = keyof typeof english;
+const chinese: Record<Onboarding_key, string> = {
+  eyebrow: '快速接入',
+  title: '接入已安装的 DSH', subtitle: '识别本机工具，预览连接方案，再保存到 AAG 隔离配置。',
+  read_only: '检测为只读操作：不安装软件、不运行可执行文件、不请求供应商、不写入配置。',
+  discover: '重新检测', discovering: '正在检查已有运行时路径…', discovery_error: '运行时检测失败，下方仍可手动配置路径。',
+  detected: '已识别', unsupported: '不受支持', missing: '未找到', node: 'Node.js', dsh: 'DeepSeek Harness', pnpm: 'pnpm',
+  detected_path: '识别路径', reported_version: '软件包版本', version_unknown: '未执行，版本待验证', provenance: '发现来源', validation: '检测证据',
+  metadata_only: '仅检查软件包元数据', binary_only: '仅检查二进制格式', unverified: '运行时执行尚未验证',
+  scan_limited: '检测已达到有界扫描上限。安装在其他位置的工具可通过高级设置填写路径。',
+  scan_summary: '检查位置数', candidates: '发现候选数',
+  runtime_missing: '部分运行组件缺失或不受支持。检测不会下载替代程序，也不会更改已安装版本。',
+  missing_guidance: '请使用已有的受支持安装，再重新检测。高级设置可填写明确路径；安装软件属于单独操作。',
+  supported_versions: '支持的软件包元数据：DSH 0.1.1-rc.2 · pnpm 10.34.5。只有显式运行 DSH 时才检查 Node 可执行文件身份与版本。',
+  proposed_connection: '建议连接方案', source: '已有供应商', model: '模型 ID', select_source: '由 AAG 建议供应商（先预览）', select_model: '选择或填写模型 ID',
+  source_preserved: '保留已保存的供应商。如需更换，请使用下方「连接与个性化」设置。', model_preserved: '保留已保存的模型。',
+  source_ambiguous: 'AAG 会建议当前原生 Claude 供应商或唯一可用来源；无法明确选择时，预览将要求手动选择。', source_none: '没有受支持的可用供应商。请先在 AAG 添加供应商，再刷新 DSH 清单。',
+  recommendation_note: '建议仅依据已保存配置，不检测上游连通性或模型可用性。',
+  review: '自动接入', saved: '受管接入已准备好，需要使用时请明确启动 DSH。',
+  dirty_block: '当前设置尚未保存，请先保存或放弃草稿，再使用快速接入。检测不会覆盖草稿。',
+  stale_block: '已保存配置在其他位置发生变化，请重新加载后预览接入。',
+  review_title: '确认 DSH 受管接入', planned_settings: '待保存配置', blockers: '应用前需解决',
+  no_install: '仅更改 AAG 受管设置与隔离目录，不修改已有 Claude 或 DSH 配置文件，不安装软件包，也不启动运行时。',
+  initialize_separately: '必要时将创建隔离的受管目录；启动 DSH 仍需单独明确执行。',
+  preview_bound: '接入方案绑定当前设置与检测到的文件身份；方案过期或相关内容变化后需重新预览。',
+  no_changes: '识别路径与连接已经符合保存的设置。',
+  source_existing: '保留已保存连接', source_current: '当前原生 Claude 供应商', source_unique: '唯一可用供应商', source_explicit: '你的明确选择', source_unresolved: '需要选择',
+  all_candidates: '查看全部识别候选', empty_candidates: '没有发现可识别的运行时路径。',
+  protocol: '协议兼容提示', source_native: '原生 Claude', source_pool: 'AAG 供应商', source_gateway: 'AAG 本地网关', unavailable: '不可用',
+  protocol_anthropic: 'Anthropic Messages', protocol_openai: 'OpenAI Chat Completions', protocol_responses: 'OpenAI Responses', protocol_unknown: '不支持的协议',
+  anthropic_hint: '兼容的 Anthropic 同协议路由保留原始 thinking 内容与不透明签名；协议转换无法生成有效的 Anthropic 签名。',
+  openai_hint: '兼容的 Chat Completions 路由保留上游实际提供的推理字段；是否支持推理仍取决于所选模型与供应商。',
+  responses_hint: '当前 DSH 连接暂不支持 OpenAI Responses 协议。',
+  transport_hint: '网关路由可能转换协议。可用性与推理行为需要显式进行端到端检查。',
+};
+
+export type Onboarding_translate = (key: Onboarding_key) => string;
+export function use_onboarding_i18n(): Onboarding_translate {
+  const { locale } = useCtx();
+  const messages = locale === 'zh' ? chinese : english;
+  return (key) => messages[key];
+}

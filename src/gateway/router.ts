@@ -1,9 +1,9 @@
 import type { AppConfig, RouteConfig } from '../config/schema.js';
 import type { ChatCompletionRequest } from '../config/schema.js';
 import type { OAIChatResponse, OAIStreamChunk } from './canonical.js';
-import { makeError, type ProviderError } from './canonical.js';
+import { makeProviderError, type ProviderError } from './canonical.js';
 import { createProvider, type BaseProvider } from './providers/index.js';
-import { logger } from '../util/log.js';
+import { logger, safeLogRef } from '../util/log.js';
 
 /**
  * The router resolves a requested model alias to an ordered fallback chain
@@ -51,49 +51,88 @@ export class Router {
   /** Non-streaming completion with automatic failover. */
   async complete(req: ChatCompletionRequest): Promise<OAIChatResponse> {
     const hops = this.hopsFor(req.model);
-    if (!hops.length) throw makeError(`no route / provider for model "${req.model}"`, { status: 404, retriable: false });
+    if (!hops.length) {
+      throw makeProviderError('no_route', {
+        status: 404,
+        retriable: false,
+        stage: 'route_resolution',
+      });
+    }
 
     let lastErr: ProviderError | undefined;
     for (const hop of hops) {
       const provider = this.providers.get(hop.provider);
       if (!provider || !provider.enabled) {
-        logger.warn('router', `skip disabled/unknown provider "${hop.provider}"`);
+        logger.warn('router', 'provider_skipped', {
+          provider_ref: safeLogRef(hop.provider),
+          stage: 'provider_availability',
+        });
         continue;
       }
       if (!provider.breaker.allow()) {
-        logger.warn('router', `circuit OPEN for "${hop.provider}", skipping`);
+        logger.warn('router', 'provider_skipped', {
+          provider_ref: safeLogRef(hop.provider),
+          stage: 'circuit_open',
+        });
         continue;
       }
       try {
         const subReq: ChatCompletionRequest = { ...req, model: hop.model };
         const resp = await provider.complete(subReq);
         provider.breaker.recordSuccess();
-        logger.info('router', `OK  ${req.model} <- ${provider.id}/${hop.model}`);
+        logger.info('router', 'provider_succeeded', {
+          provider_ref: safeLogRef(provider.id),
+          model_ref: safeLogRef(req.model),
+          stage: 'complete',
+        });
         return resp;
       } catch (e) {
-        lastErr = e as ProviderError;
+        lastErr = normalizedProviderError(e, 'complete');
         const retriable = lastErr.retriable;
         provider.breaker.recordFailure();
-        logger.warn('router', `FAIL ${provider.id}/${hop.model}: ${lastErr.message} (retriable=${retriable})`);
+        logger.warn('router', 'provider_failed', {
+          provider_ref: safeLogRef(provider.id),
+          model_ref: safeLogRef(req.model),
+          status: lastErr.status ?? 500,
+          retriable,
+          code: lastErr.code,
+          stage: lastErr.stage,
+          response_bytes: lastErr.responseBytes ?? 0,
+        });
         if (!retriable) throw lastErr;
       }
     }
-    throw lastErr ?? makeError('all hops exhausted', { status: 503, retriable: false });
+    throw lastErr ?? makeProviderError('all_hops_exhausted', {
+      status: 503,
+      retriable: false,
+      stage: 'routing',
+    });
   }
 
   /** Streaming completion with automatic failover (only pre-first-byte). */
   async *stream(req: ChatCompletionRequest): AsyncGenerator<OAIStreamChunk> {
     const hops = this.hopsFor(req.model);
-    if (!hops.length) throw makeError(`no route / provider for model "${req.model}"`, { status: 404, retriable: false });
+    if (!hops.length) {
+      throw makeProviderError('no_route', {
+        status: 404,
+        retriable: false,
+        stage: 'route_resolution',
+      });
+    }
 
     let lastErr: ProviderError | undefined;
     for (const hop of hops) {
       const provider = this.providers.get(hop.provider);
       if (!provider || !provider.enabled) continue;
       if (!provider.breaker.allow()) {
-        logger.warn('router', `circuit OPEN for "${hop.provider}", skipping (stream)`);
+        logger.warn('router', 'provider_skipped', {
+          provider_ref: safeLogRef(hop.provider),
+          stage: 'circuit_open',
+          stream: true,
+        });
         continue;
       }
+      let committed = false;
       try {
         const subReq: ChatCompletionRequest = { ...req, model: hop.model };
         const gen = provider.stream(subReq);
@@ -106,30 +145,40 @@ export class Router {
           return;
         }
         // We have a first byte - from here on we cannot failover.
+        committed = true;
         yield first.value;
+        for await (const ch of gen) yield ch;
         provider.breaker.recordSuccess();
-        try {
-          for await (const ch of gen) yield ch;
-        } catch (e) {
-          // mid-stream error: surface to client (can't transparently failover)
-          logger.error('router', `mid-stream error on ${provider.id}: ${(e as Error).message}`);
-          throw e;
-        }
-        logger.info('router', `STREAM OK  ${req.model} <- ${provider.id}/${hop.model}`);
+        logger.info('router', 'stream_succeeded', {
+          provider_ref: safeLogRef(provider.id),
+          model_ref: safeLogRef(req.model),
+          stage: 'stream_complete',
+          stream: true,
+        });
         return;
       } catch (e) {
-        lastErr = e as ProviderError;
+        lastErr = normalizedProviderError(e, committed ? 'stream_read' : 'stream_setup');
         const retriable = lastErr.retriable;
-        if (!provider.breaker.allow()) {
-          // already recorded failure above path? ensure recorded
-        }
         provider.breaker.recordFailure();
-        logger.warn('router', `STREAM FAIL ${provider.id}/${hop.model}: ${lastErr.message} (retriable=${retriable})`);
-        if (!retriable) throw lastErr;
+        logger.warn('router', committed ? 'mid_stream_failed' : 'stream_failed', {
+          provider_ref: safeLogRef(provider.id),
+          model_ref: safeLogRef(req.model),
+          status: lastErr.status ?? 500,
+          retriable,
+          code: lastErr.code,
+          stage: lastErr.stage,
+          response_bytes: lastErr.responseBytes ?? 0,
+          stream: true,
+        });
+        if (committed || !retriable) throw lastErr;
         // try next hop
       }
     }
-    throw lastErr ?? makeError('all stream hops exhausted', { status: 503, retriable: false });
+    throw lastErr ?? makeProviderError('all_hops_exhausted', {
+      status: 503,
+      retriable: false,
+      stage: 'stream_routing',
+    });
   }
 
   private hopsFor(model: string) {
@@ -147,4 +196,20 @@ export class Router {
       breaker: p.breaker.snapshot(),
     }));
   }
+}
+
+function normalizedProviderError(error: unknown, stage: string): ProviderError {
+  if (
+    error instanceof Error
+    && 'code' in error
+    && typeof (error as Partial<ProviderError>).code === 'string'
+    && typeof (error as Partial<ProviderError>).retriable === 'boolean'
+  ) {
+    return error as ProviderError;
+  }
+  return makeProviderError('upstream_transport_error', {
+    status: 502,
+    retriable: true,
+    stage,
+  });
 }

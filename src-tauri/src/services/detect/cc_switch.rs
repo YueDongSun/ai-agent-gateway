@@ -142,7 +142,9 @@ pub fn detect_with_home(home: Option<&std::path::Path>) -> CcSwitchStatus {
 fn probe_port(port: u16) -> bool {
     let addr = format!("127.0.0.1:{port}");
     TcpStream::connect_timeout(
-        &addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
         Duration::from_millis(200),
     )
     .map(|_| true)
@@ -153,16 +155,16 @@ fn probe_port(port: u16) -> bool {
 /// the user almost certainly has cc-switch installed (and may have it
 /// running, or be about to).
 fn probe_db_file(home: Option<&std::path::Path>) -> bool {
-    cc_switch_db_path(home).map(|p| p.exists()).unwrap_or(false)
+    cc_switch_db_path(home).is_file()
 }
 
-fn cc_switch_db_path(home: Option<&std::path::Path>) -> Option<PathBuf> {
-    let h = home?;
-    Some(h.join(".cc-switch").join("cc-switch.db"))
+fn cc_switch_db_path(home: Option<&std::path::Path>) -> PathBuf {
+    home_dir(home).join(".cc-switch").join("cc-switch.db")
 }
 
 fn home_dir(home: Option<&std::path::Path>) -> std::path::PathBuf {
-    home.map(std::path::PathBuf::from).unwrap_or_else(get_home_dir)
+    home.map(std::path::PathBuf::from)
+        .unwrap_or_else(get_home_dir)
 }
 
 /// Read `~/.claude/settings.json` → `env.ANTHROPIC_BASE_URL`.
@@ -274,11 +276,7 @@ pub fn extract_target_url(app_type: &str, settings_config: &serde_json::Value) -
 
 /// Decide whether a target URL points at AAG's own local proxy
 /// (i.e. the URL's host:port matches `aag_proxy_host:aag_proxy_port`).
-pub fn target_is_aag_proxy(
-    target: &str,
-    aag_proxy_host: &str,
-    aag_proxy_port: u16,
-) -> bool {
+pub fn target_is_aag_proxy(target: &str, aag_proxy_host: &str, aag_proxy_port: u16) -> bool {
     url_uses_cc_switch_port(target, aag_proxy_port)
         && (target.contains(aag_proxy_host) || target.contains("127.0.0.1"))
 }
@@ -287,6 +285,30 @@ pub fn target_is_aag_proxy(
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn database_discovery_uses_effective_home_without_an_explicit_override() {
+        let _guard = crate::config::test_env_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AAG_HOME_DIR");
+        std::env::set_var("AAG_HOME_DIR", root.path());
+        let expected = root.path().join(".cc-switch/cc-switch.db");
+        let discovered = cc_switch_db_path(None);
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        // A directory with the database's name is not an installed database.
+        std::fs::create_dir(&expected).unwrap();
+        let directory_detected = probe_db_file(None);
+        std::fs::remove_dir(&expected).unwrap();
+        std::fs::write(&expected, []).unwrap();
+        let file_detected = probe_db_file(None);
+        match previous {
+            Some(value) => std::env::set_var("AAG_HOME_DIR", value),
+            None => std::env::remove_var("AAG_HOME_DIR"),
+        }
+        assert_eq!(discovered, expected);
+        assert!(!directory_detected);
+        assert!(file_detected);
+    }
 
     /// Bind a localhost socket on an ephemeral port and return
     /// `(port, guard)`. The guard holds the listener open — when
@@ -304,14 +326,8 @@ mod tests {
     /// exist.)
     #[test]
     fn url_uses_cc_switch_port_basic() {
-        assert!(url_uses_cc_switch_port(
-            "http://127.0.0.1:15721/v1",
-            15721
-        ));
-        assert!(url_uses_cc_switch_port(
-            "http://localhost:15721/v1",
-            15721
-        ));
+        assert!(url_uses_cc_switch_port("http://127.0.0.1:15721/v1", 15721));
+        assert!(url_uses_cc_switch_port("http://localhost:15721/v1", 15721));
         assert!(!url_uses_cc_switch_port("http://127.0.0.1:8989/v1", 15721));
         assert!(!url_uses_cc_switch_port("https://api.openai.com/v1", 15721));
     }
@@ -409,7 +425,10 @@ mod tests {
         // Probe on a fresh thread with a short timeout: even if the
         // kernel briefly holds the port, our 200ms timeout cuts the
         // test off quickly.
-        assert!(!probe_port(port), "expected probe_port({port}) to fail after drop");
+        assert!(
+            !probe_port(port),
+            "expected probe_port({port}) to fail after drop"
+        );
     }
 
     /// Whole detect() pipeline against a controlled environment.

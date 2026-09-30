@@ -9,6 +9,39 @@ use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
 
+/// Serialize the fields shared by the provider insert paths: settings JSON,
+/// meta JSON, and the `created_at` fallback for new rows.
+fn provider_payload(provider: &Provider) -> Result<(String, String, i64), AppError> {
+    let settings_config_str = to_json_string(&provider.settings_config)?;
+    let meta_str = to_json_string(provider.meta.as_ref().unwrap_or(&ProviderMeta::default()))?;
+    let created_at = provider
+        .created_at
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    Ok((settings_config_str, meta_str, created_at))
+}
+
+/// Bind the 13-column parameter list shared by `save_provider` and
+/// `upsert_provider`.
+macro_rules! provider_params {
+    ($app_type:expr, $provider:expr, $settings:expr, $meta:expr, $created_at:expr) => {
+        params![
+            $provider.id,
+            $app_type,
+            $provider.name,
+            $settings,
+            $provider.website_url,
+            $provider.category,
+            $created_at,
+            $provider.sort_index,
+            $provider.notes,
+            $provider.icon,
+            $provider.icon_color,
+            $meta,
+            $provider.in_failover_queue,
+        ]
+    };
+}
+
 impl Database {
     /// List all providers for an app, ordered by sort_index then created_at.
     /// Returns an `IndexMap` keyed by provider id (insertion-ordered).
@@ -142,17 +175,13 @@ impl Database {
         }
     }
 
-    /// Upsert a provider. Sets `is_current = 0` on insert; use
-    /// `set_current_provider` to activate.
-    pub fn save_provider(
-        &self,
-        app_type: &str,
-        provider: &Provider,
-    ) -> Result<(), AppError> {
+    /// Insert a provider if absent. Existing rows are left untouched, so
+    /// re-imports and re-runs never clobber local edits (the cc-switch
+    /// importer and DSH seeding rely on this). Use `upsert_provider` to
+    /// persist edits to an existing row.
+    pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
-        let settings_config_str = to_json_string(&provider.settings_config)?;
-        let meta_str = to_json_string(provider.meta.as_ref().unwrap_or(&ProviderMeta::default()))?;
-        let created_at = provider.created_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let (settings_config_str, meta_str, created_at) = provider_payload(provider)?;
 
         conn.execute(
             "INSERT OR IGNORE INTO providers (
@@ -160,21 +189,49 @@ impl Database {
                 created_at, sort_index, notes, icon, icon_color, meta,
                 is_current, in_failover_queue, sync_locked
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, 0)",
-            params![
-                provider.id,
+            provider_params!(
                 app_type,
-                provider.name,
+                provider,
                 settings_config_str,
-                provider.website_url,
-                provider.category,
-                created_at,
-                provider.sort_index,
-                provider.notes,
-                provider.icon,
-                provider.icon_color,
                 meta_str,
-                provider.in_failover_queue,
-            ],
+                created_at
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Upsert a provider: insert when absent, otherwise update the editable
+    /// fields while preserving the stored `is_current`, `sync_locked`, and
+    /// `created_at` (those bits belong to their dedicated commands). Backs
+    /// the `provider_save` Tauri command.
+    pub fn upsert_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let (settings_config_str, meta_str, created_at) = provider_payload(provider)?;
+
+        conn.execute(
+            "INSERT INTO providers (
+                id, app_type, name, settings_config, website_url, category,
+                created_at, sort_index, notes, icon, icon_color, meta,
+                is_current, in_failover_queue, sync_locked
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, 0)
+            ON CONFLICT(id, app_type) DO UPDATE SET
+                name = excluded.name,
+                settings_config = excluded.settings_config,
+                website_url = excluded.website_url,
+                category = excluded.category,
+                sort_index = excluded.sort_index,
+                notes = excluded.notes,
+                icon = excluded.icon,
+                icon_color = excluded.icon_color,
+                meta = excluded.meta,
+                in_failover_queue = excluded.in_failover_queue",
+            provider_params!(
+                app_type,
+                provider,
+                settings_config_str,
+                meta_str,
+                created_at
+            ),
         )?;
         Ok(())
     }
@@ -211,12 +268,7 @@ impl Database {
     }
 
     /// Toggle the `sync_locked` bit on a single (id, app_type) row.
-    pub fn set_sync_locked(
-        &self,
-        id: &str,
-        app_type: &str,
-        locked: bool,
-    ) -> Result<(), AppError> {
+    pub fn set_sync_locked(&self, id: &str, app_type: &str, locked: bool) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         let updated = conn.execute(
             "UPDATE providers SET sync_locked = ?3 WHERE id = ?1 AND app_type = ?2",
@@ -254,11 +306,7 @@ impl Database {
 
     /// Set the active provider for an app. Clears `is_current` on all other
     /// providers in the same app_type, sets it on the target.
-    pub fn set_current_provider(
-        &self,
-        id: &str,
-        app_type: &str,
-    ) -> Result<(), AppError> {
+    pub fn set_current_provider(&self, id: &str, app_type: &str) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn.transaction()?;
         tx.execute(
@@ -337,5 +385,61 @@ mod tests {
         let db = make_db();
         let err = db.set_current_provider("nope", "claude_code").unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn upsert_updates_existing_preserving_state_bits() {
+        let db = make_db();
+        let p = Provider::new(
+            "prov-1".into(),
+            "Original".into(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://a.example"}}),
+        );
+        db.save_provider("claude_code", &p).unwrap();
+        db.set_current_provider("prov-1", "claude_code").unwrap();
+        db.set_sync_locked("prov-1", "claude_code", true).unwrap();
+
+        let mut edited = p.clone();
+        edited.name = "Renamed".into();
+        edited.settings_config = json!({"env": {"ANTHROPIC_BASE_URL": "https://b.example"}});
+        edited.in_failover_queue = false;
+        db.upsert_provider("claude_code", &edited).unwrap();
+
+        let fetched = db
+            .get_provider_by_id("prov-1", "claude_code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.name, "Renamed");
+        assert_eq!(
+            fetched.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            "https://b.example"
+        );
+        assert!(!fetched.in_failover_queue);
+        // is_current / sync_locked are owned by their dedicated commands and
+        // must survive an edit.
+        assert!(fetched.sync_locked);
+        assert_eq!(
+            db.get_current_provider("claude_code").unwrap(),
+            Some("prov-1".into())
+        );
+    }
+
+    #[test]
+    fn save_provider_leaves_existing_row_untouched() {
+        // Import idempotency: a re-save of a known id must not clobber the
+        // stored row (the cc-switch importer depends on this).
+        let db = make_db();
+        let p = Provider::new("prov-1".into(), "Original".into(), json!({}));
+        db.save_provider("claude_code", &p).unwrap();
+
+        let mut stale = p.clone();
+        stale.name = "Stale Import Copy".into();
+        db.save_provider("claude_code", &stale).unwrap();
+
+        let fetched = db
+            .get_provider_by_id("prov-1", "claude_code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.name, "Original");
     }
 }

@@ -1,7 +1,12 @@
 /// Typed Tauri command wrappers. All commands are defined in
 /// `src-tauri/src/lib.rs` `invoke_handler!`.
 import { invoke } from '@tauri-apps/api/core';
-import type { LiveWriteResult, Provider } from './types';
+import type { LiveWriteResult, Provider, Provider_config_status } from './types';
+
+/** Resolve the current OS and configuration target without writing files. */
+export async function get_provider_config_status(appType: string): Promise<Provider_config_status> {
+  return invoke<Provider_config_status>('provider_config_status', { appType });
+}
 
 /// List all providers for an app.
 export async function listProviders(appType: string): Promise<Provider[]> {

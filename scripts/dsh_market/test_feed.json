@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-30T08:00:00Z",
+  "plugins": [
+    {
+      "fullName": "example/claude-desktop-tools",
+      "htmlUrl": "https://github.com/example/claude-desktop-tools",
+      "description": "Native Claude desktop MCP tools with usage tracking",
+      "descriptionZh": "原生 Claude 桌面 MCP 工具与用量统计",
+      "packageName": "@example/claude-desktop-tools",
+      "version": "1.2.3",
+      "verifiedCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "topics": ["claude", "mcp", "desktop"],
+      "stars": 12,
+      "license": "MIT",
+      "updatedAt": "2026-08-29T10:00:00Z",
+      "hasClient": true,
+      "install": {"source": "npm", "spec": "DO NOT EXECUTE THIS FIELD"}
+    },
+    {
+      "fullName": "example/theme-memory",
+      "htmlUrl": "https://github.com/example/theme-memory",
+      "description": "主题界面美化与项目记忆管理",
+      "packageName": "theme-memory",
+      "version": "0.1.0",
+      "topics": ["theme", "memory"],
+      "stars": 0,
+      "hasClient": false,
+      "install": {"source": "github"}
+    }
+  ]
+}

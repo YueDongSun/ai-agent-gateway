@@ -1,115 +1,83 @@
-# Project structure
+# Project Structure
 
-The desktop application and the headless gateway remain independently runnable.
-This document maps current responsibilities; `DESIGN.md` also contains historical
-migration plans and must not be treated as an exact file inventory.
+Use this page to find the owner of a change. Read
+[`architecture.md`](architecture.md) for contracts and
+[`development.md`](development.md) for commands.
 
-## Runtime ownership
+## Repository tree
 
-- `src/`: the Node gateway, CLI, adapters, and JSON configuration. Keep this tree
-  for headless users; it does not implement the desktop state store.
-- `src-tauri/src/`: desktop command orchestration, SQLite DAOs, provider adapters,
-  and the Rust proxy. SQL belongs in `database/dao/`; live configuration writes
-  belong behind the existing adapter and atomic-write boundaries.
-- `ui/src/`: the React desktop interface and browser demo. `lib/api/` owns IPC
-  contracts; `lib/mock/` supplies synthetic browser data, not native integration
-  evidence.
-- `tests/`: Node gateway and adapter regression tests. `vitest.config.ts` excludes
-  unrelated reference-checkout tests.
-- `cc-switch/`: an ignored external reference checkout, not an AAG source tree.
+```text
+src/                         Node gateway, CLI/TUI, config, and adapters
+src-tauri/src/
+  commands/                  Tauri IPC orchestration
+  database/                  SQLite schema, migrations, seed, and DAOs
+  proxy/                     Axum server, routing, providers, breakers
+  services/                  adapters, detection/import, and sync
+    mcp/                     validated registry, redacted review, safe client writes
+    dsh/                     isolated runtime, setup, and plugin transactions
+  lib.rs                     Tauri setup and command registration
+ui/src/
+  components/app/            shared app page, pool, routes, gateway, launchers
+  components/mcp/            registry editor and reviewed client sync
+  hooks/                     gateway status and cancellation
+  lib/api/                   typed IPC wrappers and DTOs
+  lib/mock/                  browser-demo IPC backend
+  App.tsx                    desktop shell and lazy page boundary
+scripts/
+  ui_smoke/                  owned browser runtime and regression checks
+  verification/              feature-aware plans and foreground verification
+  mcp/                       independent read-only stdio companion
+  tauri_dev_config.mjs       development URL/config contract
+  tauri-dev.mjs              one-server desktop development runner
+tests/                       Node gateway and adapter tests
+docs/                        current and historical documentation
+```
 
-## UI state boundary
+## Ownership rules
 
-The app components keep their existing public names and IPC field names.
+- Keep Node gateway logic in `src/gateway/`; do not make it import Tauri state.
+- Put Rust SQL only in `src-tauri/src/database/dao/`.
+- Put Tauri orchestration only in `src-tauri/src/commands/`.
+- Put agent file formats and live writes in one adapter under
+  `src-tauri/src/services/provider/`.
+- Keep UI state in the owning page, context, or hook.
+- Keep mock IPC and browser smoke separate from native integration.
 
-- `ui/src/components/app/AppPage.tsx` owns page state and passes current action
-  callbacks to its children.
-- `ui/src/components/app/proxy_pool_state.tsx` owns pool data/action contracts,
-  context providers, and hooks.
-- `ui/src/components/app/routes_state.tsx` owns route data/action contracts,
-  context providers, and hooks.
-- `UpstreamPool.tsx`, `UpstreamList.tsx`, and `RouteEditor.tsx` consume their domain
-  modules directly. The mixed `state.tsx` compatibility layer is removed.
-- `ui/src/hooks/use_gateway_status.ts` owns header status polling, request
-  cancellation, and reconciliation after explicit page refresh callbacks.
-- `ui/src/components/secret_value.tsx` owns temporary key visibility. It does not
-  own configuration persistence or clipboard transport.
-- `ui/src/components/release_badge.tsx` renders the version and build channel.
-  `ui/src/lib/build_info.ts` exposes build metadata; `ui/vite.config.ts` reads
-  the desktop version from `src-tauri/tauri.conf.json`.
+## UI state boundaries
 
-Separate contexts do not imply field-level subscriptions. A component consuming
-an entire context can rerender when any field in that context changes. Action
-callbacks must see current state; omitted memo dependencies are not a valid
-performance optimization.
+`AppPage.tsx` coordinates the selected app page. `proxy_pool_state.tsx` owns
+upstream pool data/actions. `routes_state.tsx` owns route data/actions.
+`GatewayPanel.tsx`, `UpstreamPool.tsx`, `UpstreamList.tsx`, and `RouteEditor.tsx`
+consume those boundaries. Callbacks must see current state; omitted dependencies
+are not a valid optimization.
 
-## Build and release boundaries
+## Build boundaries
 
-- `npm run ui:dev` and `npm run ui:demo` serve the current React source. A
-  browser without the native bridge uses synthetic IPC. The explicit demo
-  command also opens the local preview in the default browser.
-- `npm run ui:preview` rebuilds and serves `ui/dist_demo`; it cannot replace
-  the native `ui/dist` bundle. Both outputs are ignored by Git.
-- `npm run desktop:dev` owns one Vite server and passes its actual bound URL
-  to the installed Tauri CLI through `scripts/tauri_dev_config.mjs`.
-- `npm run desktop:build` rebuilds `ui/dist` before compiling the desktop app.
-  `tauri:dev` and `tauri:build` remain compatible entry points.
-- `ui/public/app_icon.svg` is the shared brand source for the favicon, header,
-  and generated application icons. `tray_mark.svg` supplies the macOS template
-  mark. `scripts/generate_icons.mjs` generates and validates the native assets.
-- `scripts/release_preflight.mjs` verifies version, native output, and image
-  container contracts. `docs/desktop_release.md` owns distribution guidance.
-- `.github/workflows/desktop_build.yml` builds native platform candidates on
-  demand; it neither signs them nor creates releases.
+- `ui/dist`: native Tauri frontend output.
+- `ui/dist_demo`: browser-demo output.
+- `desktop:dev`: starts one owned Vite server and passes its actual URL to
+  Tauri.
+- `desktop:build`: builds the native frontend before native packaging.
+- `release:verify`: checks versions, generated assets, and image containers.
+- `ui:smoke` and `ui:smoke_demo`: use owned browser profiles and servers.
 
-The legacy root `npm run dev`, `npm run build`, and `npm start` still target the
-Node CLI. Desktop versioning does not change the independent CLI version.
+The root `npm run dev`, `npm run build`, and `npm start` remain Node CLI
+commands. They do not launch the desktop frontend.
 
-## Test tooling
+## Test boundaries
 
-`npm run ui:smoke` remains the browser test entry point. Its implementation lives
-in `scripts/smoke-demo.mjs`, with reusable runtime and regression responsibilities
-under `scripts/ui_smoke/`. New helper names use underscores; the existing npm
-command and entry filename remain compatible.
+- Node tests use the in-process Hono app and mock providers.
+- Rust tests use inline modules and the full-stack `e2e` test.
+- Rust tests that mutate process-wide environment variables run serially.
+- Browser smoke uses synthetic IPC and verifies persistence through the demo
+  adapter; it does not prove native WebView2 or real upstream behavior.
+- Release checks do not prove installation, signing, upgrades, or publication.
 
-- `smoke_runtime.mjs`: Vite/browser ownership and validated profile cleanup.
-- `cdp_client.mjs`: DevTools transport, deadlines, and protocol errors.
-- `page_checks.mjs`: page-result and asynchronous-error assertions.
-- `demo_api_adapter.mjs`: guarded access to the synthetic IPC backend in both
-  source-served and built-demo smoke runs.
-- `phase_23_regressions.mjs`: state-lifetime and persistence regressions.
-- `product_checks.mjs`: gateway feedback, credential presentation, table
-  alignment, theme readability, and responsive layout regressions.
+## Documentation ownership
 
-`npm run ui:smoke_demo` rebuilds the demonstration output and runs the same
-suite against it. The runtime uses a separate owned port for each mode.
-
-Tests must own their browser profile and development server. A response from an
-unrelated server on a familiar port is not proof that the checkout was tested.
-Browser mock checks do not authorize real provider calls or live configuration
-changes.
-
-## Progress documents
-
-- `PROGRESS.md`: current phase, closure boundary, next action, fresh verification,
-  and the most recent log entry. Read this first.
-- `docs/reviews/phase_23_review.md`: reviewed commits, defects, repair decisions,
-  and remaining follow-ups.
-- `docs/progress/phase_22_23_history.md`: the previous long progress log, retained
-  as historical evidence with its original completion claims.
-- `docs/PHASE-ARCHIVE.md`: the existing archive through Phase 22b.
-
-Archive detailed history instead of appending every past phase to the current
-status file. Historical test counts and completion labels are not fresh proof.
-
-## Deferred structural work
-
-Do not rename or move the three runtime roots, extract a shared cross-language
-library, or move private database state as part of this cleanup. If `AppPage.tsx`
-needs further reduction, extract one state-owning domain hook at a time and keep
-its persistence regression tests with that boundary.
-
-The root `check_codex.py`, `check_db.py`, and `check-db.cjs` are unreferenced,
-machine-specific diagnostics. They were not executed or moved. A separate cleanup
-should remove them or replace them with an explicit-path, read-only, redacted
-diagnostic command; merely relocating them would preserve unsafe output behavior.
+- `README.md`: user-facing overview and quick start.
+- `docs/architecture.md`: current module and contract reference.
+- `docs/development.md`: setup and verification.
+- `DESIGN.md`: durable design and migration summary.
+- `PROGRESS.md`: current status and fresh evidence.
+- `docs/desktop_release.md`: native build and distribution boundary.

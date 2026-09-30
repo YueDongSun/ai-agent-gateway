@@ -1,0 +1,49 @@
+Source registry: YELEBAI/dsh-plugin-marketplace
+Source URL: https://github.com/YELEBAI/dsh-plugin-marketplace
+Inspected commit: 33af32809ed33ee0588ab2acac454a0d8c4a4de3
+Inspected files: scripts/registry-scan.mjs, scripts/discovery-core.mjs,
+registry/plugins.json, registry/discovery.json, LICENSE.
+
+The bundled catalog normalizes public registry metadata. Its registry commit
+is not any individual plugin's source commit. Upstream verification, authors,
+licenses, counts, and descriptions are source claims, not an AAG security audit.
+Original descriptions are excerpted to 400 Unicode code points. Missing English
+or Chinese translations remain missing. AAG's keyword labels are heuristic.
+Description fields are privacy-scrubbed before publication. Email addresses,
+authenticated URLs, absolute user-profile paths, RFC1918/CGNAT addresses, and
+Tailnet hostnames are replaced with stable redaction tokens. Source repository
+and author attribution remain unchanged. The bundled snapshot records per-class
+replacement counts and the number of modified entries; no entry is silently
+dropped.
+
+The current bundled snapshot was re-scrubbed offline from the previously
+normalized snapshot at the recorded immutable registry commit. No network
+request, translation, plugin installation, or plugin execution occurred during
+that public-snapshot repair.
+
+The collector is an independent bounded adapter; it does not execute upstream
+collection scripts, install packages, create schedules, or run plugin code.
+
+Registry license notice:
+
+MIT License
+
+Copyright (c) 2025 dsh-plugin-marketplace contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

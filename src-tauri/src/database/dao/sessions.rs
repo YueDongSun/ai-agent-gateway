@@ -119,9 +119,17 @@ impl Database {
                 message_count=excluded.message_count,
                 last_active_at=excluded.last_active_at",
             params![
-                s.id, s.app_id, s.session_id, s.title, s.summary, s.project_dir,
-                s.source_path, s.resume_command, s.message_count as i64,
-                s.started_at, s.last_active_at,
+                s.id,
+                s.app_id,
+                s.session_id,
+                s.title,
+                s.summary,
+                s.project_dir,
+                s.source_path,
+                s.resume_command,
+                s.message_count as i64,
+                s.started_at,
+                s.last_active_at,
             ],
         )?;
         Ok(())
@@ -200,7 +208,10 @@ mod tests {
 
         let fetched = db.get_session("claude_code:abc").unwrap();
         assert!(fetched.is_some());
-        assert_eq!(fetched.unwrap().title.as_deref(), Some("Session claude_code:abc"));
+        assert_eq!(
+            fetched.unwrap().title.as_deref(),
+            Some("Session claude_code:abc")
+        );
 
         let all = db.get_all_sessions().unwrap();
         assert_eq!(all.len(), 1);
@@ -212,8 +223,10 @@ mod tests {
     #[test]
     fn get_sessions_by_app_filters() {
         let db = make_db();
-        db.save_session(&make_session("claude_code:a", "claude_code")).unwrap();
-        db.save_session(&make_session("claude_code:b", "claude_code")).unwrap();
+        db.save_session(&make_session("claude_code:a", "claude_code"))
+            .unwrap();
+        db.save_session(&make_session("claude_code:b", "claude_code"))
+            .unwrap();
         db.save_session(&make_session("codex:x", "codex")).unwrap();
 
         let claude = db.get_sessions_by_app("claude_code").unwrap();

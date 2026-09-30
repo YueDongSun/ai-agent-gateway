@@ -35,45 +35,74 @@ fn build_client() -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
-        .map_err(|e| AppError::Message(format!("reqwest client build failed: {e}")))
+        .map_err(|_| AppError::Message("webdav_client_build_failed".into()))
 }
 
-/// Parse + validate a WebDAV base URL. Must be http or https.
+/// Parse + validate a WebDAV base URL. Remote endpoints require HTTPS;
+/// plaintext HTTP is limited to explicit loopback development endpoints.
 fn parse_endpoint(endpoint: &str) -> Result<reqwest::Url, AppError> {
     let trimmed = endpoint.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(AppError::InvalidInput("endpoint is required".into()));
     }
     let url = reqwest::Url::parse(trimmed)
-        .map_err(|e| AppError::InvalidInput(format!("invalid endpoint URL: {e}")))?;
-    match url.scheme() {
-        "http" | "https" => Ok(url),
-        other => Err(AppError::InvalidInput(format!(
-            "endpoint scheme must be http or https, got \"{other}\""
-        ))),
+        .map_err(|_| AppError::InvalidInput("invalid endpoint URL".into()))?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    );
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    {
+        return Err(AppError::InvalidInput(
+            "WebDAV endpoint requires HTTPS or explicit loopback HTTP".into(),
+        ));
     }
+    Ok(url)
+}
+
+fn require_encrypted_payload() -> Result<(), AppError> {
+    Err(AppError::Message(
+        "cloud_sync_encryption_required: database transfer is disabled".into(),
+    ))
 }
 
 /// Strip a trailing slash from `remote_path`. Empty/None becomes "".
-fn normalize_remote_path(remote_path: Option<&str>) -> String {
-    remote_path
+fn normalize_remote_path(remote_path: Option<&str>) -> Result<String, AppError> {
+    let normalized = remote_path
         .unwrap_or("")
         .trim()
         .trim_matches('/')
-        .to_string()
+        .to_string();
+    if normalized.contains(['\\', '?', '#', '\0'])
+        || normalized
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(AppError::InvalidInput("invalid WebDAV remote path".into()));
+    }
+    Ok(normalized)
 }
 
 /// Build the full PUT/GET URL: `{endpoint}/{remote_path}/aag.db`.
 fn remote_db_url(endpoint: &str, remote_path: Option<&str>) -> Result<reqwest::Url, AppError> {
-    let base = parse_endpoint(endpoint)?;
-    let rel = normalize_remote_path(remote_path);
-    let joined = if rel.is_empty() {
-        format!("{}/aag.db", base)
-    } else {
-        format!("{}/{}/aag.db", base, rel)
-    };
-    reqwest::Url::parse(&joined)
-        .map_err(|e| AppError::InvalidInput(format!("remote URL build failed: {e}")))
+    let mut base = parse_endpoint(endpoint)?;
+    let rel = normalize_remote_path(remote_path)?;
+    {
+        let mut segments = base
+            .path_segments_mut()
+            .map_err(|_| AppError::InvalidInput("invalid WebDAV base URL".into()))?;
+        segments.pop_if_empty();
+        for segment in rel.split('/').filter(|segment| !segment.is_empty()) {
+            segments.push(segment);
+        }
+        segments.push("aag.db");
+    }
+    Ok(base)
 }
 
 /// HEAD the remote `aag.db` to confirm the endpoint + credentials are valid.
@@ -95,16 +124,18 @@ pub async fn check_connection(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("HEAD failed: {e}")))?;
+        .map_err(|_| AppError::Message("webdav_head_failed".into()))?;
     let status = resp.status();
+    classify_head_status(status)
+}
+
+fn classify_head_status(status: StatusCode) -> Result<(), AppError> {
     match status {
-        StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(AppError::Message(format!(
-            "auth rejected (HTTP {status})"
-        ))),
-        s if s.is_server_error() => Err(AppError::Message(format!(
-            "server error HTTP {s}"
-        ))),
+        s if s.is_success() || s == StatusCode::NOT_FOUND => Ok(()),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            Err(AppError::Message(format!("auth rejected (HTTP {status})")))
+        }
+        s if s.is_server_error() => Err(AppError::Message(format!("server error HTTP {s}"))),
         s => Err(AppError::Message(format!(
             "unexpected HTTP {s} from HEAD request"
         ))),
@@ -118,6 +149,7 @@ pub async fn upload(
     password: &str,
     remote_path: Option<&str>,
 ) -> Result<WebDavResult, AppError> {
+    require_encrypted_payload()?;
     let url = remote_db_url(endpoint, remote_path)?;
     let local_path = get_db_path();
     let bytes = std::fs::read(&local_path).map_err(|e| AppError::io(&local_path, e))?;
@@ -131,12 +163,10 @@ pub async fn upload(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("PUT failed: {e}")))?;
+        .map_err(|_| AppError::Message("webdav_put_failed".into()))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(AppError::Message(format!(
-            "upload rejected: HTTP {status}"
-        )));
+        return Err(AppError::Message(format!("upload rejected: HTTP {status}")));
     }
     Ok(WebDavResult {
         status: "uploaded",
@@ -155,6 +185,7 @@ pub async fn download(
     password: &str,
     remote_path: Option<&str>,
 ) -> Result<WebDavResult, AppError> {
+    require_encrypted_payload()?;
     let url = remote_db_url(endpoint, remote_path)?;
     let client = build_client()?;
     let mut req = client.get(url);
@@ -164,7 +195,7 @@ pub async fn download(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Message(format!("GET failed: {e}")))?;
+        .map_err(|_| AppError::Message("webdav_get_failed".into()))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(AppError::Message(format!(
@@ -174,7 +205,7 @@ pub async fn download(
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| AppError::Message(format!("read response body: {e}")))?;
+        .map_err(|_| AppError::Message("webdav_response_read_failed".into()))?;
     let size = bytes.len() as u64;
     if size == 0 {
         return Err(AppError::Message("remote file is empty".into()));
@@ -235,17 +266,12 @@ pub async fn check_and_stamp(
     result
 }
 
-async fn stamp_outcome<T, E: std::fmt::Display>(
-    db: &Database,
-    result: &Result<T, E>,
-) {
+async fn stamp_outcome<T, E>(db: &Database, result: &Result<T, E>) {
     let target = crate::database::dao::sync_config::SyncTarget::Webdav;
-    let err_msg = match result {
-        Ok(_) => None,
-        Err(e) => Some(e.to_string()),
-    };
+    let err_msg = result.as_ref().err().map(|_| "sync_operation_failed");
     if let Err(stamp_err) = db.record_sync_result(target, err_msg.as_deref()) {
-        log::warn!("webdav: failed to stamp sync result: {stamp_err}");
+        let _ = stamp_err;
+        log::warn!("webdav: sync result stamp failed code=database_error");
     }
 }
 
@@ -257,13 +283,22 @@ mod tests {
 
     #[test]
     fn normalize_remote_path_strips_and_drops_empty() {
-        assert_eq!(normalize_remote_path(None), "");
-        assert_eq!(normalize_remote_path(Some("")), "");
-        assert_eq!(normalize_remote_path(Some("/aag/")), "aag");
-        assert_eq!(normalize_remote_path(Some("aag/")), "aag");
-        assert_eq!(normalize_remote_path(Some("/aag")), "aag");
-        assert_eq!(normalize_remote_path(Some("aag/sub")), "aag/sub");
-        assert_eq!(normalize_remote_path(Some("  /aag/  ")), "aag");
+        assert_eq!(normalize_remote_path(None).unwrap(), "");
+        assert_eq!(normalize_remote_path(Some("")).unwrap(), "");
+        assert_eq!(normalize_remote_path(Some("/aag/")).unwrap(), "aag");
+        assert_eq!(normalize_remote_path(Some("aag/")).unwrap(), "aag");
+        assert_eq!(normalize_remote_path(Some("/aag")).unwrap(), "aag");
+        assert_eq!(normalize_remote_path(Some("aag/sub")).unwrap(), "aag/sub");
+        assert_eq!(normalize_remote_path(Some("  /aag/  ")).unwrap(), "aag");
+        for rejected in [
+            "../private",
+            "aag/../private",
+            "aag?token=x",
+            "aag#private",
+            "aag\\private",
+        ] {
+            assert!(normalize_remote_path(Some(rejected)).is_err());
+        }
     }
 
     #[test]
@@ -273,6 +308,30 @@ mod tests {
         assert!(parse_endpoint("not a url").is_err());
         assert!(parse_endpoint("https://dav.example.com/").is_ok());
         assert!(parse_endpoint("http://localhost:8080/").is_ok());
+        assert!(parse_endpoint("http://dav.example.com/").is_err());
+        let authenticated = format!("https://{}:{}@{}/", "user", "secret", "dav.example.com");
+        assert!(parse_endpoint(&authenticated).is_err());
+        assert!(parse_endpoint("https://dav.example.com/#private").is_err());
+        assert!(parse_endpoint("https://dav.example.com/?token=private").is_err());
+    }
+
+    #[test]
+    fn database_transfer_requires_encrypted_payload_format() {
+        assert!(require_encrypted_payload().is_err());
+    }
+
+    #[test]
+    fn head_accepts_all_success_statuses_and_intended_not_found() {
+        for status in [
+            StatusCode::OK,
+            StatusCode::NO_CONTENT,
+            StatusCode::from_u16(207).unwrap(),
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(classify_head_status(status).is_ok());
+        }
+        assert!(classify_head_status(StatusCode::UNAUTHORIZED).is_err());
+        assert!(classify_head_status(StatusCode::INTERNAL_SERVER_ERROR).is_err());
     }
 
     #[test]
@@ -282,20 +341,12 @@ mod tests {
         assert_eq!(u.as_str(), "https://dav.example.com/webdav/aag.db");
 
         // Endpoint with trailing slash + remote path
-        let u = remote_db_url(
-            "https://dav.example.com/webdav/",
-            Some("/aag/"),
-        )
-        .unwrap();
+        let u = remote_db_url("https://dav.example.com/webdav/", Some("/aag/")).unwrap();
         assert_eq!(u.as_str(), "https://dav.example.com/webdav/aag/aag.db");
 
         // No trailing slash on endpoint
-        let u =
-            remote_db_url("https://dav.example.com/webdav", Some("aag/sub")).unwrap();
-        assert_eq!(
-            u.as_str(),
-            "https://dav.example.com/webdav/aag/sub/aag.db"
-        );
+        let u = remote_db_url("https://dav.example.com/webdav", Some("aag/sub")).unwrap();
+        assert_eq!(u.as_str(), "https://dav.example.com/webdav/aag/sub/aag.db");
     }
 
     #[test]

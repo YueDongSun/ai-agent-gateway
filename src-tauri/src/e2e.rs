@@ -25,6 +25,7 @@ mod tests {
     use crate::proxy::providers::build_provider;
     use crate::proxy::router::Router;
     use crate::proxy::server::{serve, ProxyAppState};
+    use crate::services::provider::test_support::isolated_home_async;
     use crate::services::provider::{write_live_snapshot, AppType};
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -40,27 +41,23 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_stack_e2e() {
-        let _env_guard = crate::config::test_env_lock().lock().await;
-
-        // ── 1. Isolate from the real user environment ──
-        let tmp = std::env::temp_dir().join("aag-e2e-test");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        // AAG_CONFIG_DIR: where the SQLite DB lives.
-        // AAG_HOME_DIR: where live agent config files (~/.claude, ~/.codex, …)
-        //   are written. The `dirs` crate's home_dir() on Windows can ignore
-        //   USERPROFILE mutations inside a running process, so we expose our
-        //   own env override in `config::get_home_dir`.
-        std::env::set_var("AAG_CONFIG_DIR", &tmp);
-        std::env::set_var("AAG_HOME_DIR", &tmp);
+        // IsolatedHome acquires test_env_lock internally (async variant: this
+        // is a Tokio runtime thread, where blocking_lock() would panic).
+        let _home = isolated_home_async("e2e").await;
 
         // ── 2. DB init + seed ──
         let db = Database::init().expect("Database::init");
-        let db_path = tmp.join("aag.db");
+        let db_path = _home.config_dir().join("aag.db");
         assert!(db_path.exists(), "aag.db should be created in the temp dir");
 
-        let proxy_providers = db.get_all_proxy_providers().expect("get_all_proxy_providers");
-        assert_eq!(proxy_providers.len(), 2, "seed should create 2 mock providers");
+        let proxy_providers = db
+            .get_all_proxy_providers()
+            .expect("get_all_proxy_providers");
+        assert_eq!(
+            proxy_providers.len(),
+            2,
+            "seed should create 2 mock providers"
+        );
         let routes = db.get_all_routes().expect("get_all_routes");
         let aliases: Vec<&str> = routes.iter().map(|r| r.alias.as_str()).collect();
         // 3 demo routes + one per official Claude model + one per default Codex model
@@ -68,12 +65,22 @@ mod tests {
         // can request official ids and flow through the failover chain).
         assert_eq!(
             routes.len(),
-            3 + crate::proxy::models::OFFICIAL_MODELS.len() + crate::proxy::models::CODEX_MODELS.len(),
+            3 + crate::proxy::models::OFFICIAL_MODELS.len()
+                + crate::proxy::models::CODEX_MODELS.len(),
             "seed should create demo + official-model + codex-model routes, got: {aliases:?}"
         );
-        assert!(aliases.contains(&"claude-sonnet-4"), "demo route missing: {aliases:?}");
-        assert!(aliases.contains(&"claude-fable-5"), "official model route missing: {aliases:?}");
-        assert!(aliases.contains(&"codex-5-6-sol"), "codex model route missing: {aliases:?}");
+        assert!(
+            aliases.contains(&"claude-sonnet-4"),
+            "demo route missing: {aliases:?}"
+        );
+        assert!(
+            aliases.contains(&"claude-fable-5"),
+            "official model route missing: {aliases:?}"
+        );
+        assert!(
+            aliases.contains(&"codex-5-6-sol"),
+            "codex model route missing: {aliases:?}"
+        );
 
         // ── 3. Provider flow: save → current → live write ──
         let provider = Provider::new(
@@ -84,7 +91,8 @@ mod tests {
                 "apiKey": "e2e-test-key"
             }),
         );
-        db.save_provider("claude_code", &provider).expect("save_provider");
+        db.save_provider("claude_code", &provider)
+            .expect("save_provider");
         db.set_current_provider("e2e-claude", "claude_code")
             .expect("set_current_provider");
         assert_eq!(
@@ -101,11 +109,8 @@ mod tests {
         let actual_written = &live.written[0];
         eprintln!("[e2e] write_live_snapshot wrote to: {actual_written}");
 
-        let settings_path = tmp.join(".claude").join("settings.json");
-        eprintln!(
-            "[e2e] checking expected path: {}",
-            settings_path.display()
-        );
+        let settings_path = _home.root.join(".claude").join("settings.json");
+        eprintln!("[e2e] checking expected path: {}", settings_path.display());
         assert!(
             settings_path.exists(),
             "fake ~/.claude/settings.json should exist at {}",
@@ -142,16 +147,21 @@ mod tests {
         // against TIME_WAIT sockets from a previous failed run holding 39787.
         let (port, server_handle, shutdown_tx) = {
             let mut last_err: Option<String> = None;
-            let mut result: Option<(u16, tokio::task::JoinHandle<()>, tokio::sync::oneshot::Sender<()>)> = None;
+            let mut result: Option<(
+                u16,
+                tokio::task::JoinHandle<()>,
+                tokio::sync::oneshot::Sender<()>,
+            )> = None;
             for offset in 0u16..5 {
                 let try_port = TEST_PORT_START + offset;
-                let addr: std::net::SocketAddr =
-                    format!("127.0.0.1:{try_port}").parse().unwrap();
+                let addr: std::net::SocketAddr = format!("127.0.0.1:{try_port}").parse().unwrap();
                 let (tx, rx) = oneshot::channel::<()>();
                 let state_for_try = ProxyAppState {
                     router: Arc::clone(&router),
                     auth_token: String::new(),
                     pinned_provider: Arc::new(std::sync::Mutex::new(None)),
+                    responses_cot_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    passthrough_auth_allowed: false,
                     db: None, // e2e doesn't exercise failover-winner persistence
                 };
                 let handle = tokio::spawn(async move {
@@ -185,10 +195,12 @@ mod tests {
                 let _ = tx.send(());
                 last_err = Some(format!("port {try_port} did not become ready"));
             }
-            result.unwrap_or_else(|| panic!(
-                "no port in {TEST_PORT_START}..{} bound: {last_err:?}",
-                TEST_PORT_START + 5
-            ))
+            result.unwrap_or_else(|| {
+                panic!(
+                    "no port in {TEST_PORT_START}..{} bound: {last_err:?}",
+                    TEST_PORT_START + 5
+                )
+            })
         };
         eprintln!("[e2e] proxy listening on port {port}");
 
@@ -268,12 +280,15 @@ mod tests {
         let content_nonempty = ant_json["content"]
             .as_array()
             .map(|blocks| {
-                blocks
-                    .iter()
-                    .any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.is_empty()))
+                blocks.iter().any(|b| {
+                    b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.is_empty())
+                })
             })
             .unwrap_or(false);
-        assert!(content_nonempty, "content blocks non-empty, got: {ant_json}");
+        assert!(
+            content_nonempty,
+            "content blocks non-empty, got: {ant_json}"
+        );
 
         // ── 4b. Non-streaming completion via the seeded route ──
         let body = json!({
@@ -348,8 +363,7 @@ mod tests {
         );
         // First data chunk should carry the role delta.
         let first_payload = data_lines[0].trim_start_matches("data:").trim();
-        let first_chunk: Value =
-            serde_json::from_str(first_payload).expect("first chunk JSON");
+        let first_chunk: Value = serde_json::from_str(first_payload).expect("first chunk JSON");
         assert_eq!(
             first_chunk["choices"][0]["delta"]["role"].as_str(),
             Some("assistant"),
@@ -418,9 +432,18 @@ mod tests {
             .send()
             .await
             .expect("POST /v1/responses stream");
-        assert!(stream_resp_resp.status().is_success(), "responses stream should 200");
+        assert!(
+            stream_resp_resp.status().is_success(),
+            "responses stream should 200"
+        );
         let sse_text = stream_resp_resp.text().await.expect("responses sse body");
-        for expected_event in ["response.created", "response.output_item.added", "response.output_text.delta", "response.output_item.done", "response.completed"] {
+        for expected_event in [
+            "response.created",
+            "response.output_item.added",
+            "response.output_text.delta",
+            "response.output_item.done",
+            "response.completed",
+        ] {
             assert!(
                 sse_text.contains(expected_event),
                 "responses stream should emit {expected_event}, got:\n{sse_text}"
@@ -467,9 +490,7 @@ mod tests {
         );
 
         // ── 5. Graceful shutdown ──
-        shutdown_tx
-            .send(())
-            .expect("send shutdown");
+        shutdown_tx.send(()).expect("send shutdown");
         tokio::time::timeout(Duration::from_secs(10), server_handle)
             .await
             .expect("server should shut down within 10s")
@@ -502,7 +523,6 @@ mod tests {
             .expect("row still exists");
         assert!(stamped.last_sync_at.is_some(), "last_sync_at stamped");
 
-        // Best-effort cleanup.
-        let _ = std::fs::remove_dir_all(&tmp);
+        // Cleanup of the temp root is handled by `IsolatedHome::drop`.
     }
 }

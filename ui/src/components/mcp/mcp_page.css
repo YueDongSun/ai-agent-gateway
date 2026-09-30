@@ -1,0 +1,57 @@
+.mcp_page { max-width: 1080px; margin: 0 auto; padding: 12px 0 48px; }
+.mcp_page input:not([type='checkbox']), .mcp_dialog input:not([type='checkbox']), .mcp_dialog textarea { width: 100%; border: 1px solid var(--border); background: var(--bg-input); color: var(--fg); border-radius: var(--radius-sm); padding: 9px 11px; font: inherit; font-size: 12px; }
+.mcp_page input:focus-visible, .mcp_dialog input:focus-visible, .mcp_dialog textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mcp_page_heading, .mcp_server_heading, .mcp_server_footer, .mcp_toolbar, .mcp_dialog_heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.mcp_page_heading { margin-bottom: 28px; }
+.mcp_eyebrow { font-size: 10px; letter-spacing: .14em; color: var(--fg-muted); font-weight: 650; }
+.mcp_page_heading h2 { font: 400 clamp(28px, 4vw, 40px)/1.15 Georgia, 'Times New Roman', serif; letter-spacing: -.025em; margin: 8px 0 12px; }
+.mcp_muted { color: var(--fg-muted); line-height: 1.7; }
+.mcp_overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elevated); }
+.mcp_overview > div { display: flex; flex-direction: column; gap: 5px; padding: 20px 24px; }
+.mcp_overview > div + div { border-left: 1px solid var(--border); }
+.mcp_overview strong { font: 400 30px Georgia, serif; }
+.mcp_overview span { font-size: 12px; color: var(--fg-muted); }
+.mcp_notice { border: 1px solid var(--border); border-radius: 9px; background: var(--accent-bg); padding: 13px 16px; font-size: 12px; line-height: 1.7; margin: 12px 0; overflow-wrap: anywhere; }
+.mcp_notice p { margin: 4px 0 0; color: var(--fg-muted); }
+.mcp_boundary { background: none; border-left: 3px solid var(--accent); }
+.mcp_toolbar { align-items: end; margin: 26px 0 16px; flex-wrap: wrap; }
+.mcp_search { flex: 1; min-width: 180px; max-width: 340px; font-size: 11px; color: var(--fg-muted); }
+.mcp_search input { display: block; width: 100%; margin-top: 6px; }
+.mcp_server_list { display: grid; gap: 14px; }
+.mcp_server { padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elevated); min-width: 0; }
+.mcp_server_identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.mcp_server_identity > div { min-width: 0; overflow-wrap: anywhere; }
+.mcp_server_identity h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.mcp_server_identity code { font-size: 11px; color: var(--fg-muted); }
+.mcp_server_icon { width: 42px; height: 42px; display: grid; place-items: center; flex-shrink: 0; border: 1px solid var(--border); background: var(--bg-elevated-2); border-radius: 10px; font-size: 22px; color: var(--accent-text); }
+.mcp_tag { border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; font-size: 10px; color: var(--fg-muted); white-space: nowrap; }
+.mcp_server > p { font-size: 12px; }
+.mcp_details { margin: 16px 0; font-size: 11px; }
+.mcp_details summary { cursor: pointer; color: var(--fg-muted); }
+.mcp_code { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; padding: 14px; font-size: 11px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--fg); }
+.mcp_server_footer { padding-top: 15px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.mcp_client_choices, .mcp_actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 16px; }
+.mcp_actions { justify-content: flex-end; }
+.mcp_check { display: flex; gap: 8px; align-items: center; font-size: 12px; line-height: 1.7; }
+.mcp_check input { accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 16px; margin: 0; }
+.mcp_empty { text-align: center; color: var(--fg-muted); padding: 48px 24px; border: 1px dashed var(--border-strong); border-radius: 12px; }
+.mcp_empty h3 { color: var(--fg); font: 400 24px Georgia, serif; margin: 0 0 10px; }
+.mcp_companion { margin-top: 32px; padding: 24px; border-radius: 12px; border: 1px solid var(--border); }
+.mcp_companion h3 { font: 400 23px Georgia, serif; margin: 10px 0; }
+.mcp_companion p { font-size: 12px; line-height: 1.8; }
+.mcp_companion code { overflow-wrap: anywhere; }
+.mcp_error { color: var(--danger); background: var(--danger-bg); border-radius: 8px; padding: 12px 16px; font-size: 12px; overflow-wrap: anywhere; }
+.mcp_backdrop { position: fixed; inset: 0; z-index: 130; display: grid; place-items: center; padding: 20px; background: var(--bg-overlay); }
+.mcp_dialog { background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 16px; padding: 25px; width: min(660px, 100%); max-height: calc(100dvh - 40px); overflow: auto; box-shadow: var(--shadow-pop); }
+.mcp_dialog_heading h2 { font: 400 27px Georgia, serif; margin: 0; }
+.mcp_dialog > p { font-size: 12px; }
+.mcp_form_grid { display: grid; grid-template-columns: 1fr 1.5fr; gap: 14px; }
+.mcp_field, .mcp_form_grid label { display: flex; flex-direction: column; gap: 7px; font-size: 12px; margin: 14px 0; }
+.mcp_field textarea { width: 100%; resize: vertical; font: 12px/1.7 ui-monospace, Consolas, monospace; }
+.mcp_targets { display: flex; flex-wrap: wrap; gap: 18px; border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 18px 0; }
+.mcp_targets legend { color: var(--fg-muted); font-size: 11px; padding: 0 5px; }
+.mcp_ack { margin: 20px 0; align-items: flex-start; }
+.mcp_ack input { margin-top: 3px; }
+.mcp_changes { list-style: none; padding: 0; font-size: 12px; }
+.mcp_changes li { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--border); padding: 9px 0; }
+@media (max-width: 650px) { .mcp_page_heading { align-items: flex-start; flex-direction: column; } .mcp_overview > div { padding: 14px 10px; } .mcp_overview span { font-size: 10px; } .mcp_toolbar { align-items: stretch; flex-direction: column; } .mcp_search { max-width: none; } .mcp_toolbar .mcp_actions { justify-content: flex-start; } .mcp_server { padding: 16px; } .mcp_form_grid { grid-template-columns: minmax(0, 1fr); gap: 0; } .mcp_dialog { padding: 18px; } .mcp_dialog_heading h2 { font-size: 23px; } }

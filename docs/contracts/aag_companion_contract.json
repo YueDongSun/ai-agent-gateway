@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "aag_companion",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "name": {"enum": ["aag_capabilities", "aag_verification_plan", "aag_workflow"]},
+      "arguments": {"type": "object"}
+    },
+    "required": ["name"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {"content": {"type": "array"}, "isError": {"type": "boolean"}},
+    "required": ["content", "isError"]
+  },
+  "side_effects": {"class": "read_only", "targets": []},
+  "risk": "READ_ONLY",
+  "scopes": ["static_workflow_read", "verification_plan_read"],
+  "approval": {"required": false, "binding": "none; plans never authorize execution"},
+  "idempotency": {"supported": true, "key_required": false},
+  "timeout": {"seconds": 30, "enforcement": "client-owned process lifetime; bounded synchronous handlers; no independent idle timer"},
+  "cancellation": {"supported": false, "cleanup": "No asynchronous tool jobs; closing stdin terminates the stateless process"},
+  "retry": {"max_attempts": 1, "retryable_errors": []},
+  "redaction": {"fields": ["invalid_request_contents"], "before_storage": true, "storage": "none"},
+  "provenance": {"record_actor": false, "record_input_digest": false, "record_artifacts": false},
+  "authority": "No live AAG, filesystem, credential, network, approval, or execution tools. Source of truth: scripts/verification/feature_catalog.mjs."
+}

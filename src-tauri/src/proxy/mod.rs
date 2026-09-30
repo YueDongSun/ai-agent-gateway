@@ -7,11 +7,15 @@
 pub mod canonical;
 pub mod circuit_breaker;
 pub mod converter;
+pub mod cot;
+pub mod endpoint;
+pub mod gemini;
 pub mod models;
 pub mod providers;
 pub mod responses;
 pub mod router;
 pub mod server;
+pub mod thinking_compat;
 
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -32,7 +36,9 @@ pub fn strip_one_m_suffix(model: &str) -> String {
     if bytes.len() >= marker.len()
         && bytes[bytes.len() - marker.len()..].eq_ignore_ascii_case(marker)
     {
-        return trimmed[..trimmed.len() - marker.len()].trim_end().to_string();
+        return trimmed[..trimmed.len() - marker.len()]
+            .trim_end()
+            .to_string();
     }
     model.to_string()
 }
@@ -49,7 +55,9 @@ pub struct ProxyHandle {
 impl ProxyHandle {
     /// Stop the proxy server (best-effort, errors if already stopped).
     pub fn stop(self) -> Result<(), String> {
-        self.shutdown_tx.send(()).map_err(|_| "already stopped".into())
+        self.shutdown_tx
+            .send(())
+            .map_err(|_| "already stopped".into())
     }
 }
 
@@ -68,8 +76,14 @@ mod tests {
         assert_eq!(strip_one_m_suffix("MiniMax-M3[1M]"), "MiniMax-M3");
         assert_eq!(strip_one_m_suffix("deepseek-v4-pro[1m]"), "deepseek-v4-pro");
         // tolerant of trailing whitespace before the marker
-        assert_eq!(strip_one_m_suffix("deepseek-v4-pro [1M]"), "deepseek-v4-pro");
-        assert_eq!(strip_one_m_suffix("deepseek-v4-pro  [1m]"), "deepseek-v4-pro");
+        assert_eq!(
+            strip_one_m_suffix("deepseek-v4-pro [1M]"),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(
+            strip_one_m_suffix("deepseek-v4-pro  [1m]"),
+            "deepseek-v4-pro"
+        );
         // passthrough when no marker
         assert_eq!(strip_one_m_suffix("claude-fable-5"), "claude-fable-5");
         // empty / whitespace-only edge cases

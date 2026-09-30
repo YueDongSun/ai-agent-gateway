@@ -2,14 +2,29 @@
 //!
 //! Mirrors cc-switch `src-tauri/src/database/dao/mcp.rs` + `database/schema.rs:64`.
 //! Stores MCP server definitions (command + args + env) and per-app enabled
-//! flags. The bidirectional sync layer (write to live Claude/Codex/etc. configs)
-//! is a later step.
+//! flags. The service layer validates definitions and owns reviewed client sync.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+fn read_json_column<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    column: usize,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(raw).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid persisted MCP JSON",
+            )),
+        )
+    })
+}
 
 /// A registered MCP server. `server_config` is a JSON blob with the wire-format
 /// shape: `{ "command": "...", "args": [...], "env": {...} }`.
@@ -45,9 +60,9 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |row| {
             let cfg_str: String = row.get(2)?;
-            let cfg: Value = serde_json::from_str(&cfg_str).unwrap_or(Value::Null);
+            let cfg: Value = read_json_column(&cfg_str, 2)?;
             let tags_str: String = row.get(6)?;
-            let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+            let tags: Vec<String> = read_json_column(&tags_str, 6)?;
             Ok(McpServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -78,9 +93,9 @@ impl Database {
             params![id],
             |row| {
                 let cfg_str: String = row.get(2)?;
-                let cfg: Value = serde_json::from_str(&cfg_str).unwrap_or(Value::Null);
+                let cfg: Value = read_json_column(&cfg_str, 2)?;
                 let tags_str: String = row.get(6)?;
-                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let tags: Vec<String> = read_json_column(&tags_str, 6)?;
                 Ok(McpServer {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -118,8 +133,15 @@ impl Database {
                 docs=excluded.docs, tags=excluded.tags,
                 enabled_claude=excluded.enabled_claude, enabled_codex=excluded.enabled_codex",
             params![
-                s.id, s.name, cfg, s.description, s.homepage, s.docs, tags,
-                s.enabled_claude, s.enabled_codex,
+                s.id,
+                s.name,
+                cfg,
+                s.description,
+                s.homepage,
+                s.docs,
+                tags,
+                s.enabled_claude,
+                s.enabled_codex,
             ],
         )?;
         Ok(())

@@ -78,6 +78,7 @@ impl Database {
                 weight INTEGER NOT NULL DEFAULT 1,
                 circuit_breaker TEXT NOT NULL DEFAULT '{}',
                 model_mapping TEXT NOT NULL DEFAULT '{}',
+                extra_headers TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER
             )",
             [],
@@ -431,7 +432,6 @@ impl Database {
             version = 15;
         }
 
-
         // v15 -> v16: add proxy_providers.model_mapping column for per-provider
         // model mapping (display model -> upstream model). Stored as a JSON
         // object `{ "claude-sonnet-5": "deepseek-v4-pro", ... }`. Used by the
@@ -454,7 +454,6 @@ impl Database {
             version = 16;
         }
 
-
         // v16 -> v17: backfill proxy_providers from existing claude_code providers.
         // Users who imported from cc-switch before the proxy_provider auto-creation
         // was added have providers in the `providers` table but NOT in `proxy_providers`.
@@ -466,18 +465,24 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, json_extract(settings_config, '$.env.ANTHROPIC_BASE_URL'),                  json_extract(settings_config, '$.env.ANTHROPIC_AUTH_TOKEN')                  FROM providers WHERE app_type = 'claude_code'"
             )?;
-            let rows: Vec<(String, String, Option<String>, Option<String>)> =
-                stmt.query_map([], |row| {
+            let rows: Vec<(String, String, Option<String>, Option<String>)> = stmt
+                .query_map([], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?.filter_map(|r| r.ok()).collect();
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
             for (id, name, base_url, api_key) in rows {
                 let pp_id = format!("ccs-{}", id);
-                let exists: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM proxy_providers WHERE id = ?1",
-                    [&pp_id],
-                    |r| r.get(0),
-                ).unwrap_or(0);
-                if exists > 0 { continue; }
+                let exists: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM proxy_providers WHERE id = ?1",
+                        [&pp_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if exists > 0 {
+                    continue;
+                }
                 let base_url = match base_url.as_deref() {
                     Some(u) if !u.is_empty() => u,
                     _ => continue,
@@ -500,6 +505,29 @@ impl Database {
             version = 18;
         }
 
+        // v18 -> v19: add proxy_providers.extra_headers column for
+        // per-provider custom request headers (JSON object
+        // `{ "x-opencode-session": "...", ... }`). Lets the proxy send
+        // provider-mandated headers (e.g. OpenCode's session id) that are not
+        // part of the trusted auth/content header set. Follows the
+        // model_mapping guarded-ALTER pattern from v16.
+        if version < 19 {
+            let has_extra_headers: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('proxy_providers') WHERE name = 'extra_headers'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if has_extra_headers == 0 {
+                conn.execute(
+                    "ALTER TABLE proxy_providers ADD COLUMN extra_headers TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 19;")?;
+            version = 19;
+        }
 
         if version != SCHEMA_VERSION {
             return Err(AppError::Database(format!(

@@ -26,19 +26,25 @@
 //! }
 //! ```
 
-use crate::config::{
-    backup_file, get_backups_dir, get_copilot_settings_path, write_json_file,
-};
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::provider::LiveWriteResult;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 /// Is Copilot CLI installed? (config dir exists)
 #[allow(dead_code)]
 pub fn detect() -> bool {
-    let dir = crate::config::get_copilot_config_dir();
-    dir.join("settings.json").exists() || dir.join("config.json").exists()
+    super::config_paths::resolve("copilot")
+        .map(|resolved| {
+            resolved.existing
+                || resolved
+                    .paths
+                    .first()
+                    .and_then(|path| path.parent())
+                    .is_some_and(|directory| directory.join("config.json").exists())
+        })
+        .unwrap_or(false)
 }
 
 /// Read the current live settings.json as a JSON value, or None if absent.
@@ -46,7 +52,16 @@ pub fn detect() -> bool {
 /// settings.json (which GitHub documents as JSONC) doesn't break the merge.
 #[allow(dead_code)]
 pub fn read_live() -> Result<Option<Value>, AppError> {
-    let path = get_copilot_settings_path();
+    let resolved = super::config_paths::resolve("copilot")?;
+    let path = resolved
+        .paths
+        .first()
+        .ok_or_else(|| AppError::Config("AAG_CLIENT_CONFIG_PATHS_INVALID".into()))?;
+    read_live_at(path)
+}
+
+fn read_live_at(path: &Path) -> Result<Option<Value>, AppError> {
+    crate::config::private_fs::validate_external_file_path(path)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -107,51 +122,59 @@ fn strip_jsonc_comments(raw: &str) -> String {
 /// any existing user settings and backing up the original first.
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
-    let path = get_copilot_settings_path();
+    let resolved = super::config_paths::resolve("copilot")?;
+    write_live_at(provider, &resolved.paths)
+}
+
+/// Apply to the same settings path displayed by client configuration discovery.
+pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWriteResult, AppError> {
+    let [path] = paths else {
+        return Err(AppError::Config("AAG_CLIENT_CONFIG_PATHS_INVALID".into()));
+    };
+    crate::config::private_fs::validate_external_file_path(path)?;
     let obj = provider.settings_config.as_object().ok_or_else(|| {
         AppError::Config("Copilot provider settings_config must be a JSON object".into())
     })?;
 
     // Start from the existing settings (if any) so we don't clobber user keys.
-    let mut merged = read_live()?.unwrap_or_else(|| json!({}));
-    let merged_obj = merged.as_object_mut().ok_or_else(|| {
-        AppError::Config("~/.copilot/settings.json must be a JSON object".into())
-    })?;
+    let mut merged = read_live_at(path)?.unwrap_or_else(|| json!({}));
+    let merged_obj = merged
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("~/.copilot/settings.json must be a JSON object".into()))?;
 
     // model
     if let Some(model) = obj.get("model") {
         merged_obj.insert(String::from("model"), model.clone());
     }
     // env block (merge, don't replace)
-    if let Some(env) = obj.get("env").and_then(|e| e.as_object()) {
+    if let Some(env) = obj.get("env") {
+        let env = env
+            .as_object()
+            .ok_or_else(|| AppError::Config("Copilot provider env must be a JSON object".into()))?;
         let merged_env = merged_obj
             .entry(String::from("env"))
             .or_insert_with(|| json!({}));
-        if let Some(env_obj) = merged_env.as_object_mut() {
-            for (k, v) in env {
-                env_obj.insert(k.clone(), v.clone());
-            }
+        let env_obj = merged_env.as_object_mut().ok_or_else(|| {
+            AppError::Config("Copilot settings.json env must be a JSON object".into())
+        })?;
+        for (k, v) in env {
+            env_obj.insert(k.clone(), v.clone());
         }
     }
 
-    // Backup the existing file (if any) before overwriting.
-    let backup = if path.exists() {
-        let ts = chrono::Utc::now().timestamp();
-        let backup_name = format!("copilot.settings.json.{ts}.bak");
-        let backup_path = get_backups_dir()?.join(backup_name);
-        backup_file(&path, &backup_path)?;
-        Some(backup_path.to_string_lossy().into_owned())
-    } else {
-        None
-    };
-
-    write_json_file(&path, &merged)?;
+    let serialized = serde_json::to_vec_pretty(&merged)?;
+    let (written, backups) =
+        super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
+            path,
+            contents: &serialized,
+            app_type: "copilot",
+        }])?;
 
     Ok(LiveWriteResult {
         app_type: "copilot".into(),
         provider_id: provider.id.clone(),
-        written: vec![path.to_string_lossy().into_owned()],
-        backup,
+        written,
+        backup: backups.into_iter().next(),
     })
 }
 

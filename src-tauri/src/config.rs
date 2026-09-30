@@ -6,15 +6,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::AppError;
 use serde::Serialize;
 use serde_json::Value;
 
+mod platform_paths;
+pub(crate) mod private_fs;
+
 /// Return the application config directory (`~/.aag` on all platforms).
 ///
-/// Override via `AAG_CONFIG_DIR` env var for testing / portable installs.
+/// Override via an absolute, dedicated `AAG_CONFIG_DIR` for testing or
+/// portable installs. The private filesystem boundary rejects relative,
+/// current-directory, parent-traversal, and filesystem-root targets before
+/// changing permissions. An empty override uses the default.
 pub fn get_app_config_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("AAG_CONFIG_DIR") {
         let trimmed = custom.trim();
@@ -27,6 +32,13 @@ pub fn get_app_config_dir() -> PathBuf {
         .join(".aag")
 }
 
+pub(crate) fn app_config_dir_is_managed_default() -> bool {
+    std::env::var("AAG_CONFIG_DIR")
+        .ok()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+}
+
 /// Return the database file path (`~/.aag/aag.db`).
 pub fn get_db_path() -> PathBuf {
     get_app_config_dir().join("aag.db")
@@ -35,8 +47,14 @@ pub fn get_db_path() -> PathBuf {
 /// Return the backups directory (`~/.aag/backups/`), creating it if absent.
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn get_backups_dir() -> Result<PathBuf, AppError> {
-    let dir = get_app_config_dir().join("backups");
-    fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+    let app_dir = get_app_config_dir();
+    if app_config_dir_is_managed_default() {
+        private_fs::prepare_managed_private_dir(&app_dir)?;
+    } else {
+        private_fs::prepare_private_dir(&app_dir)?;
+    }
+    let dir = app_dir.join("backups");
+    private_fs::prepare_managed_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -107,6 +125,52 @@ pub fn get_codex_config_dir() -> PathBuf {
     get_codex_config_dir_with_override(None)
 }
 
+/// The AAG Claude mirror directory (CLAUDE_CONFIG_DIR). The native
+/// `~/.claude` belongs to the live Claude Code install (and cc-switch),
+/// so an unset override falls back to `~/.claude-cli` — the mirror is a
+/// separate, AAG-created home. Same pattern as [`get_codex_mirror_dir`].
+pub fn get_claude_mirror_dir(claude_cli_home: Option<&str>) -> PathBuf {
+    match claude_cli_home.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => resolve_user_path(raw),
+        None => get_home_dir().join(".claude-cli"),
+    }
+}
+
+/// Return the Claude mirror `settings.json` path.
+pub fn get_claude_mirror_settings_path(claude_cli_home: Option<&str>) -> PathBuf {
+    get_claude_mirror_dir(claude_cli_home).join("settings.json")
+}
+
+/// Compare two directory paths as the same directory, tolerating spelling
+/// differences that plain `PathBuf ==` would miss (trailing separators,
+/// Windows case, `\\?\` verbatim prefixes from canonicalize). Used by the
+/// native-home guards: a mirror override that resolves to a native agent
+/// home (e.g. `~/.codex`, `~/.claude`) must be refused before any write.
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    fn normalize(path: &Path) -> String {
+        let normalized: PathBuf = path.components().collect();
+        let text = normalized
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
+        #[cfg(windows)]
+        {
+            text.strip_prefix("\\\\?\\").unwrap_or(&text).to_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            text
+        }
+    }
+    if normalize(a) == normalize(b) {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(canonical_a), Ok(canonical_b)) => normalize(&canonical_a) == normalize(&canonical_b),
+        _ => false,
+    }
+}
+
 /// Expand `~` / `~/` / `~\` prefixes in a user-supplied path.
 fn resolve_user_path(raw: &str) -> PathBuf {
     if raw == "~" {
@@ -131,6 +195,15 @@ pub fn get_codex_auth_path() -> PathBuf {
     get_codex_config_dir().join("auth.json")
 }
 
+/// Return the Gemini CLI config directory (`~/.gemini`).
+///
+/// The CLI reads `settings.json` (JSON) and `.env` (KEY=VALUE lines) from
+/// here; `GOOGLE_GEMINI_BASE_URL` in `.env` redirects its Generative
+/// Language API traffic to a custom endpoint (AAG's proxy).
+pub fn get_gemini_config_dir() -> PathBuf {
+    get_home_dir().join(".gemini")
+}
+
 /// Return the Copilot CLI config directory (`~/.copilot`).
 ///
 /// GitHub Copilot CLI stores its user-editable settings at
@@ -147,6 +220,40 @@ pub fn get_copilot_settings_path() -> PathBuf {
     get_copilot_config_dir().join("settings.json")
 }
 
+/// Return the OpenCode global configuration directory (`~/.config/opencode`).
+pub fn get_opencode_config_dir() -> PathBuf {
+    get_home_dir().join(".config").join("opencode")
+}
+
+/// Return the OpenCode global configuration file. Prefer an existing JSONC or
+/// JSON file so switching does not silently create a second config source.
+pub fn get_opencode_config_path() -> PathBuf {
+    let dir = get_opencode_config_dir();
+    let jsonc = dir.join("opencode.jsonc");
+    if jsonc.exists() {
+        return jsonc;
+    }
+    dir.join("opencode.json")
+}
+
+/// Return the Kilo CLI global configuration directory (highest-priority
+/// candidate). The Kilo adapter in [`crate::services::provider::kilo`]
+/// resolves all five candidate paths itself (mirroring the Node
+/// `KiloAdapter` at `src/agents/adapters.ts:48-60`), so this getter exists
+/// for callers that want a single reference path (e.g. the
+/// `agent.detect_home` migration helper).
+#[allow(dead_code)]
+pub fn get_kilo_config_dir() -> PathBuf {
+    get_home_dir().join(".config").join("kilo")
+}
+
+/// Return the highest-priority Kilo CLI configuration path. The Kilo
+/// adapter resolves all candidates dynamically; this is the
+/// "create-if-absent" target.
+#[allow(dead_code)]
+pub fn get_kilo_config_path() -> PathBuf {
+    get_kilo_config_dir().join("kilo.jsonc")
+}
 /// Return the pi (Microsoft coding agent) config directory
 /// (`~/.pi/agent`). Custom providers live in `models.json` and the default
 /// model in `settings.json`.
@@ -171,47 +278,47 @@ pub fn get_pi_settings_path() -> PathBuf {
 /// Antigravity is a VS Code-derived Electron app. On Windows it stores its
 /// profile under `%APPDATA%\Antigravity` (with `User/settings.json` once the
 /// user opens the settings UI); macOS `~/Library/Application Support/Antigravity`;
-/// Linux `~/.config/Antigravity`.
+/// Linux `$XDG_CONFIG_HOME/Antigravity` (falling back to `~/.config/Antigravity`).
 pub fn get_antigravity_config_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("Antigravity");
-        }
-        get_home_dir().join("AppData").join("Roaming").join("Antigravity")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        get_home_dir().join("Library").join("Application Support").join("Antigravity")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        get_home_dir().join(".config").join("Antigravity")
-    }
+    platform_paths::desktop_config_root().join("Antigravity")
 }
 
 /// Return the Antigravity `User/settings.json` path (created by the app once
 /// the settings UI is opened).
 #[allow(dead_code)] // Planned for the Antigravity adapter's future write path
 pub fn get_antigravity_settings_path() -> PathBuf {
-    get_antigravity_config_dir().join("User").join("settings.json")
+    get_antigravity_config_dir()
+        .join("User")
+        .join("settings.json")
+}
+
+/// Return the VS Code global `User/settings.json` path. This is the file
+/// that VS Code itself and its installed extensions (Kilo Code, Claude Code,
+/// etc.) read for user-level settings. AAG merges a single provider entry
+/// into the extension-namespaced section of this file without disturbing
+/// unrelated keys (themes, keybindings, …).
+///
+/// - Windows: `%APPDATA%\Code\User\settings.json` (falls back to
+///   `%USERPROFILE%\AppData\Roaming\Code\User\settings.json`).
+/// - macOS: `~/Library/Application Support/Code/User/settings.json`.
+/// - Linux/other: `$XDG_CONFIG_HOME/Code/User/settings.json`, falling back
+///   to `~/.config/Code/User/settings.json`.
+///
+/// `AAG_HOME_DIR` overrides the home dir for testing/portable installs
+/// and takes priority over native APPDATA/XDG_CONFIG_HOME overrides.
+#[allow(dead_code)]
+pub fn get_vscode_user_settings_path() -> PathBuf {
+    platform_paths::desktop_config_root().join("Code/User/settings.json")
 }
 
 // ---- File I/O helpers (mirror cc-switch config.rs:274+) ----
 
-/// Atomic write: write to `<path>.tmp.<n>` then rename. Prevents config
-/// corruption if the process is interrupted mid-write.
+/// Atomically write credential-bearing state through an exclusive private
+/// temporary file in the same directory. Existing tighter owner permissions
+/// are retained; linked/reparse paths and unsafe ownership fail closed.
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), n));
-    fs::write(&tmp, data).map_err(|e| AppError::io(&tmp, e))?;
-    fs::rename(&tmp, path).map_err(|e| AppError::io(path, e))?;
-    Ok(())
+    private_fs::atomic_write(path, data)
 }
 
 /// Serialize a value to pretty JSON and atomically write it.
@@ -248,17 +355,18 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
-/// Copy a file to a backup path (best-effort, used before overwriting live config).
+/// Copy an exact file to a private atomic backup path before overwrite.
+///
+/// Missing sources remain a no-op for compatibility. Existing linked/reparse
+/// sources fail closed and unsafe source grants never propagate to the backup.
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn backup_file(src: &Path, dst: &Path) -> Result<(), AppError> {
-    if !src.exists() {
-        return Ok(());
+    match fs::symlink_metadata(src) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io(src, error)),
+        Ok(_) => {}
     }
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-    fs::copy(src, dst).map_err(|e| AppError::io(src, e))?;
-    Ok(())
+    private_fs::backup_file(src, dst)
 }
 
 #[cfg(test)]

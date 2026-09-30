@@ -6,7 +6,7 @@
 //! Mirrors cc-switch `services/provider/live.rs:1000` + `sanitize_claude_settings_for_live`.
 
 use crate::config::{
-    backup_file, get_claude_settings_path, read_json_file, write_json_file, get_backups_dir,
+    backup_file, get_backups_dir, get_claude_settings_path, read_json_file, write_json_file,
 };
 use crate::error::AppError;
 use crate::provider::Provider;

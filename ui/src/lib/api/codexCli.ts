@@ -9,11 +9,20 @@ export interface CodexCliStatus {
   codexBinary: string | null;
   currentProviderId: string | null;
   currentProviderName: string | null;
+  /** Mirror config mode: 'exclusive' (default) | 'coexist'. */
+  mirrorMode: string;
+  desktopSupported: boolean;
+}
+
+export interface CodexMirrorModeResult {
+  mode: string;
+  written: string[];
 }
 
 export interface CodexCliTerminalResult {
   codexHome: string;
   codexBinary: string;
+  /** Variable names are retained; values are redacted by the backend. */
   env: Array<[string, string]>;
 }
 
@@ -50,4 +59,10 @@ export async function codexOpenCliTerminal(
 /** Launch a NEW Codex Desktop instance against AAG's mirror CODEX_HOME. */
 export async function codexOpenDesktopWindow(): Promise<CodexDesktopResult> {
   return invoke<CodexDesktopResult>('codex_open_desktop_window');
+}
+
+/** Switch the Codex mirror between exclusive and coexist mode (rewrites
+ *  the mirror config.toml immediately; auth.json is never touched). */
+export async function codexMirrorSetMode(mode: string): Promise<CodexMirrorModeResult> {
+  return invoke<CodexMirrorModeResult>('codex_mirror_set_mode', { mode });
 }

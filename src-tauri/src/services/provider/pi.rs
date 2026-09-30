@@ -31,20 +31,19 @@
 //! }
 //! ```
 
-use crate::config::{
-    backup_file, get_backups_dir, get_pi_models_path, get_pi_settings_path, read_json_file,
-    write_json_file,
-};
+use crate::config::read_json_file;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::provider::LiveWriteResult;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 /// Is pi installed? (config dir exists)
 #[allow(dead_code)]
 pub fn detect() -> bool {
-    let dir = crate::config::get_pi_config_dir();
-    dir.join("models.json").exists() || dir.join("settings.json").exists()
+    super::config_paths::resolve("pi")
+        .map(|resolved| resolved.existing)
+        .unwrap_or(false)
 }
 
 fn provider_api(settings: &Value) -> String {
@@ -59,6 +58,18 @@ fn provider_api(settings: &Value) -> String {
 /// backing up existing files first.
 #[allow(dead_code)] // live-config write path retained for tests/history; not called in the app since Phase 15.9
 pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
+    let resolved = super::config_paths::resolve("pi")?;
+    write_live_at(provider, &resolved.paths)
+}
+
+/// Apply the models/settings pair selected by client configuration discovery.
+pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWriteResult, AppError> {
+    let [models_path, settings_path] = paths else {
+        return Err(AppError::Config("AAG_CLIENT_CONFIG_PATHS_INVALID".into()));
+    };
+    for path in paths {
+        crate::config::private_fs::validate_external_file_path(path)?;
+    }
     let obj = provider.settings_config.as_object().ok_or_else(|| {
         AppError::Config("pi provider settings_config must be a JSON object".into())
     })?;
@@ -77,20 +88,10 @@ pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
     let models: Vec<serde_json::Value> = obj
         .get("models")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|m| json!({ "id": m }))
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().map(|m| json!({ "id": m })).collect::<Vec<_>>())
         .unwrap_or_else(|| vec![json!({ "id": model })]);
 
-    let ts = chrono::Utc::now().timestamp();
-    let backup_dir = get_backups_dir()?;
-    let mut written = Vec::new();
-    let mut backups = Vec::new();
-
     // ── models.json: upsert the provider into the `providers` map ──
-    let models_path = get_pi_models_path();
     let mut models_doc = read_json_file(&models_path)?.unwrap_or_else(|| json!({}));
     let doc_obj = models_doc
         .as_object_mut()
@@ -98,9 +99,9 @@ pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
     let providers_map = doc_obj
         .entry(String::from("providers"))
         .or_insert_with(|| json!({}));
-    let map_obj = providers_map.as_object_mut().ok_or_else(|| {
-        AppError::Config("models.json providers must be a JSON object".into())
-    })?;
+    let map_obj = providers_map
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("models.json providers must be a JSON object".into()))?;
     map_obj.insert(
         provider_id.to_string(),
         json!({
@@ -110,29 +111,29 @@ pub fn write_live(provider: &Provider) -> Result<LiveWriteResult, AppError> {
             "models": models,
         }),
     );
-    if models_path.exists() {
-        let bak = backup_dir.join(format!("pi.models.json.{ts}.bak"));
-        backup_file(&models_path, &bak)?;
-        backups.push(bak.to_string_lossy().into_owned());
-    }
-    write_json_file(&models_path, &models_doc)?;
-    written.push(models_path.to_string_lossy().into_owned());
 
-    // ── settings.json: merge the default model ──
-    let settings_path = get_pi_settings_path();
+    // Validate both destination documents before changing either file.
     let mut settings_doc = read_json_file(&settings_path)?.unwrap_or_else(|| json!({}));
-    if let Some(s_obj) = settings_doc.as_object_mut() {
-        if !model.is_empty() {
-            s_obj.insert("model".into(), Value::String(model.to_string()));
-        }
+    let settings_obj = settings_doc
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("pi settings.json must be a JSON object".into()))?;
+    if !model.is_empty() {
+        settings_obj.insert("model".into(), Value::String(model.to_string()));
     }
-    if settings_path.exists() {
-        let bak = backup_dir.join(format!("pi.settings.json.{ts}.bak"));
-        backup_file(&settings_path, &bak)?;
-        backups.push(bak.to_string_lossy().into_owned());
-    }
-    write_json_file(&settings_path, &settings_doc)?;
-    written.push(settings_path.to_string_lossy().into_owned());
+    let models_contents = serde_json::to_vec_pretty(&models_doc)?;
+    let settings_contents = serde_json::to_vec_pretty(&settings_doc)?;
+    let (written, backups) = super::config_writes::write_files(&[
+        super::config_writes::ConfigFileUpdate {
+            path: models_path,
+            contents: &models_contents,
+            app_type: "pi",
+        },
+        super::config_writes::ConfigFileUpdate {
+            path: settings_path,
+            contents: &settings_contents,
+            app_type: "pi",
+        },
+    ])?;
 
     Ok(LiveWriteResult {
         app_type: "pi".into(),
@@ -147,6 +148,7 @@ mod tests {
     use super::*;
     use crate::config::get_pi_config_dir;
     use crate::provider::Provider;
+    use crate::services::provider::test_support::isolated_home;
     use std::fs;
 
     #[test]
@@ -160,12 +162,7 @@ mod tests {
 
     #[test]
     fn write_live_writes_models_and_settings() {
-        let _env_guard = crate::config::test_env_lock().blocking_lock();
-
-        // Use AAG_HOME_DIR override so we don't touch the real ~/.pi.
-        let tmp = std::env::temp_dir().join(format!("aag-pi-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        std::env::set_var("AAG_HOME_DIR", &tmp);
+        let _home = isolated_home("pi");
 
         let p = Provider::new(
             "my-pi-prov".into(),
@@ -200,7 +197,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(settings["model"], "claude-sonnet-4");
-
-        let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -1,6 +1,16 @@
 /// Shared API types. Mirror Rust types from `src-tauri/src/provider.rs`.
 
-export type AppType = 'claude_code' | 'codex' | 'copilot' | 'pi' | 'antigravity';
+export type AppType =
+  | 'claude_code'
+  | 'codex'
+  | 'copilot'
+  | 'gemini'
+  | 'opencode'
+  | 'pi'
+  | 'antigravity'
+  | 'kilo_cli'
+  | 'claude_vscode'
+  | 'kilo_vscode';
 
 export interface Provider {
   id: string;
@@ -23,6 +33,18 @@ export interface LiveWriteResult {
   provider_id: string;
   written: string[];
   backup: string | null;
+}
+
+/** Read-only discovery of the configuration used by provider switching. */
+export interface Provider_config_status {
+  appType: string;
+  platform: string;
+  supported: boolean;
+  mode: 'config' | 'mirror' | 'environment' | 'unsupported';
+  source: 'environment' | 'existing' | 'default' | 'setting' | 'unsupported';
+  configPaths: string[];
+  existing: boolean;
+  reason: string | null;
 }
 
 /// One row of feedback from `import_cc_switch_providers`.
@@ -53,4 +75,9 @@ export interface ImportReport {
   totalInSource: number;
   /** Routes auto-built from imported Claude providers' tier mappings. */
   importedRoutes: ImportedRoute[];
+  /** New rows force-added to the failover queue (usable upstream found). */
+  queuedProviders?: ImportedProvider[];
+  /** Subscription rows (official api.anthropic.com + empty key) imported
+   *  as anthropic passthrough pool rows. */
+  passthroughProviders?: ImportedProvider[];
 }

@@ -4,12 +4,15 @@
 //! Ported from `src/gateway/router.ts`.
 
 use crate::database::dao::routes::RouteHop;
-use crate::proxy::canonical::{self, ChatCompletionRequest, OAIChatResponse, OAIStreamChunk, ProviderError};
-use crate::proxy::circuit_breaker::CircuitBreakerSnapshot;
+use crate::proxy::canonical::{
+    self, ChatCompletionRequest, OAIChatResponse, OAIStreamChunk, ProviderError,
+};
+use crate::proxy::circuit_breaker::{CircuitBreakerSnapshot, Circuit_outcome, Circuit_permit};
 use crate::proxy::providers::Provider;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Health snapshot for a single provider (used in /health response).
 #[derive(Debug, Serialize)]
@@ -31,7 +34,7 @@ pub struct ResolvedRoute {
 /// `CircuitBreaker` internally, which is mutated atomically per-request.
 pub struct Router {
     providers: HashMap<String, Arc<dyn Provider>>,
-    routes: HashMap<String, Vec<RouteHop>>,
+    routes: HashMap<String, Arc<Vec<RouteHop>>>,
     /// Legacy global failover queue (checked after explicit routes and
     /// per-provider auto-routing miss). Kept for tests / compatibility.
     queue: Vec<String>,
@@ -52,7 +55,7 @@ pub struct Router {
     /// request's persist could read a codex winner after a concurrent
     /// codex request overwrote the slot). Scoping by app_type eliminates
     /// the cross-app race.
-    pub last_used: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    pub last_used: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// Per-hop first-byte timeout for streaming requests (ms). Once a
     /// provider has been selected and its stream opened, the router probes
     /// the first chunk within this budget; if nothing arrives, it records a
@@ -65,6 +68,63 @@ pub struct Router {
 pub const SURFACE_CLAUDE: &str = "claude";
 pub const SURFACE_CODEX: &str = "codex";
 pub const SURFACE_CHAT: &str = "chat";
+pub const SURFACE_GEMINI: &str = "gemini";
+
+/// One admitted provider attempt. Dropping a canceled setup or response stream
+/// releases its own half-open permit without fabricating success or failure.
+#[allow(non_camel_case_types)]
+struct Provider_attempt {
+    provider: Arc<dyn Provider>,
+    permit: Option<Circuit_permit>,
+}
+
+impl Provider_attempt {
+    fn acquire(provider: Arc<dyn Provider>) -> Option<Self> {
+        let permit = provider.breaker().acquire()?;
+        Some(Self {
+            provider,
+            permit: Some(permit),
+        })
+    }
+
+    fn settle(&mut self, outcome: Circuit_outcome) {
+        if let Some(permit) = self.permit.take() {
+            self.provider.breaker().settle(permit, outcome);
+        }
+    }
+}
+
+impl Drop for Provider_attempt {
+    fn drop(&mut self) {
+        self.settle(Circuit_outcome::Cancelled);
+    }
+}
+
+/// Some OpenAI-shaped upstreams accept plain Responses requests but reject
+/// function tools with a pre-stream HTTP 400. That is a hop capability mismatch,
+/// so a finite route should try its next provider.
+///
+/// Only TRUE tool-capability rejections are retried: the upstream must have
+/// been classified as such by `classify_upstream_4xx` (`kind ==
+/// ToolCapability`). All other 400s — authentication failures
+/// (`refresh_token` invalidated, "sign in again"), malformed user input,
+/// and post-commit stream errors — remain terminal, matching the invariant
+/// that auth and malformed input must never be replayed or hidden by
+/// failover. An unclassified 400 is also terminal: the legacy default.
+fn should_failover_tool_capability_rejection(
+    request: &ChatCompletionRequest,
+    error: &ProviderError,
+) -> bool {
+    request
+        .tools
+        .as_ref()
+        .map(|tools| !tools.is_empty())
+        .unwrap_or(false)
+        && error.status == Some(400)
+        && error.code == "upstream_http_error"
+        && error.stage == "response_status"
+        && error.kind == Some(canonical::UpstreamErrorKind::ToolCapability)
+}
 
 impl Router {
     /// Build a Router from the proxy providers and routes loaded from the DB.
@@ -73,9 +133,16 @@ impl Router {
         providers: HashMap<String, Arc<dyn Provider>>,
         routes: HashMap<String, Vec<RouteHop>>,
     ) -> Self {
+        let routes: HashMap<String, Arc<Vec<RouteHop>>> = routes
+            .into_iter()
+            .map(|(alias, hops)| (alias, Arc::new(hops)))
+            .collect();
         Self {
-            providers, routes, queue: Vec::new(), queues: HashMap::new(),
-            last_used: std::sync::Mutex::new(std::collections::HashMap::new()),
+            providers,
+            routes,
+            queue: Vec::new(),
+            queues: HashMap::new(),
+            last_used: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             // Production default: 10 s. A working-but-slow upstream with
             // TTFB > 1.5 s (observed with GLM) must not be killed. This cap
             // only catches 200-then-silence stalls; with providers now
@@ -110,22 +177,17 @@ impl Router {
     /// only updates the current-provider marker, never the queue order. The
     /// fast path comes from the circuit breakers skipping dead hops at zero
     /// cost, not from reordering.
-    pub fn resolve_route(&self, model: &str) -> Option<Vec<RouteHop>> {
+    pub fn resolve_route(&self, model: &str) -> Option<Arc<Vec<RouteHop>>> {
         if let Some(hops) = self.routes.get(model) {
-            return Some(hops.clone());
+            return Some(Arc::clone(hops));
         }
-        // Auto-route: find any enabled provider that lists this model.
-        for (pid, prov) in &self.providers {
-            if prov.enabled() && prov.models().iter().any(|m| m == model) {
-                return Some(vec![RouteHop {
-                    provider: pid.clone(),
-                    model: model.into(),
-                }]);
-            }
+        let matches = self.matching_model_hops(model, &self.queue);
+        if !matches.is_empty() {
+            return Some(Arc::new(matches));
         }
         // Homepage failover queue: last-chance chain, model passed through.
         if !self.queue.is_empty() {
-            return Some(
+            return Some(Arc::new(
                 self.queue
                     .iter()
                     .map(|pid| RouteHop {
@@ -133,7 +195,7 @@ impl Router {
                         model: model.into(),
                     })
                     .collect(),
-            );
+            ));
         }
         None
     }
@@ -142,21 +204,22 @@ impl Router {
     /// last-chance chain is the surface's per-app queue instead of the global
     /// one. `/v1/messages` falls back to the Claude chain, `/v1/responses`
     /// to the Codex chain, `/v1/chat/completions` to the copilot+pi chain.
-    pub fn resolve_route_for(&self, surface: &str, model: &str) -> Option<Vec<RouteHop>> {
+    pub fn resolve_route_for(&self, surface: &str, model: &str) -> Option<Arc<Vec<RouteHop>>> {
         if let Some(hops) = self.routes.get(model) {
-            return Some(hops.clone());
+            return Some(Arc::clone(hops));
         }
-        for (pid, prov) in &self.providers {
-            if prov.enabled() && prov.models().iter().any(|m| m == model) {
-                return Some(vec![RouteHop {
-                    provider: pid.clone(),
-                    model: model.into(),
-                }]);
-            }
+        let priority = self
+            .queues
+            .get(surface)
+            .filter(|queue| !queue.is_empty())
+            .unwrap_or(&self.queue);
+        let matches = self.matching_model_hops(model, priority);
+        if !matches.is_empty() {
+            return Some(Arc::new(matches));
         }
         if let Some(chain) = self.queues.get(surface) {
             if !chain.is_empty() {
-                return Some(
+                return Some(Arc::new(
                     chain
                         .iter()
                         .map(|pid| RouteHop {
@@ -164,12 +227,12 @@ impl Router {
                             model: model.into(),
                         })
                         .collect(),
-                );
+                ));
             }
         }
         // Legacy global queue as the very last resort.
         if !self.queue.is_empty() {
-            return Some(
+            return Some(Arc::new(
                 self.queue
                     .iter()
                     .map(|pid| RouteHop {
@@ -177,9 +240,38 @@ impl Router {
                         model: model.into(),
                     })
                     .collect(),
-            );
+            ));
         }
         None
+    }
+
+    /// Automatic same-model routes use configured queue priority, then stable
+    /// provider id. Explicit routes/pins remain authoritative and no model
+    /// mapping is inferred from a provider's position in another queue.
+    fn matching_model_hops(&self, model: &str, priority: &[String]) -> Vec<RouteHop> {
+        let mut ids: Vec<&String> = self
+            .providers
+            .iter()
+            .filter(|(_, provider)| {
+                provider.enabled() && provider.models().iter().any(|candidate| candidate == model)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort_by_key(|id| {
+            (
+                priority
+                    .iter()
+                    .position(|candidate| candidate == *id)
+                    .unwrap_or(usize::MAX),
+                id.as_str(),
+            )
+        });
+        ids.into_iter()
+            .map(|id| RouteHop {
+                provider: id.clone(),
+                model: model.into(),
+            })
+            .collect()
     }
 
     /// Non-streaming completion with automatic failover. For each hop:
@@ -188,12 +280,17 @@ impl Router {
     /// 3. On success: record_success, return.
     /// 4. On retriable error: record_failure, try next hop.
     /// 5. On non-retriable error: propagate immediately.
-    pub async fn complete(&self, req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+    pub async fn complete(
+        &self,
+        req: &ChatCompletionRequest,
+    ) -> Result<OAIChatResponse, ProviderError> {
         let hops = self.resolve_route(&req.model).ok_or_else(|| {
-            canonical::make_error(
-                format!("no route / provider for model \"{}\"", req.model),
+            canonical::make_provider_error(
+                "no_route",
+                "route_resolution",
                 Some(404),
                 Some(false),
+                None,
             )
         })?;
         // Legacy complete(): no app_type known; use empty key so last_used
@@ -211,10 +308,12 @@ impl Router {
         req: &ChatCompletionRequest,
     ) -> Result<OAIChatResponse, ProviderError> {
         let hops = self.resolve_route_for(surface, &req.model).ok_or_else(|| {
-            canonical::make_error(
-                format!("no route / provider for model \"{}\"", req.model),
+            canonical::make_provider_error(
+                "no_route",
+                "route_resolution",
                 Some(404),
                 Some(false),
+                None,
             )
         })?;
         self.complete_hops(surface, app_type, req, hops).await
@@ -230,10 +329,10 @@ impl Router {
         provider_id: &str,
         req: &ChatCompletionRequest,
     ) -> Result<OAIChatResponse, ProviderError> {
-        let hops = vec![RouteHop {
+        let hops = Arc::new(vec![RouteHop {
             provider: provider_id.to_string(),
             model: req.model.clone(),
-        }];
+        }]);
         // `surface` is unused on the pinned path (single hop) but the
         // unified `complete_hops` signature requires it; pass the caller's.
         self.complete_hops(surface, app_type, req, hops).await
@@ -247,10 +346,10 @@ impl Router {
         provider_id: &str,
         req: &ChatCompletionRequest,
     ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
-        let hops = vec![RouteHop {
+        let hops = Arc::new(vec![RouteHop {
             provider: provider_id.to_string(),
             model: req.model.clone(),
-        }];
+        }]);
         // See complete_with_provider — surface is unused on the pinned
         // path but the unified signature requires it.
         self.stream_hops(surface, app_type, req, hops).await
@@ -261,59 +360,86 @@ impl Router {
         _surface: &str,
         app_type: &str,
         req: &ChatCompletionRequest,
-        hops: Vec<RouteHop>,
+        hops: Arc<Vec<RouteHop>>,
     ) -> Result<OAIChatResponse, ProviderError> {
-
         let mut last_err: Option<ProviderError> = None;
-        for hop in &hops {
+        for hop in hops.iter() {
             let provider = match self.providers.get(&hop.provider) {
                 Some(p) => p,
                 None => {
-                    log::warn!("router: skip unknown provider \"{}\"", hop.provider);
+                    log::warn!(
+                        "router: skip provider_ref={} reason=unknown",
+                        crate::diagnostics::safe_reference(&hop.provider)
+                    );
                     continue;
                 }
             };
             if !provider.enabled() {
-                log::warn!("router: skip disabled provider \"{}\"", hop.provider);
+                log::warn!(
+                    "router: skip provider_ref={} reason=disabled",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
                 continue;
             }
-            if !provider.breaker().allow() {
-                log::warn!("router: circuit OPEN for \"{}\", skipping", hop.provider);
+            // A passthrough hop without a client credential can never
+            // authenticate upstream (only /v1/messages attaches one), so
+            // skip it before the breaker/acquire round-trip and let the
+            // static-key hops behind it serve the request.
+            if provider.requires_client_credential() && req.client_credential.is_none() {
+                log::warn!(
+                    "router: skip provider_ref={} reason=no_client_credential",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
                 continue;
             }
-            let sub_req = ChatCompletionRequest {
-                model: hop.model.clone(),
-                messages: req.messages.clone(),
-                stream: req.stream,
-                temperature: req.temperature,
-                max_tokens: req.max_tokens,
-                tools: req.tools.clone(),
-                tool_choice: req.tool_choice.clone(),
-                extra: req.extra.clone(),
+            let Some(mut attempt) = Provider_attempt::acquire(Arc::clone(provider)) else {
+                log::warn!(
+                    "router: skip provider_ref={} reason=circuit_open",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
+                continue;
             };
-            match provider.complete(&sub_req).await {
+            // Zero-copy hop dispatch: the hop's upstream model rides as a
+            // parameter, so the shared request payload is never cloned here
+            // (Codex CLI conversations reach hundreds of KB — a per-hop
+            // clone was pure overhead).
+            let attempt_started = Instant::now();
+            match provider.complete(req, &hop.model).await {
                 Ok(resp) => {
-                    provider.breaker().record_success();
+                    attempt.settle(Circuit_outcome::Success);
                     if let Ok(mut lu) = self.last_used.lock() {
                         lu.insert(app_type.to_string(), provider.id().to_string());
                     }
-                    log::info!("router: OK  {} <- {}/{}", req.model, provider.id(), hop.model);
+                    log::info!(
+                        "router: complete request_id={} model_ref={} provider_ref={} upstream_model_ref={} elapsed_ms={}",
+                        req.request_id.as_deref().unwrap_or("unknown"),
+                        crate::diagnostics::safe_reference(&req.model),
+                        crate::diagnostics::safe_reference(provider.id()),
+                        crate::diagnostics::safe_reference(&hop.model),
+                        attempt_started.elapsed().as_millis()
+                    );
                     return Ok(resp);
                 }
                 Err(e) => {
-                    let retriable = e.retriable;
+                    let retriable =
+                        e.retriable || should_failover_tool_capability_rejection(req, &e);
                     // Only retriable (provider-level) failures count against
                     // the breaker - non-retriable errors are local
                     // construction problems, not the provider's fault.
                     if retriable {
-                        provider.breaker().record_failure();
+                        attempt.settle(Circuit_outcome::Failure);
                     }
                     log::warn!(
-                        "router: FAIL {}/{}: {} (retriable={})",
-                        provider.id(),
-                        hop.model,
-                        e.message,
-                        retriable
+                        "router: failed request_id={} provider_ref={} upstream_model_ref={} elapsed_ms={} status={} retriable={} code={} stage={} response_bytes={}",
+                        req.request_id.as_deref().unwrap_or("unknown"),
+                        crate::diagnostics::safe_reference(provider.id()),
+                        crate::diagnostics::safe_reference(&hop.model),
+                        attempt_started.elapsed().as_millis(),
+                        e.status.unwrap_or(500),
+                        retriable,
+                        e.code,
+                        e.stage,
+                        e.response_bytes.unwrap_or(0)
                     );
                     last_err = Some(e);
                     if !retriable {
@@ -322,7 +448,15 @@ impl Router {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| canonical::make_error("all hops exhausted", Some(503), Some(false))))
+        Err(last_err.unwrap_or_else(|| {
+            canonical::make_provider_error(
+                "all_hops_exhausted",
+                "routing",
+                Some(503),
+                Some(false),
+                None,
+            )
+        }))
     }
 
     /// Health snapshot of all providers (for /health endpoint).
@@ -341,170 +475,247 @@ impl Router {
     pub fn list_models(&self) -> Vec<String> {
         self.routes.keys().cloned().collect()
     }
-/// Streaming completion with automatic failover (only pre-first-byte).
-/// Mirrors `Router.stream` in `src/gateway/router.ts:85`.
-///
-/// For each hop: check breaker, call provider.stream(). Probe the first chunk
-/// before committing - allows failover if the upstream errors before sending
-/// data. Once we yield the first chunk, mid-stream errors surface to the client.
-pub async fn stream(
-    &self,
-    req: &ChatCompletionRequest,
-) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
-    let hops = self.resolve_route(&req.model).ok_or_else(|| {
-        canonical::make_error(
-            format!("no route / provider for model \"{}\"", req.model),
-            Some(404),
-            Some(false),
-        )
-    })?;
-    self.stream_hops("_legacy", "_legacy", req, hops).await
-}
-
-/// Surface-aware streaming completion (see `complete_for`).
-pub async fn stream_for(
-    &self,
-    surface: &str,
-    app_type: &str,
-    req: &ChatCompletionRequest,
-) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
-    let hops = self.resolve_route_for(surface, &req.model).ok_or_else(|| {
-        canonical::make_error(
-            format!("no route / provider for model \"{}\"", req.model),
-            Some(404),
-            Some(false),
-        )
-    })?;
-    self.stream_hops(surface, app_type, req, hops).await
-}
-
-pub async fn stream_hops(
-    &self,
-    _surface: &str,
-    app_type: &str,
-    req: &ChatCompletionRequest,
-    hops: Vec<RouteHop>,
-) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
-    use futures_util::StreamExt;
-
-    let mut last_err: Option<ProviderError> = None;
-    for hop in &hops {
-        let provider = match self.providers.get(&hop.provider) {
-            Some(p) => p,
-            None => continue,
-        };
-        if !provider.enabled() {
-            log::warn!("router: skip disabled provider \"{}\"", hop.provider);
-            continue;
-        }
-        if !provider.breaker().allow() {
-            log::warn!("router: circuit OPEN for \"{}\", skipping (stream)", hop.provider);
-            continue;
-        }
-        let sub_req = ChatCompletionRequest {
-            model: hop.model.clone(),
-            messages: req.messages.clone(),
-            stream: req.stream,
-            temperature: req.temperature,
-            max_tokens: req.max_tokens,
-            tools: req.tools.clone(),
-            tool_choice: req.tool_choice.clone(),
-            extra: req.extra.clone(),
-        };
-        let mut chunk_stream = match provider.stream(&sub_req).await {
-            Ok(s) => s,
-            Err(e) => {
-                let retriable = e.retriable;
-                // Only retriable (provider-level) failures count against the
-                // breaker - non-retriable errors are local construction
-                // problems (serialize / client build), not the provider's
-                // fault, and must not pollute its health.
-                if retriable {
-                    provider.breaker().record_failure();
-                }
-                log::warn!("router: STREAM FAIL {}/{}: {} (retriable={})", provider.id(), hop.model, e.message, retriable);
-                last_err = Some(e);
-                if !retriable { return Err(last_err.unwrap()); }
-                continue;
-            }
-        };
-        // Probe first chunk. Bound the wait with FIRST_BYTE_TIMEOUT_MS so a
-        // dead upstream (opened a connection but never sent bytes, or took
-        // longer than this budget to send its first event) can't burn a full
-        // upstream-RTT before the router fails over. Without this cap, every
-        // hop in the chain adds ~1 s of wall-clock latency — a 5-hop walk
-        // turned a fast reply into a 5 s pre-stream wait. The cap also keeps
-        // circuit-breaker failures accumulating fast enough that the bad
-        // hops open after a few rounds and get skipped on subsequent
-        // requests.
-        let first = match tokio::time::timeout(
-            std::time::Duration::from_millis(self.first_byte_timeout_ms),
-            chunk_stream.next(),
-        )
-        .await
-        {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                // An upstream that opened the stream but yielded zero chunks
-                // (e.g. the OpenAI/Anthropic provider swallowing an HTTP 4xx/5xx
-                // as an empty SSE body) should NOT be treated as a successful
-                // empty completion — that would surface a 200 with no data to
-                // the client. Record a failure and fail over to the next hop.
-                // Mock providers never hit this path (they always yield a role
-                // chunk + a finish chunk), so the seeded demo routes are
-                // unaffected.
-                provider.breaker().record_failure();
-                log::warn!(
-                    "router: STREAM EMPTY {} <- {}/{} (treating as failure)",
-                    req.model,
-                    provider.id(),
-                    hop.model
-                );
-                last_err = Some(canonical::make_error(
-                    format!("provider {} returned an empty stream", provider.id()),
-                    Some(502),
-                    Some(true),
-                ));
-                continue;
-            }
-            Err(_elapsed) => {
-                // Upstream stalled past the first-byte budget. Treat as a
-                // retriable failure (counts against the breaker) so the next
-                // hop gets a chance and the breaker opens quickly when a
-                // provider is consistently slow-to-first-byte.
-                provider.breaker().record_failure();
-                log::warn!(
-                    "router: STREAM TIMEOUT ({} ms) {} <- {}/{} (treating as failure)",
-                    self.first_byte_timeout_ms,
-                    req.model,
-                    provider.id(),
-                    hop.model
-                );
-                last_err = Some(canonical::make_error(
-                    format!(
-                        "provider {} exceeded first-byte budget ({} ms)",
-                        provider.id(),
-                        self.first_byte_timeout_ms
-                    ),
-                    Some(504),
-                    Some(true),
-                ));
-                continue;
-            }
-        };
-        provider.breaker().record_success();
-        if let Ok(mut lu) = self.last_used.lock() {
-            lu.insert(app_type.to_string(), provider.id().to_string());
-        }
-        log::info!("router: STREAM OK (first byte) {} <- {}/{}", req.model, provider.id(), hop.model);
-        // Chain the first chunk with the rest of the stream. Mid-stream errors
-        // surface to the client (no transparent failover).
-        let rest = chunk_stream;
-        let combined = futures_util::stream::once(async move { first }).chain(rest);
-        return Ok(combined.boxed());
+    /// Streaming completion with automatic failover (only pre-first-byte).
+    /// Mirrors `Router.stream` in `src/gateway/router.ts:85`.
+    ///
+    /// For each hop: check breaker, call provider.stream(). Probe the first chunk
+    /// before committing - allows failover if the upstream errors before sending
+    /// data. Once we yield the first chunk, mid-stream errors surface to the client.
+    pub async fn stream(
+        &self,
+        req: &ChatCompletionRequest,
+    ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+        let hops = self.resolve_route(&req.model).ok_or_else(|| {
+            canonical::make_provider_error(
+                "no_route",
+                "route_resolution",
+                Some(404),
+                Some(false),
+                None,
+            )
+        })?;
+        self.stream_hops("_legacy", "_legacy", req, hops).await
     }
-    Err(last_err.unwrap_or_else(|| canonical::make_error("all stream hops exhausted", Some(503), Some(false))))
-}
+
+    /// Surface-aware streaming completion (see `complete_for`).
+    pub async fn stream_for(
+        &self,
+        surface: &str,
+        app_type: &str,
+        req: &ChatCompletionRequest,
+    ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+        let hops = self.resolve_route_for(surface, &req.model).ok_or_else(|| {
+            canonical::make_provider_error(
+                "no_route",
+                "route_resolution",
+                Some(404),
+                Some(false),
+                None,
+            )
+        })?;
+        self.stream_hops(surface, app_type, req, hops).await
+    }
+
+    pub async fn stream_hops(
+        &self,
+        _surface: &str,
+        app_type: &str,
+        req: &ChatCompletionRequest,
+        hops: Arc<Vec<RouteHop>>,
+    ) -> Result<futures_util::stream::BoxStream<'static, OAIStreamChunk>, ProviderError> {
+        use futures_util::StreamExt;
+
+        let mut last_err: Option<ProviderError> = None;
+        for hop in hops.iter() {
+            let provider = match self.providers.get(&hop.provider) {
+                Some(p) => p,
+                None => continue,
+            };
+            if !provider.enabled() {
+                log::warn!(
+                    "router: skip provider_ref={} reason=disabled stream=true",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
+                continue;
+            }
+            // Passthrough hop without a client credential: skip (see the
+            // matching check in `complete_hops`).
+            if provider.requires_client_credential() && req.client_credential.is_none() {
+                log::warn!(
+                    "router: skip provider_ref={} reason=no_client_credential stream=true",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
+                continue;
+            }
+            let Some(mut attempt) = Provider_attempt::acquire(Arc::clone(provider)) else {
+                log::warn!(
+                    "router: skip provider_ref={} reason=circuit_open stream=true",
+                    crate::diagnostics::safe_reference(&hop.provider)
+                );
+                continue;
+            };
+            let attempt_started = Instant::now();
+            let mut chunk_stream = match provider.stream(req, &hop.model).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let retriable =
+                        e.retriable || should_failover_tool_capability_rejection(req, &e);
+                    // Only retriable (provider-level) failures count against the
+                    // breaker - non-retriable errors are local construction
+                    // problems (serialize / client build), not the provider's
+                    // fault, and must not pollute its health.
+                    if retriable {
+                        attempt.settle(Circuit_outcome::Failure);
+                    }
+                    log::warn!(
+                    "router: stream setup failed request_id={} provider_ref={} upstream_model_ref={} elapsed_ms={} status={} retriable={} code={} stage={} response_bytes={}",
+                    req.request_id.as_deref().unwrap_or("unknown"),
+                    crate::diagnostics::safe_reference(provider.id()),
+                    crate::diagnostics::safe_reference(&hop.model),
+                    attempt_started.elapsed().as_millis(),
+                    e.status.unwrap_or(500),
+                    retriable,
+                    e.code,
+                    e.stage,
+                    e.response_bytes.unwrap_or(0)
+                );
+                    last_err = Some(e);
+                    if !retriable {
+                        return Err(last_err.unwrap());
+                    }
+                    continue;
+                }
+            };
+            // Probe first chunk. Bound the wait with FIRST_BYTE_TIMEOUT_MS so a
+            // dead upstream (opened a connection but never sent bytes, or took
+            // longer than this budget to send its first event) can't burn a full
+            // upstream-RTT before the router fails over. Without this cap, every
+            // hop in the chain adds ~1 s of wall-clock latency — a 5-hop walk
+            // turned a fast reply into a 5 s pre-stream wait. The cap also keeps
+            // circuit-breaker failures accumulating fast enough that the bad
+            // hops open after a few rounds and get skipped on subsequent
+            // requests.
+            let first = match tokio::time::timeout(
+                std::time::Duration::from_millis(self.first_byte_timeout_ms),
+                chunk_stream.next(),
+            )
+            .await
+            {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    // An upstream that opened the stream but yielded zero chunks
+                    // (e.g. the OpenAI/Anthropic provider swallowing an HTTP 4xx/5xx
+                    // as an empty SSE body) should NOT be treated as a successful
+                    // empty completion — that would surface a 200 with no data to
+                    // the client. Record a failure and fail over to the next hop.
+                    // Mock providers never hit this path (they always yield a role
+                    // chunk + a finish chunk), so the seeded demo routes are
+                    // unaffected.
+                    attempt.settle(Circuit_outcome::Failure);
+                    log::warn!(
+                    "router: stream empty request_id={} model_ref={} provider_ref={} upstream_model_ref={} elapsed_ms={}",
+                    req.request_id.as_deref().unwrap_or("unknown"),
+                    crate::diagnostics::safe_reference(&req.model),
+                    crate::diagnostics::safe_reference(provider.id()),
+                    crate::diagnostics::safe_reference(&hop.model),
+                    attempt_started.elapsed().as_millis()
+                );
+                    last_err = Some(canonical::make_provider_error(
+                        "upstream_stream_error",
+                        "stream_empty",
+                        Some(502),
+                        Some(true),
+                        None,
+                    ));
+                    continue;
+                }
+                Err(_elapsed) => {
+                    // Upstream stalled past the first-byte budget. Treat as a
+                    // retriable failure (counts against the breaker) so the next
+                    // hop gets a chance and the breaker opens quickly when a
+                    // provider is consistently slow-to-first-byte.
+                    attempt.settle(Circuit_outcome::Failure);
+                    log::warn!(
+                    "router: stream first event timeout request_id={} budget_ms={} model_ref={} provider_ref={} upstream_model_ref={} elapsed_ms={}",
+                    req.request_id.as_deref().unwrap_or("unknown"),
+                    self.first_byte_timeout_ms,
+                    crate::diagnostics::safe_reference(&req.model),
+                    crate::diagnostics::safe_reference(provider.id()),
+                    crate::diagnostics::safe_reference(&hop.model),
+                    attempt_started.elapsed().as_millis()
+                );
+                    last_err = Some(canonical::make_provider_error(
+                        "upstream_timeout",
+                        "stream_first_event",
+                        Some(504),
+                        Some(true),
+                        None,
+                    ));
+                    continue;
+                }
+            };
+            if let Some(error) = canonical::stream_chunk_error(&first) {
+                if error.retriable {
+                    attempt.settle(Circuit_outcome::Failure);
+                    last_err = Some(error);
+                    continue;
+                }
+                return Err(error);
+            }
+            log::info!(
+            "router: stream first event request_id={} model_ref={} provider_ref={} upstream_model_ref={} elapsed_ms={}",
+            req.request_id.as_deref().unwrap_or("unknown"),
+            crate::diagnostics::safe_reference(&req.model),
+            crate::diagnostics::safe_reference(provider.id()),
+            crate::diagnostics::safe_reference(&hop.model),
+            attempt_started.elapsed().as_millis()
+        );
+            // Chain the first chunk with the rest of the stream. Mid-stream errors
+            // surface to the client (no transparent failover).
+            let last_used = Arc::clone(&self.last_used);
+            let app_type = app_type.to_string();
+            let upstream_model = hop.model.clone();
+            let combined = async_stream::stream! {
+                let mut terminal_seen = false;
+                let mut pending = Some(first);
+                loop {
+                    let chunk = if let Some(first) = pending.take() {
+                        Some(first)
+                    } else {
+                        chunk_stream.next().await
+                    };
+                    let Some(chunk) = chunk else { break; };
+                    if let Some(error) = canonical::stream_chunk_error(&chunk) {
+                        attempt.settle(if error.retriable { Circuit_outcome::Failure } else { Circuit_outcome::Cancelled });
+                        yield chunk;
+                        return;
+                    }
+                    terminal_seen |= chunk.choices.iter().any(|choice| choice.finish_reason.is_some())
+                        || chunk.source_anthropic_event.as_ref().and_then(|event| event.get("type")).and_then(serde_json::Value::as_str) == Some("message_stop");
+                    yield chunk;
+                }
+                if !terminal_seen {
+                    attempt.settle(Circuit_outcome::Failure);
+                    yield canonical::stream_error_chunk(&upstream_model, 502, "proxy_stream_error");
+                    return;
+                }
+                attempt.settle(Circuit_outcome::Success);
+                if let Ok(mut winners) = last_used.lock() {
+                    winners.insert(app_type, attempt.provider.id().to_string());
+                }
+            };
+            return Ok(combined.boxed());
+        }
+        Err(last_err.unwrap_or_else(|| {
+            canonical::make_provider_error(
+                "all_hops_exhausted",
+                "stream_routing",
+                Some(503),
+                Some(false),
+                None,
+            )
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -546,18 +757,31 @@ mod tests {
 
     #[async_trait]
     impl Provider for EmptyStreamProvider {
-        fn id(&self) -> &str { self.id }
-        fn enabled(&self) -> bool { true }
-        fn models(&self) -> &[String] { &[] }
-        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
 
-        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
             Err(canonical::make_error("unused", Some(500), Some(true)))
         }
 
         async fn stream(
             &self,
             _req: &ChatCompletionRequest,
+            _upstream_model: &str,
         ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
             Ok(futures_util::stream::empty().boxed())
         }
@@ -580,20 +804,37 @@ mod tests {
 
     #[async_trait]
     impl Provider for ErrStreamProvider {
-        fn id(&self) -> &str { self.id }
-        fn enabled(&self) -> bool { true }
-        fn models(&self) -> &[String] { &[] }
-        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
 
-        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
             Err(canonical::make_error("unused", Some(500), Some(true)))
         }
 
         async fn stream(
             &self,
             _req: &ChatCompletionRequest,
+            _upstream_model: &str,
         ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
-            Err(canonical::make_error("forced failure", Some(503), Some(true)))
+            Err(canonical::make_error(
+                "forced failure",
+                Some(503),
+                Some(true),
+            ))
         }
     }
 
@@ -614,20 +855,53 @@ mod tests {
 
     #[async_trait]
     impl Provider for WorkingProvider {
-        fn id(&self) -> &str { self.id }
-        fn enabled(&self) -> bool { true }
-        fn models(&self) -> &[String] { &[] }
-        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
 
-        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
-            Err(canonical::make_error("unused", Some(500), Some(true)))
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
+            Ok(OAIChatResponse {
+                id: "working".into(),
+                object: "chat.completion".into(),
+                created: 0,
+                model: upstream_model.into(),
+                choices: vec![crate::proxy::canonical::OAIChoice {
+                    index: 0,
+                    message: crate::proxy::canonical::OAIMessage {
+                        role: "assistant".into(),
+                        content: Some("working".into()),
+                        tool_calls: None,
+                        refusal: None,
+                        extra: Default::default(),
+                    },
+                    finish_reason: Some("stop".into()),
+                    extra: Default::default(),
+                }],
+                usage: None,
+                extra: Default::default(),
+                source_anthropic_response: None,
+            })
         }
 
         async fn stream(
             &self,
-            req: &ChatCompletionRequest,
+            _req: &ChatCompletionRequest,
+            upstream_model: &str,
         ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
-            let model = req.model.clone();
+            let model = upstream_model.to_string();
             let stream = futures_util::stream::iter(vec![
                 crate::proxy::converter::make_stream_chunk(
                     "id",
@@ -637,6 +911,7 @@ mod tests {
                         content: None,
                         tool_calls: None,
                         reasoning: None,
+                        extra: Default::default(),
                     },
                     None,
                 ),
@@ -648,12 +923,197 @@ mod tests {
                         content: None,
                         tool_calls: None,
                         reasoning: None,
+                        extra: Default::default(),
                     },
                     Some("stop".into()),
                 ),
             ]);
             Ok(Box::pin(stream))
         }
+    }
+
+    /// A passthrough-shaped provider for hop-skip coverage: advertises
+    /// `requires_client_credential`, records invocations, and serves a
+    /// marker response so the caller can tell which hop answered.
+    struct PassthroughProbeProvider {
+        breaker: CircuitBreaker,
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    impl PassthroughProbeProvider {
+        fn shared() -> (Arc<Self>, Arc<Self>) {
+            let probe = Arc::new(Self {
+                breaker: CircuitBreaker::new(empty_cb()),
+                called: std::sync::atomic::AtomicBool::new(false),
+            });
+            (probe.clone(), probe)
+        }
+    }
+
+    #[async_trait]
+    impl Provider for PassthroughProbeProvider {
+        fn id(&self) -> &str {
+            "sub"
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
+        fn requires_client_credential(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(OAIChatResponse {
+                id: "passthrough".into(),
+                object: "chat.completion".into(),
+                created: 0,
+                model: upstream_model.into(),
+                choices: vec![crate::proxy::canonical::OAIChoice {
+                    index: 0,
+                    message: crate::proxy::canonical::OAIMessage {
+                        role: "assistant".into(),
+                        content: Some("passthrough_served".into()),
+                        tool_calls: None,
+                        refusal: None,
+                        extra: Default::default(),
+                    },
+                    finish_reason: Some("stop".into()),
+                    extra: Default::default(),
+                }],
+                usage: None,
+                extra: Default::default(),
+                source_anthropic_response: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            let stream =
+                futures_util::stream::iter(vec![crate::proxy::converter::make_stream_chunk(
+                    "id",
+                    "m",
+                    crate::proxy::canonical::StreamDelta {
+                        role: Some("assistant".into()),
+                        content: None,
+                        tool_calls: None,
+                        reasoning: None,
+                        extra: Default::default(),
+                    },
+                    Some("stop".into()),
+                )]);
+            Ok(Box::pin(stream))
+        }
+    }
+
+    /// A passthrough hop must be skipped when the request carries no client
+    /// credential (only /v1/messages attaches one): chat/completions and
+    /// responses surfaces would otherwise burn an upstream 401 and terminate
+    /// the route before the static-key hops behind it can serve.
+    #[tokio::test]
+    async fn passthrough_hop_skipped_without_client_credential() {
+        let (handle, probe) = PassthroughProbeProvider::shared();
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("sub".into(), handle);
+        providers.insert("pool".into(), Arc::new(WorkingProvider::new("pool")));
+        let hops = Arc::new(vec![
+            RouteHop {
+                provider: "sub".into(),
+                model: "m".into(),
+            },
+            RouteHop {
+                provider: "pool".into(),
+                model: "m".into(),
+            },
+        ]);
+        let router = Router::new(providers, HashMap::new());
+        let response = router
+            .complete_hops("", "_test", &req_for("m"), hops)
+            .await
+            .expect("static-key hop must still serve the request");
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("working"),
+            "the static-key hop behind the skipped passthrough hop must answer"
+        );
+        assert!(
+            !probe.called.load(std::sync::atomic::Ordering::SeqCst),
+            "a passthrough hop must not be dispatched without a client credential"
+        );
+    }
+
+    /// With a client credential present the passthrough hop is dispatched
+    /// normally — the skip must not starve /v1/messages subscription calls.
+    #[tokio::test]
+    async fn passthrough_hop_dispatched_with_client_credential() {
+        let (handle, probe) = PassthroughProbeProvider::shared();
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("sub".into(), handle);
+        providers.insert("pool".into(), Arc::new(WorkingProvider::new("pool")));
+        let hops = Arc::new(vec![RouteHop {
+            provider: "sub".into(),
+            model: "m".into(),
+        }]);
+        let router = Router::new(providers, HashMap::new());
+        let mut request = req_for("m");
+        request.client_credential = Some(canonical::Client_credential {
+            authorization: Some("Bearer oauth-relay-7".into()),
+            x_api_key: None,
+        });
+        let response = router
+            .complete_hops("", "_test", &request, hops)
+            .await
+            .expect("the passthrough hop must serve the credentialed request");
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("passthrough_served")
+        );
+        assert!(probe.called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Same guard on the streaming path: no credential → skip the hop, the
+    /// stream comes from the static-key hop behind it.
+    #[tokio::test]
+    async fn passthrough_stream_hop_skipped_without_client_credential() {
+        let (handle, probe) = PassthroughProbeProvider::shared();
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("sub".into(), handle);
+        providers.insert("pool".into(), Arc::new(WorkingProvider::new("pool")));
+        let hops = Arc::new(vec![
+            RouteHop {
+                provider: "sub".into(),
+                model: "m".into(),
+            },
+            RouteHop {
+                provider: "pool".into(),
+                model: "m".into(),
+            },
+        ]);
+        let router = Router::new(providers, HashMap::new());
+        let stream = router
+            .stream_hops("", "_test", &req_for("m"), hops)
+            .await
+            .expect("static-key hop must still stream");
+        let chunks: Vec<OAIStreamChunk> = stream.collect().await;
+        assert!(!chunks.is_empty());
+        assert!(
+            !probe.called.load(std::sync::atomic::Ordering::SeqCst),
+            "a passthrough stream hop must not be dispatched without a client credential"
+        );
     }
 
     fn req_for(model: &str) -> ChatCompletionRequest {
@@ -666,6 +1126,90 @@ mod tests {
             tools: None,
             tool_choice: None,
             extra: Default::default(),
+            source_anthropic_request: None,
+            request_id: None,
+            client_credential: None,
+        }
+    }
+
+    fn req_with_tool(model: &str) -> ChatCompletionRequest {
+        let mut request = req_for(model);
+        request.tools = Some(vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "probe", "parameters": {"type": "object"}},
+        })]);
+        request
+    }
+
+    struct ToolRejectProvider {
+        id: &'static str,
+        breaker: CircuitBreaker,
+        /// Optional upstream-4xx classification. The router's helper
+        /// gates failover on `kind == ToolCapability`; auth-expired and
+        /// unclassified 400s must remain terminal.
+        kind: Option<canonical::UpstreamErrorKind>,
+    }
+
+    impl ToolRejectProvider {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+                kind: None,
+            }
+        }
+        fn with_kind(id: &'static str, kind: canonical::UpstreamErrorKind) -> Self {
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+                kind: Some(kind),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ToolRejectProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
+
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
+            Err(canonical::make_provider_error_with_kind(
+                "upstream_http_error",
+                "response_status",
+                Some(400),
+                Some(false),
+                Some(84),
+                self.kind,
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
+            Err(canonical::make_provider_error_with_kind(
+                "upstream_http_error",
+                "response_status",
+                Some(400),
+                Some(false),
+                Some(84),
+                self.kind,
+            ))
         }
     }
 
@@ -681,24 +1225,40 @@ mod tests {
 
     impl StallProvider {
         fn new(id: &'static str) -> Self {
-            Self { id, breaker: CircuitBreaker::new(empty_cb()) }
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+            }
         }
     }
 
     #[async_trait]
     impl Provider for StallProvider {
-        fn id(&self) -> &str { self.id }
-        fn enabled(&self) -> bool { true }
-        fn models(&self) -> &[String] { &[] }
-        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
 
-        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
             Err(canonical::make_error("unused", Some(500), Some(true)))
         }
 
         async fn stream(
             &self,
             _req: &ChatCompletionRequest,
+            _upstream_model: &str,
         ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
             // A stream that polls Pending forever — exercises the
             // first-byte-timeout race in Router::stream_hops.
@@ -721,8 +1281,14 @@ mod tests {
         routes.insert(
             "m".into(),
             vec![
-                RouteHop { provider: "stall".into(), model: "m".into() },
-                RouteHop { provider: "working".into(), model: "m".into() },
+                RouteHop {
+                    provider: "stall".into(),
+                    model: "m".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "m".into(),
+                },
             ],
         );
         let mut router = Router::new(providers, routes);
@@ -741,8 +1307,14 @@ mod tests {
 
         use futures_util::StreamExt;
         let chunks: Vec<OAIStreamChunk> = stream.collect().await;
-        assert!(!chunks.is_empty(), "should fail over to the working provider");
-        assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+        assert!(
+            !chunks.is_empty(),
+            "should fail over to the working provider"
+        );
+        assert_eq!(
+            chunks[0].choices[0].delta.role.as_deref(),
+            Some("assistant")
+        );
         assert_eq!(
             chunks.last().unwrap().choices[0].finish_reason.as_deref(),
             Some("stop")
@@ -773,9 +1345,18 @@ mod tests {
         routes.insert(
             "m".into(),
             vec![
-                RouteHop { provider: "s1".into(), model: "m".into() },
-                RouteHop { provider: "s2".into(), model: "m".into() },
-                RouteHop { provider: "s3".into(), model: "m".into() },
+                RouteHop {
+                    provider: "s1".into(),
+                    model: "m".into(),
+                },
+                RouteHop {
+                    provider: "s2".into(),
+                    model: "m".into(),
+                },
+                RouteHop {
+                    provider: "s3".into(),
+                    model: "m".into(),
+                },
             ],
         );
         let mut router = Router::new(providers, routes);
@@ -808,17 +1389,32 @@ mod tests {
         routes.insert(
             "m".into(),
             vec![
-                RouteHop { provider: "empty".into(), model: "m".into() },
-                RouteHop { provider: "working".into(), model: "m".into() },
+                RouteHop {
+                    provider: "empty".into(),
+                    model: "m".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "m".into(),
+                },
             ],
         );
         let router = Router::new(providers, routes);
 
-        let mut s = router.stream(&req_for("m")).await.expect("stream should succeed");
+        let mut s = router
+            .stream(&req_for("m"))
+            .await
+            .expect("stream should succeed");
         use futures_util::StreamExt;
         let chunks: Vec<OAIStreamChunk> = s.by_ref().collect().await;
-        assert!(!chunks.is_empty(), "should fail over to the working provider");
-        assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+        assert!(
+            !chunks.is_empty(),
+            "should fail over to the working provider"
+        );
+        assert_eq!(
+            chunks[0].choices[0].delta.role.as_deref(),
+            Some("assistant")
+        );
         assert_eq!(
             chunks.last().unwrap().choices[0].finish_reason.as_deref(),
             Some("stop")
@@ -832,7 +1428,10 @@ mod tests {
         let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
         routes.insert(
             "m".into(),
-            vec![RouteHop { provider: "empty".into(), model: "m".into() }],
+            vec![RouteHop {
+                provider: "empty".into(),
+                model: "m".into(),
+            }],
         );
         let router = Router::new(providers, routes);
 
@@ -853,20 +1452,196 @@ mod tests {
         routes.insert(
             "m".into(),
             vec![
-                RouteHop { provider: "err".into(), model: "m".into() },
-                RouteHop { provider: "working".into(), model: "m".into() },
+                RouteHop {
+                    provider: "err".into(),
+                    model: "m".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "m".into(),
+                },
             ],
         );
         let router = Router::new(providers, routes);
 
-        let mut s = router.stream(&req_for("m")).await.expect("stream should succeed");
+        let mut s = router
+            .stream(&req_for("m"))
+            .await
+            .expect("stream should succeed");
         use futures_util::StreamExt;
         let chunks: Vec<OAIStreamChunk> = s.by_ref().collect().await;
-        assert!(!chunks.is_empty(), "should fail over to the working provider");
+        assert!(
+            !chunks.is_empty(),
+            "should fail over to the working provider"
+        );
         assert_eq!(
             chunks.last().unwrap().choices[0].finish_reason.as_deref(),
             Some("stop")
         );
+    }
+
+    #[tokio::test]
+    async fn tool_capability_400_fails_over_for_complete_and_stream() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert(
+            "reject".into(),
+            Arc::new(ToolRejectProvider::with_kind(
+                "reject",
+                canonical::UpstreamErrorKind::ToolCapability,
+            )),
+        );
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop {
+                    provider: "reject".into(),
+                    model: "reject-model".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "working-model".into(),
+                },
+            ],
+        );
+        let router = Router::new(providers, routes);
+
+        let complete = router
+            .complete(&req_with_tool("m"))
+            .await
+            .expect("complete fallback");
+        assert_eq!(
+            complete.choices[0].message.content.as_deref(),
+            Some("working")
+        );
+        let mut stream = router
+            .stream(&req_with_tool("m"))
+            .await
+            .expect("stream fallback");
+        let chunks: Vec<OAIStreamChunk> = stream.by_ref().collect().await;
+        assert_eq!(
+            chunks
+                .last()
+                .and_then(|chunk| chunk.choices[0].finish_reason.as_deref()),
+            Some("stop")
+        );
+        let reject_health = router
+            .health()
+            .into_iter()
+            .find(|health| health.id == "reject")
+            .unwrap();
+        assert_eq!(reject_health.breaker.failures, 2);
+    }
+
+    #[tokio::test]
+    async fn ordinary_400_without_tools_remains_terminal() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("reject".into(), Arc::new(ToolRejectProvider::new("reject")));
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop {
+                    provider: "reject".into(),
+                    model: "reject-model".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "working-model".into(),
+                },
+            ],
+        );
+        let router = Router::new(providers, routes);
+        let error = router
+            .complete(&req_for("m"))
+            .await
+            .expect_err("ordinary 400 must remain terminal");
+        assert_eq!(error.status, Some(400));
+        assert!(!error.retriable);
+    }
+
+    /// The regression case: Codex CLI always sends tools; OpenAI returns 400
+    /// with an OAuth refresh-token body; the router must NOT fail over. The
+    /// breaker failures counter must stay at 0 (non-retriable errors are
+    /// recorded as Cancelled, not Failure).
+    #[tokio::test]
+    async fn auth_expired_400_with_tools_is_terminal() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert(
+            "reject".into(),
+            Arc::new(ToolRejectProvider::with_kind(
+                "reject",
+                canonical::UpstreamErrorKind::AuthExpired,
+            )),
+        );
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop {
+                    provider: "reject".into(),
+                    model: "reject-model".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "working-model".into(),
+                },
+            ],
+        );
+        let router = Router::new(providers, routes);
+
+        let error = router
+            .complete(&req_with_tool("m"))
+            .await
+            .expect_err("auth-expired 400 with tools must remain terminal");
+        assert_eq!(error.status, Some(400));
+        assert!(!error.retriable);
+        assert_eq!(error.kind, Some(canonical::UpstreamErrorKind::AuthExpired));
+        let reject_health = router
+            .health()
+            .into_iter()
+            .find(|health| health.id == "reject")
+            .unwrap();
+        assert_eq!(
+            reject_health.breaker.failures, 0,
+            "non-retriable 400 must not increment the breaker"
+        );
+    }
+
+    /// An unclassified 400 with tools must also remain terminal — the
+    /// legacy default behaviour, restored after the regression. Only an
+    /// explicit `ToolCapability` classification opens the failover gate.
+    #[tokio::test]
+    async fn unclassified_400_with_tools_is_terminal() {
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        providers.insert("reject".into(), Arc::new(ToolRejectProvider::new("reject")));
+        providers.insert("working".into(), Arc::new(WorkingProvider::new("working")));
+        let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
+        routes.insert(
+            "m".into(),
+            vec![
+                RouteHop {
+                    provider: "reject".into(),
+                    model: "reject-model".into(),
+                },
+                RouteHop {
+                    provider: "working".into(),
+                    model: "working-model".into(),
+                },
+            ],
+        );
+        let router = Router::new(providers, routes);
+
+        let error = router
+            .complete(&req_with_tool("m"))
+            .await
+            .expect_err("unclassified 400 with tools must remain terminal");
+        assert_eq!(error.status, Some(400));
+        assert!(!error.retriable);
+        assert_eq!(error.kind, None);
     }
 
     // ---- Phase 17: per-surface failover chains ----
@@ -880,18 +1655,33 @@ mod tests {
 
     impl TaggedProvider {
         fn new(id: &'static str) -> Self {
-            Self { id, breaker: CircuitBreaker::new(empty_cb()) }
+            Self {
+                id,
+                breaker: CircuitBreaker::new(empty_cb()),
+            }
         }
     }
 
     #[async_trait]
     impl Provider for TaggedProvider {
-        fn id(&self) -> &str { self.id }
-        fn enabled(&self) -> bool { true }
-        fn models(&self) -> &[String] { &[] }
-        fn breaker(&self) -> &CircuitBreaker { &self.breaker }
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn models(&self) -> &[String] {
+            &[]
+        }
+        fn breaker(&self) -> &CircuitBreaker {
+            &self.breaker
+        }
 
-        async fn complete(&self, _req: &ChatCompletionRequest) -> Result<OAIChatResponse, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &ChatCompletionRequest,
+            _upstream_model: &str,
+        ) -> Result<OAIChatResponse, ProviderError> {
             Err(canonical::make_error(
                 format!("fail:{}", self.id),
                 Some(500),
@@ -901,26 +1691,27 @@ mod tests {
 
         async fn stream(
             &self,
-            req: &ChatCompletionRequest,
+            _req: &ChatCompletionRequest,
+            upstream_model: &str,
         ) -> Result<Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>, ProviderError> {
             // First TaggedProvider in a chain fails (retriable) so the next
             // hop is tried; a provider tagged "ok" yields a chunk carrying
             // its id in the finish_reason slot for assertion.
             if self.id.starts_with("ok") {
                 let tag = self.id.to_string();
-                let stream = futures_util::stream::iter(vec![
-                    crate::proxy::converter::make_stream_chunk(
+                let stream =
+                    futures_util::stream::iter(vec![crate::proxy::converter::make_stream_chunk(
                         "id",
-                        &req.model,
+                        upstream_model,
                         crate::proxy::canonical::StreamDelta {
                             role: Some("assistant".into()),
                             content: Some(tag),
                             tool_calls: None,
                             reasoning: None,
+                            extra: Default::default(),
                         },
                         None,
-                    ),
-                ]);
+                    )]);
                 Ok(Box::pin(stream))
             } else {
                 Err(canonical::make_error(
@@ -937,17 +1728,35 @@ mod tests {
         // Two-hop chains (bad -> ok-<surface>) per surface; the bad head
         // fails with a retriable error so the chain falls through to ok.
         let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-        providers.insert("claude-bad".into(), Arc::new(TaggedProvider::new("claude-bad")));
-        providers.insert("ok-claude".into(), Arc::new(TaggedProvider::new("ok-claude")));
-        providers.insert("codex-bad".into(), Arc::new(TaggedProvider::new("codex-bad")));
+        providers.insert(
+            "claude-bad".into(),
+            Arc::new(TaggedProvider::new("claude-bad")),
+        );
+        providers.insert(
+            "ok-claude".into(),
+            Arc::new(TaggedProvider::new("ok-claude")),
+        );
+        providers.insert(
+            "codex-bad".into(),
+            Arc::new(TaggedProvider::new("codex-bad")),
+        );
         providers.insert("ok-codex".into(), Arc::new(TaggedProvider::new("ok-codex")));
         providers.insert("chat-bad".into(), Arc::new(TaggedProvider::new("chat-bad")));
         providers.insert("ok-chat".into(), Arc::new(TaggedProvider::new("ok-chat")));
 
         let mut queues: HashMap<String, Vec<String>> = HashMap::new();
-        queues.insert(SURFACE_CLAUDE.into(), vec!["claude-bad".into(), "ok-claude".into()]);
-        queues.insert(SURFACE_CODEX.into(), vec!["codex-bad".into(), "ok-codex".into()]);
-        queues.insert(SURFACE_CHAT.into(), vec!["chat-bad".into(), "ok-chat".into()]);
+        queues.insert(
+            SURFACE_CLAUDE.into(),
+            vec!["claude-bad".into(), "ok-claude".into()],
+        );
+        queues.insert(
+            SURFACE_CODEX.into(),
+            vec!["codex-bad".into(), "ok-codex".into()],
+        );
+        queues.insert(
+            SURFACE_CHAT.into(),
+            vec!["chat-bad".into(), "ok-chat".into()],
+        );
 
         let router = Router::new(providers, HashMap::new()).with_queues(queues);
 
@@ -979,7 +1788,10 @@ mod tests {
         let mut routes: HashMap<String, Vec<RouteHop>> = HashMap::new();
         routes.insert(
             "special-model".into(),
-            vec![RouteHop { provider: "ok-route".into(), model: "special-model".into() }],
+            vec![RouteHop {
+                provider: "ok-route".into(),
+                model: "special-model".into(),
+            }],
         );
         let mut queues: HashMap<String, Vec<String>> = HashMap::new();
         queues.insert(SURFACE_CHAT.into(), vec!["ok-chat".into()]);
@@ -1000,7 +1812,10 @@ mod tests {
     #[tokio::test]
     async fn no_chain_anywhere_yields_404() {
         let router = Router::new(HashMap::new(), HashMap::new()).with_queues(HashMap::new());
-        let err = match router.stream_for(SURFACE_CHAT, "_test", &req_for("unknown-model")).await {
+        let err = match router
+            .stream_for(SURFACE_CHAT, "_test", &req_for("unknown-model"))
+            .await
+        {
             Ok(_) => panic!("no providers at all should 404"),
             Err(e) => e,
         };
@@ -1044,19 +1859,34 @@ mod tests {
         routes.insert(
             "m".into(),
             vec![
-                RouteHop { provider: "p1".into(), model: "mock-fast".into() },
-                RouteHop { provider: "p2".into(), model: "mock-fast".into() },
+                RouteHop {
+                    provider: "p1".into(),
+                    model: "mock-fast".into(),
+                },
+                RouteHop {
+                    provider: "p2".into(),
+                    model: "mock-fast".into(),
+                },
             ],
         );
         let router = Router::new(providers, routes);
 
         let served_by = |c: &OAIChatResponse| -> String {
-            c.choices[0].message.content.as_deref().unwrap_or("").to_string()
+            c.choices[0]
+                .message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .to_string()
         };
 
         // 1. Head (p1) healthy → served by p1.
         let c1 = router.complete(&req_for("m")).await.expect("req 1");
-        assert!(served_by(&c1).contains("MOCK[p1]"), "head should serve first: {}", served_by(&c1));
+        assert!(
+            served_by(&c1).contains("MOCK[p1]"),
+            "head should serve first: {}",
+            served_by(&c1)
+        );
 
         // 2. Trip p1's breaker (threshold 2) → p1 OPEN.
         p1.breaker().record_failure();
@@ -1064,19 +1894,43 @@ mod tests {
 
         // 3. During cooldown p1 is skipped → falls to p2.
         let c2 = router.complete(&req_for("m")).await.expect("req 2");
-        assert!(served_by(&c2).contains("MOCK[p2]"), "open head must fall to tail: {}", served_by(&c2));
+        assert!(
+            served_by(&c2).contains("MOCK[p2]"),
+            "open head must fall to tail: {}",
+            served_by(&c2)
+        );
 
         // 4. Cooldown expires → p1 half-open → serves the probe request.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        let c3 = router.complete(&req_for("m")).await.expect("req 3 (half-open probe)");
-        assert!(served_by(&c3).contains("MOCK[p1]"), "half-open head should probe: {}", served_by(&c3));
+        let c3 = router
+            .complete(&req_for("m"))
+            .await
+            .expect("req 3 (half-open probe)");
+        assert!(
+            served_by(&c3).contains("MOCK[p1]"),
+            "half-open head should probe: {}",
+            served_by(&c3)
+        );
 
         // 5. Second success in half-open closes p1's breaker.
-        let c4 = router.complete(&req_for("m")).await.expect("req 4 (close breaker)");
-        assert!(served_by(&c4).contains("MOCK[p1]"), "head should keep serving while recovering");
+        let c4 = router
+            .complete(&req_for("m"))
+            .await
+            .expect("req 4 (close breaker)");
+        assert!(
+            served_by(&c4).contains("MOCK[p1]"),
+            "head should keep serving while recovering"
+        );
 
         // 6. Fully recovered head serves again — request returns to the queue head.
-        let c5 = router.complete(&req_for("m")).await.expect("req 5 (recovered head)");
-        assert!(served_by(&c5).contains("MOCK[p1]"), "recovered head must regain requests: {}", served_by(&c5));
+        let c5 = router
+            .complete(&req_for("m"))
+            .await
+            .expect("req 5 (recovered head)");
+        assert!(
+            served_by(&c5).contains("MOCK[p1]"),
+            "recovered head must regain requests: {}",
+            served_by(&c5)
+        );
     }
 }

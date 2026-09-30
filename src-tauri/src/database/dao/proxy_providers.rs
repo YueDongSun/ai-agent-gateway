@@ -36,11 +36,25 @@ pub struct ProxyProvider {
     /// Stored as a JSON object; default `{}` (no mapping).
     #[serde(rename = "modelMapping", default)]
     pub model_mapping: HashMap<String, String>,
+    /// Per-provider extra request headers, merged into every upstream request
+    /// after the trusted auth/content headers are set. Reserved headers
+    /// (content-type, authorization, x-api-key, anthropic-version, host,
+    /// content-length) can never be overridden here. Used for provider-mandated
+    /// headers such as OpenCode's `x-opencode-session`. Stored as a JSON
+    /// object; default `{}`.
+    #[serde(rename = "extraHeaders", default)]
+    pub extra_headers: HashMap<String, String>,
 }
 
-fn default_true() -> bool { true }
-fn default_timeout() -> u64 { 60_000 }
-fn default_weight() -> u32 { 1 }
+fn default_true() -> bool {
+    true
+}
+fn default_timeout() -> u64 {
+    60_000
+}
+fn default_weight() -> u32 {
+    1
+}
 
 /// Circuit breaker parameters for a proxy provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,10 +69,18 @@ pub struct CircuitBreakerConfig {
     pub success_threshold: u32,
 }
 
-fn default_failure_threshold() -> u32 { 5 }
-fn default_cooldown_ms() -> u64 { 30_000 }
-fn default_half_open_retries() -> u32 { 1 }
-fn default_success_threshold() -> u32 { 2 }
+fn default_failure_threshold() -> u32 {
+    5
+}
+fn default_cooldown_ms() -> u64 {
+    30_000
+}
+fn default_half_open_retries() -> u32 {
+    1
+}
+fn default_success_threshold() -> u32 {
+    2
+}
 
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
@@ -77,18 +99,21 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
             "SELECT id, name, type, api_key, base_url, models, enabled,
-                    timeout_ms, weight, circuit_breaker, model_mapping
+                    timeout_ms, weight, circuit_breaker, model_mapping, extra_headers
              FROM proxy_providers ORDER BY weight DESC, id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let models_str: String = row.get(5)?;
             let cb_str: String = row.get(9)?;
             let mm_str: String = row.get(10)?;
+            let eh_str: String = row.get(11)?;
             let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
             let circuit_breaker: CircuitBreakerConfig =
                 serde_json::from_str(&cb_str).unwrap_or_default();
             let model_mapping: HashMap<String, String> =
                 serde_json::from_str(&mm_str).unwrap_or_default();
+            let extra_headers: HashMap<String, String> =
+                serde_json::from_str(&eh_str).unwrap_or_default();
             Ok(ProxyProvider {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -101,6 +126,7 @@ impl Database {
                 weight: row.get::<_, u32>(8)?,
                 circuit_breaker,
                 model_mapping,
+                extra_headers,
             })
         })?;
         let mut out = Vec::new();
@@ -116,20 +142,33 @@ impl Database {
         let models = serde_json::to_string(&p.models)?;
         let cb = serde_json::to_string(&p.circuit_breaker)?;
         let mm = serde_json::to_string(&p.model_mapping)?;
+        let eh = serde_json::to_string(&p.extra_headers)?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO proxy_providers (
                 id, name, type, api_key, base_url, models, enabled,
-                timeout_ms, weight, circuit_breaker, model_mapping, created_at
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                timeout_ms, weight, circuit_breaker, model_mapping, extra_headers, created_at
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, type=excluded.type, api_key=excluded.api_key,
                 base_url=excluded.base_url, models=excluded.models, enabled=excluded.enabled,
                 timeout_ms=excluded.timeout_ms, weight=excluded.weight,
-                circuit_breaker=excluded.circuit_breaker, model_mapping=excluded.model_mapping",
+                circuit_breaker=excluded.circuit_breaker, model_mapping=excluded.model_mapping,
+                extra_headers=excluded.extra_headers",
             params![
-                p.id, p.name, p.provider_type, p.api_key, p.base_url,
-                models, p.enabled, p.timeout_ms, p.weight, cb, mm, now,
+                p.id,
+                p.name,
+                p.provider_type,
+                p.api_key,
+                p.base_url,
+                models,
+                p.enabled,
+                p.timeout_ms,
+                p.weight,
+                cb,
+                mm,
+                eh,
+                now,
             ],
         )?;
         Ok(())

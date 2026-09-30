@@ -3,6 +3,7 @@ import { CopyIcon } from '../Icons';
 import { Secret_value } from '../secret_value.js';
 import type { AppPageConfig } from '../../lib/appPages';
 import type { CodexCliStatus } from '../../lib/api/codexCli';
+import type { ClaudeMirrorStatus } from '../../lib/api/claudeMirror';
 
 interface GatewayPanelProps {
   cfg: AppPageConfig;
@@ -14,8 +15,28 @@ interface GatewayPanelProps {
    *  set, the mirror row renders a warning chip instead of the
    *  initialized pill, so the user can see why the row is stale. */
   cliStatusError?: string | null;
+  /** Claude mirror (CLAUDE_CONFIG_DIR) status — rendered on the Claude
+   *  page. `null` while loading; an error keeps the row stale. */
+  claudeStatus?: ClaudeMirrorStatus | null;
+  claudeStatusError?: string | null;
   copied: string | null;
   busy: string | null;
+  /** `/v1/responses` CoT prompt toggle state (Codex surface only). */
+  cotOn: boolean;
+  /** Flip the CoT prompt toggle — immediate effect, no restart. */
+  onToggleCot: (on: boolean) => void;
+  /** Codex mirror mode: 'exclusive' (AAG routes everything) or 'coexist'
+   *  (ChatGPT login stays default; AAG selectable via [profiles.aag]). */
+  mirrorMode: string;
+  /** Flip the Codex mirror mode — rewrites the mirror config.toml
+   *  immediately; auth.json is never touched. */
+  onToggleMirrorMode: (coexist: boolean) => void;
+  /** Claude mirror mode: 'token' (AAG proxy token) or 'passthrough'
+   *  (subscription OAuth relayed by anthropic_passthrough rows). */
+  claudeMode?: string;
+  /** Flip the Claude mirror mode — rewrites the mirror settings.json
+   *  immediately. */
+  onToggleClaudeMode?: (passthrough: boolean) => void;
   onCopy: (text: string, key: string) => void;
   onStart: () => void;
   onStop: () => void;
@@ -33,8 +54,16 @@ export function GatewayPanel({
   authToken,
   cliStatus,
   cliStatusError,
+  claudeStatus,
+  claudeStatusError,
   copied,
   busy,
+  cotOn,
+  onToggleCot,
+  mirrorMode,
+  onToggleMirrorMode,
+  claudeMode,
+  onToggleClaudeMode,
   onCopy,
   onStart,
   onStop,
@@ -121,6 +150,53 @@ export function GatewayPanel({
       {cfg.ccSwitchUpstream && (
         <p className="muted small">{t('app.gateway.ccswitchHint')}</p>
       )}
+      {/* Built-in chain-of-thought prompt for the Codex (/v1/responses)
+       * surface. Live toggle — unlike the settings-modal fields (host /
+       * port / token), flipping it takes effect on the running gateway
+       * immediately, so it lives on the panel itself. */}
+      {cfg.surface === 'codex' && (
+        <div className="endpoint-row">
+          <span className="endpoint-label">{t('app.gateway.cot.title')}</span>
+          <code className="endpoint-value">
+            {cotOn ? t('app.gateway.cot.on') : t('app.gateway.cot.off')}
+          </code>
+          <label className="toggle-switch" title={t('app.gateway.cot.help')}>
+            <input
+              type="checkbox"
+              checked={cotOn}
+              onChange={(e) => onToggleCot(e.target.checked)}
+              data-testid="gateway-cot-toggle"
+              aria-label={t('app.gateway.cot.title')}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </div>
+      )}
+      {/* Codex mirror mode: exclusive (historic — every request routes
+       * through AAG) vs coexist (ChatGPT login stays the desktop default,
+       * AAG declared as a manually selectable third-party provider). Like
+       * the CoT row this takes effect immediately (the mirror's
+       * config.toml is rewritten on flip), so it lives on the panel. */}
+      {cfg.launchers === 'codex' && (
+        <div className="endpoint-row">
+          <span className="endpoint-label">{t('codex.mirror.mode.title')}</span>
+          <code className="endpoint-value">
+            {mirrorMode === 'coexist'
+              ? t('codex.mirror.mode.coexist')
+              : t('codex.mirror.mode.exclusive')}
+          </code>
+          <label className="toggle-switch" title={t('codex.mirror.mode.help')}>
+            <input
+              type="checkbox"
+              checked={mirrorMode === 'coexist'}
+              onChange={(e) => onToggleMirrorMode(e.target.checked)}
+              data-testid="codex-mirror-mode-toggle"
+              aria-label={t('codex.mirror.mode.title')}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </div>
+      )}
       {cfg.launchers === 'codex' && (
         <div className="endpoint-row">
           <span className="endpoint-label">{t('codex.mirror.home')}</span>
@@ -146,6 +222,61 @@ export function GatewayPanel({
             aria-label={t('app.gateway.copy')}
           >
             {copied === 'mirror' ? '✓' : <CopyIcon />}
+          </button>
+        </div>
+      )}
+      {/* Claude mirror (CLAUDE_CONFIG_DIR): mode toggle + mirror-home row.
+       * Like the Codex rows these rewrite the mirror settings.json
+       * immediately on flip; the native ~/.claude is never touched. */}
+      {cfg.launchers === 'claude' && (
+        <div className="endpoint-row">
+          <span className="endpoint-label">{t('claude.mirror.mode.title')}</span>
+          <code className="endpoint-value">
+            {claudeMode === 'passthrough'
+              ? t('claude.mirror.mode.passthrough')
+              : t('claude.mirror.mode.token')}
+          </code>
+          {onToggleClaudeMode && (
+            <label className="toggle-switch" title={t('claude.mirror.mode.help')}>
+              <input
+                type="checkbox"
+                checked={claudeMode === 'passthrough'}
+                onChange={(e) => onToggleClaudeMode(e.target.checked)}
+                data-testid="claude-mirror-mode-toggle"
+                aria-label={t('claude.mirror.mode.title')}
+              />
+              <span className="toggle-slider" />
+            </label>
+          )}
+        </div>
+      )}
+      {cfg.launchers === 'claude' && (
+        <div className="endpoint-row">
+          <span className="endpoint-label">{t('claude.mirror.home')}</span>
+          <code className="endpoint-value">
+            {claudeStatus?.mirrorDir ?? '~/.claude-cli'}
+          </code>
+          {claudeStatusError ? (
+            <span
+              className="pill off"
+              title={claudeStatusError}
+              data-testid="claude-mirror-error"
+            >
+              ⚠
+            </span>
+          ) : (
+            <span className={claudeStatus?.initialized ? 'pill on' : 'pill off'}>
+              {claudeStatus?.initialized ? '✓' : t('claude.mirror.notInitialized')}
+            </span>
+          )}
+          <button
+            className="btn icon-btn"
+            onClick={() => onCopy(claudeStatus?.mirrorDir ?? '~/.claude-cli', 'claude_mirror')}
+            title={t('app.gateway.copy')}
+            data-tooltip={t('app.gateway.copy')}
+            aria-label={t('app.gateway.copy')}
+          >
+            {copied === 'claude_mirror' ? '✓' : <CopyIcon />}
           </button>
         </div>
       )}

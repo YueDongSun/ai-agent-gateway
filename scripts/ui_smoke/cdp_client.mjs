@@ -1,4 +1,6 @@
-const command_timeout_ms = 10_000;
+import { cdp_timeout_ms, read_cdp_endpoint } from './cdp_endpoint.mjs';
+
+const command_timeout_ms = cdp_timeout_ms;
 
 export class cdp_client {
   constructor(web_socket) {
@@ -106,11 +108,8 @@ export class cdp_client {
 }
 
 export async function attach_page(cdp_origin) {
-  const response = await fetch(cdp_origin + '/json/list', {
-    signal: AbortSignal.timeout(command_timeout_ms),
-  });
-  if (!response.ok) throw new Error('CDP target list failed: ' + response.status);
-  const page = (await response.json()).find((target) => target.type === 'page');
+  const page = (await read_cdp_endpoint(cdp_origin, '/json/list', { timeout_ms: command_timeout_ms }))
+    .find((target) => target.type === 'page');
   if (!page) throw new Error('no page target in CDP list');
   const client = new cdp_client(new WebSocket(page.webSocketDebuggerUrl));
   await client.connect();

@@ -8,11 +8,12 @@
  *   - Antigravity: detect-only; build* must throw (disabled).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CopilotAdapter,
+  KiloAdapter,
   PiAdapter,
   AntigravityAdapter,
   defaultAgentTargets,
@@ -75,6 +76,53 @@ describe('Copilot CLI adapter', () => {
   });
 });
 
+describe('Kilo/OpenCode-compatible adapter', () => {
+  it('builds the provider/model projection consumed by Kilo VS Code', () => {
+    const a = new KiloAdapter(targetFor('kilo'));
+    const out = JSON.parse(a.buildGatewayConfig('http://127.0.0.1:8787', 'secret', 'gpt-5'));
+    expect(out.model).toBe('aag/gpt-5');
+    expect(out.provider.aag.npm).toBe('@ai-sdk/openai-compatible');
+    expect(out.provider.aag.options.baseURL).toBe('http://127.0.0.1:8787/v1');
+    expect(out.provider.aag.options.apiKey).toBe('secret');
+    expect(out.provider.aag.models['gpt-5'].name).toBe('gpt-5');
+  });
+
+  it('creates a missing config and merges stale AAG state without duplicate providers', () => {
+    const a = new KiloAdapter(targetFor('kilo'));
+    const p = a.resolveConfigPath()!;
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8787', 'secret', 'gpt-5'));
+    expect(JSON.parse(a.read()!).provider.aag.options.baseURL).toBe('http://127.0.0.1:8787/v1');
+
+    writeFileSync(p, `{
+      // Kilo VS Code user setting
+      "small_model": "aag/gpt-mini",
+      "theme": "dark",
+      "provider": { "other": { "npm": "custom" }, "aag": { "options": { "baseURL": "https://stale.invalid" } } }
+    }`, 'utf8');
+
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8787', 'secret', 'gpt-5'));
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8989', 'secret-2', 'gpt-5-1'));
+
+    const merged = JSON.parse(a.read()!);
+    expect(merged.theme).toBe('dark');
+    expect(merged.small_model).toBe('aag/gpt-mini');
+    expect(merged.provider.other.npm).toBe('custom');
+    expect(Object.keys(merged.provider).filter((id) => id === 'aag')).toHaveLength(1);
+    expect(merged.provider.aag.options.baseURL).toBe('http://127.0.0.1:8989/v1');
+    expect(merged.provider.aag.options.apiKey).toBe('secret-2');
+    expect(merged.model).toBe('aag/gpt-5-1');
+  });
+
+  it('rejects malformed config without replacing the original or exposing secrets', () => {
+    const a = new KiloAdapter(targetFor('kilo'));
+    const p = a.resolveConfigPath()!;
+    const api_key = ['fixture', 'key'].join('-');
+    const malformed = JSON.stringify({ provider: ['bad'], apiKey: api_key });
+    writeFileSync(p, malformed, 'utf8');
+    expect(() => a.write(a.buildGatewayConfig('http://127.0.0.1:8787', api_key, 'gpt-5'))).toThrow(/provider must be an object/);
+    expect(readFileSync(p, 'utf8')).toBe(malformed);
+  });
+});
 describe('pi adapter', () => {
   it('buildGatewayConfig emits providers map with baseUrl/api/models', () => {
     const a = new PiAdapter(targetFor('pi'));

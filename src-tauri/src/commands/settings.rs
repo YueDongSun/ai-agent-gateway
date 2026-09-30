@@ -4,7 +4,6 @@
 //! bodies are moved verbatim; only module paths in `use` statements and
 //! `pub(crate)` visibility changed.
 
-
 use crate::database::Database;
 
 // ----- App settings (Codex CLI isolation etc.) -----
@@ -27,4 +26,3 @@ pub(crate) fn settings_set(
 ) -> Result<(), String> {
     db.set_setting(&key, &value).map_err(String::from)
 }
-

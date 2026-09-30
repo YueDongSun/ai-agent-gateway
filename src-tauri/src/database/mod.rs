@@ -15,18 +15,19 @@
 //! ```
 
 pub mod dao;
-pub(crate) mod seed;
 mod schema;
+pub(crate) mod seed;
 
-use crate::config::get_db_path;
+use crate::config::{get_db_path, private_fs};
 use crate::error::AppError;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Current schema version. Increment on every schema change and add a migration
 /// branch in `schema.rs::apply_schema_migrations`.
-pub(crate) const SCHEMA_VERSION: i32 = 18;
+pub(crate) const SCHEMA_VERSION: i32 = 19;
 
 /// Serialize a value to a JSON string, mapping errors to AppError.
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -56,12 +57,36 @@ impl Database {
     /// Creates tables and applies any pending schema migrations.
     pub fn init() -> Result<Self, AppError> {
         let db_path = get_db_path();
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
+        Self::init_at_path_with_policy(&db_path, crate::config::app_config_dir_is_managed_default())
+    }
 
-        let conn = Connection::open(&db_path)?;
+    #[cfg(test)]
+    fn init_at_path(db_path: &Path) -> Result<Self, AppError> {
+        Self::init_at_path_with_policy(db_path, true)
+    }
+
+    fn init_at_path_with_policy(
+        db_path: &Path,
+        harden_existing_directory: bool,
+    ) -> Result<Self, AppError> {
+        if let Some(parent) = db_path.parent() {
+            if harden_existing_directory {
+                private_fs::prepare_managed_private_dir(parent)?;
+            } else {
+                private_fs::prepare_private_dir(parent)?;
+            }
+        }
+        private_fs::ensure_private_file(db_path)?;
+        private_fs::preflight_sqlite_files(db_path)?;
+
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        // Backup payloads can contain provider keys and proxy credentials.
+        // Secure deletion limits plaintext remnants when retention removes rows.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         // PRAGMA journal_mode returns a result row, so use `pragma_update`
         // which silently applies it. (Calling `.execute` on a pragma that
         // returns rows panics with `ExecuteReturnedResults - did you mean to
@@ -76,6 +101,7 @@ impl Database {
         db.create_tables()?;
         db.apply_schema_migrations()?;
         db.seed_proxy_if_empty()?;
+        private_fs::preflight_sqlite_files(db_path)?;
         Ok(db)
     }
 
@@ -97,5 +123,87 @@ impl Database {
     pub(crate) fn get_user_version(conn: &Connection) -> Result<i32, AppError> {
         conn.query_row("PRAGMA user_version;", [], |row| row.get(0))
             .map_err(AppError::from)
+    }
+}
+
+#[cfg(test)]
+mod private_storage_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let mut nonce = [0u8; 8];
+            getrandom::getrandom(&mut nonce).expect("test nonce");
+            let path = std::env::temp_dir().join(format!(
+                "aag_database_permissions_{}_{}",
+                std::process::id(),
+                hex::encode(nonce)
+            ));
+            fs::create_dir(&path).expect("create test root");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn disk_database_main_wal_shm_and_directory_are_private() {
+        let root = TestDir::new();
+        let directory = root.0.join("state");
+        let path = directory.join("aag.db");
+        let db = Database::init_at_path(&path).expect("disk database");
+        {
+            let conn = db.conn.lock().expect("database lock");
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('permission_test', 'secret')",
+                [],
+            )
+            .expect("create WAL activity");
+        }
+        private_fs::preflight_sqlite_files(&path).expect("secure SQLite files");
+
+        private_fs::verify_private_dir(&directory).expect("private database directory");
+        private_fs::verify_private_file(&path).expect("private database");
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.to_string_lossy()));
+            assert!(
+                sidecar.exists(),
+                "{suffix} must exist while WAL connection is open"
+            );
+            private_fs::verify_private_file(&sidecar).expect("private SQLite sidecar");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_database_rejects_linked_wal_before_sqlite_opens_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new();
+        let directory = root.0.join("state");
+        let path = directory.join("aag.db");
+        private_fs::prepare_private_dir(&directory).unwrap();
+        private_fs::ensure_private_file(&path).unwrap();
+
+        let sentinel = root.0.join("sentinel");
+        fs::write(&sentinel, b"must remain unchanged").unwrap();
+        let mut wal_name = path.as_os_str().to_os_string();
+        wal_name.push("-wal");
+        let wal = PathBuf::from(wal_name);
+        symlink(&sentinel, &wal).unwrap();
+
+        let error = Database::init_at_path(&path)
+            .err()
+            .expect("linked WAL must be rejected before opening SQLite");
+        assert!(error.to_string().contains("private_storage:linked_path"));
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain unchanged");
     }
 }

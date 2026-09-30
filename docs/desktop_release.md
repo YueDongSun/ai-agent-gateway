@@ -26,6 +26,21 @@ builds do not silently activate the mock backend in a browser. Every UI displays
 the desktop version and a demo, development, or release build badge. A release
 badge identifies compilation mode, not signing or native acceptance.
 
+## Startup and Tray Lifecycle
+
+`npm run tauri:dev` starts the Vite-served React UI inside the Tauri desktop
+window. The packaged desktop executable registers itself for login startup on
+its first release launch and passes `--aag-autostart` to that entry. Login
+launches keep the main window hidden while the process and configured proxy run
+in the background. The development executable does not register itself for
+autostart, because it depends on the Vite server owned by `tauri:dev`.
+
+The system tray uses `src-tauri/icons/tray_icon.png`. Left-click, Show, and the
+Hide menu item control the main UI; Quit is the explicit process-exit action.
+Closing the main window hides it to the tray rather than exiting. Tray icon
+installation is required at native startup so a hidden window always has a
+visible recovery path.
+
 ## Icon Contract
 
 The release preflight reads icon headers without an image library. It requires RGBA square PNGs at 32, 128, 256 (`128x128@2x`), 512 (`icon.png`), and 32 (`tray_icon.png`) pixels. It also verifies ICO directory bounds and 16, 24, 32, 48, 64, and 256 pixel layers, and verifies a real ICNS container with meaningful 32, 128, 256, and 1024 pixel layers. Generate the bundle from `ui/public/app_icon.svg` with the installed Tauri CLI; do not substitute a PNG file renamed as `.icns`.
@@ -36,7 +51,7 @@ See the official [Tauri icon guide](https://v2.tauri.app/develop/icons/) for sup
 
 `.github/workflows/desktop_build.yml` is manual-only. It builds Windows x64, macOS Intel, macOS Apple Silicon, and Ubuntu 22.04 x64, then uploads CI artifacts. It has `contents: read` permission only and creates no GitHub Release. Each matrix member has an independent 45 minute limit and does not cancel the others on failure.
 
-The workflow follows the current [Tauri GitHub pipeline guide](https://v2.tauri.app/distribute/pipelines/github/) for the runner setup, Linux dependencies, Node, and Rust caching. It uses `npm install --no-package-lock` because this repository does not track a dependency lockfile. That means the builds are not dependency-reproducible until the project adopts and commits a lockfile; this workflow must not be treated as a release provenance guarantee.
+The workflow follows the current [Tauri GitHub pipeline guide](https://v2.tauri.app/distribute/pipelines/github/) for the runner setup, Linux dependencies, Node, and Rust caching. Root/UI npm lockfiles and `src-tauri/Cargo.lock` are tracked; CI restores npm dependencies with `npm ci --ignore-scripts` and builds Rust with `--locked`. Third-party Actions are pinned to immutable commit SHAs. Lockfiles and pins improve reproducibility but do not replace SBOM, signature, provenance, or dependency-vulnerability review.
 
 Windows can be exercised locally. macOS and Linux output is unverified until this workflow has run successfully on those native runners. A Windows machine must not claim to have built or validated the macOS and Linux artifacts.
 

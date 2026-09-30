@@ -93,7 +93,11 @@ pub fn parse(url_str: &str) -> DeeplinkAction {
 
     // Strip leading "/" from path to get the id segment.
     let id = parsed.path().trim_start_matches('/');
-    let id_opt = if id.is_empty() { None } else { Some(id.to_string()) };
+    let id_opt = if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    };
 
     // Optional ?app=<app_type> query.
     let mut app_type: Option<String> = None;

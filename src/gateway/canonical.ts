@@ -39,14 +39,67 @@ export interface OAIStreamChunk {
 export interface ProviderError extends Error {
   status?: number;
   retriable: boolean;
+  code: string;
+  stage: string;
+  responseBytes?: number;
 }
 
 export function makeError(
   message: string,
-  opts: { status?: number; retriable?: boolean } = {},
+  opts: {
+    status?: number;
+    retriable?: boolean;
+    code?: string;
+    stage?: string;
+    responseBytes?: number;
+  } = {},
 ): ProviderError {
-  const e = new Error(message) as ProviderError;
+  const code = stableErrorCode(opts.code ?? message);
+  const e = new Error(publicProviderErrorMessage(code, opts.status)) as ProviderError;
   e.status = opts.status;
   e.retriable = opts.retriable ?? (opts.status === undefined || opts.status >= 500);
+  e.code = code;
+  e.stage = stableErrorCode(opts.stage ?? 'provider');
+  e.responseBytes = opts.responseBytes;
   return e;
+}
+
+export function makeProviderError(
+  code: string,
+  opts: {
+    status?: number;
+    retriable?: boolean;
+    stage?: string;
+    responseBytes?: number;
+  } = {},
+): ProviderError {
+  return makeError(code, { ...opts, code });
+}
+
+export function publicProviderErrorMessage(code: string, status?: number): string {
+  switch (code) {
+    case 'no_route':
+      return 'No route is available for the requested model.';
+    case 'upstream_http_error':
+      if (status === 429) return 'The upstream provider is rate limited.';
+      if (status !== undefined && status >= 400 && status < 500) {
+        return 'The upstream provider rejected the request.';
+      }
+      return 'The upstream provider is unavailable.';
+    case 'upstream_decode_error':
+      return 'The upstream provider returned an invalid response.';
+    case 'upstream_stream_error':
+      return 'The upstream stream failed before completion.';
+    case 'upstream_transport_error':
+    case 'upstream_timeout':
+      return 'The upstream provider could not be reached.';
+    case 'all_hops_exhausted':
+      return 'No configured provider completed the request.';
+    default:
+      return 'The gateway could not complete the request.';
+  }
+}
+
+function stableErrorCode(value: string): string {
+  return /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : 'provider_error';
 }
