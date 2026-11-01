@@ -227,6 +227,49 @@ fn market_rejects_empty_oversized_and_malformed_feeds() {
     assert!(normalize::normalize_feed(b"{", REGISTRY_COMMIT, FETCHED_AT).is_err());
 }
 #[test]
+fn market_site_feed_derives_repository_and_keeps_revision_unknown() {
+    let mut feed = fixture();
+    for item in feed["plugins"].as_array_mut().unwrap() {
+        item.as_object_mut().unwrap().remove("htmlUrl");
+        item.as_object_mut().unwrap().remove("verifiedCommit");
+    }
+    let catalog =
+        normalize::normalize_site_feed(&serde_json::to_vec(&feed).unwrap(), FETCHED_AT).unwrap();
+    assert_eq!(catalog.source_registry, "dsh.market");
+    assert!(catalog.registry_commit.is_empty());
+    assert_eq!(catalog.registry_url, "https://dsh.market/plugins.json");
+    assert!(catalog.collector_url.is_empty());
+    assert_eq!(
+        catalog.entries[0].repo_url,
+        format!("https://github.com/{}", catalog.entries[0].full_name)
+    );
+    assert!(catalog
+        .entries
+        .iter()
+        .all(|entry| entry.source_commit.is_none()));
+    assert!(normalize::validate_catalog(&catalog).is_ok());
+    let mut invalid = catalog;
+    invalid.collector_url = "https://evil.example/collector".into();
+    assert!(normalize::validate_catalog(&invalid).is_err());
+}
+#[test]
+fn market_site_surrogate_repair_matches_browser_json_behavior() {
+    let malformed = br#"{"description":"flag \ud83c truncated"}"#;
+    let repaired = normalize::replace_unpaired_surrogates(malformed);
+    let parsed: Value = serde_json::from_slice(&repaired).unwrap();
+    assert_eq!(parsed["description"], "flag � truncated");
+    let valid_pair = br#"{"description":"\ud83c\uddec"}"#;
+    assert_eq!(
+        normalize::replace_unpaired_surrogates(valid_pair),
+        valid_pair
+    );
+    let escaped_literal = br#"{"description":"\\ud83c"}"#;
+    assert_eq!(
+        normalize::replace_unpaired_surrogates(escaped_literal),
+        escaped_literal
+    );
+}
+#[test]
 fn market_limits_sources_and_never_opens_arbitrary_urls() {
     let catalog = normalize(&fixture()).unwrap();
     assert_eq!(
@@ -239,6 +282,10 @@ fn market_limits_sources_and_never_opens_arbitrary_urls() {
     assert!(fetch_url_allowed(&format!(
         "https://api.github.com/repos/{SOURCE_REGISTRY}/commits/main"
     )));
+    assert!(fetch_url_allowed(SITE_FEED_URL));
+    assert!(!fetch_url_allowed(
+        "https://dsh.market/plugins.json?cache=1"
+    ));
     assert!(fetch_url_allowed(&format!("https://raw.githubusercontent.com/{SOURCE_REGISTRY}/{REGISTRY_COMMIT}/registry/plugins.json")));
     assert!(!fetch_url_allowed(&format!(
         "https://raw.githubusercontent.com/{SOURCE_REGISTRY}/main/registry/plugins.json"
@@ -250,16 +297,14 @@ fn market_limits_sources_and_never_opens_arbitrary_urls() {
 #[test]
 fn market_get_is_read_only_and_bad_cache_preserves_evidence() {
     let root = Test_root::new();
-    let bundled = get_catalog(&root.0).unwrap();
-    assert_eq!(bundled.cache_status, "bundled");
+    assert!(get_catalog(&root.0)
+        .unwrap_err()
+        .to_string()
+        .contains("catalog_unavailable"));
     assert!(!root.0.exists());
     fs::create_dir_all(&root.0).unwrap();
     fs::write(root.0.join(CACHE_FILE), b"broken evidence").unwrap();
-    let fallback = get_catalog(&root.0).unwrap();
-    assert_eq!(
-        fallback.warning.as_deref(),
-        Some("cache_invalid_using_bundled")
-    );
+    assert!(get_catalog(&root.0).is_err());
     assert_eq!(
         fs::read(root.0.join(CACHE_FILE)).unwrap(),
         b"broken evidence"
@@ -289,20 +334,6 @@ fn market_cache_is_validated_before_replace_and_preserved_on_write_failure() {
     assert_eq!(readback.cache_status, "cached");
     assert_eq!(readback.fetched_at, FETCHED_AT);
 }
-#[test]
-fn market_bundled_snapshot_passes_native_validation() {
-    let catalog = normalize::parse_catalog(BUNDLED_CATALOG.as_bytes()).unwrap();
-    assert_eq!(catalog.entry_count, catalog.entries.len());
-    assert!(catalog.entries.len() > 100);
-    assert!(catalog
-        .entries
-        .iter()
-        .all(|entry| !entry.modules.is_empty()));
-    assert!(catalog
-        .entries
-        .iter()
-        .all(|entry| entry.classification_basis == "metadata_rules_v2"));
-}
 #[tokio::test]
 async fn market_concurrent_refresh_fails_before_network_or_writes() {
     let _guard = REFRESH_LOCK
@@ -318,12 +349,19 @@ async fn market_concurrent_refresh_fails_before_network_or_writes() {
     assert!(!root.0.exists());
 }
 #[tokio::test]
-#[ignore = "explicit public GitHub network acceptance; no credentials or plugin execution"]
-async fn market_live_github_refresh_acceptance() {
+#[ignore = "explicit public dsh.market network acceptance; no credentials or plugin execution"]
+async fn market_live_dsh_site_refresh_acceptance() {
     let root = Test_root::new();
     let catalog = refresh_catalog(&root.0).await.unwrap();
     assert_eq!(catalog.cache_status, "refreshed");
-    assert!(catalog.entry_count > 100);
+    assert_eq!(catalog.source_registry, "dsh.market");
+    assert_eq!(catalog.registry_url, SITE_FEED_URL);
+    assert_eq!(catalog.registry_commit, "");
+    assert!(catalog.entry_count > 10_000);
+    assert!(catalog
+        .entries
+        .iter()
+        .any(|entry| entry.source_commit.is_none()));
     let cached = get_catalog(&root.0).unwrap();
     assert_eq!(cached.registry_commit, catalog.registry_commit);
     assert_eq!(cached.entry_count, catalog.entry_count);

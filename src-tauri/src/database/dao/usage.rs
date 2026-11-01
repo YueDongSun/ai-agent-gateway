@@ -224,6 +224,16 @@ impl Database {
         Ok(())
     }
 
+    /// Delete rows older than `before_epoch` (exclusive). Returns the number
+    /// removed. Pruning is a retention sweep, distinct from `delete_usage`
+    /// (one row by id) because the caller cannot know the ids it is dropping.
+    pub fn delete_usage_before(&self, before_epoch: i64) -> Result<usize, AppError> {
+        let conn = lock_conn!(self.conn);
+        let removed =
+            conn.execute("DELETE FROM usage_records WHERE ts < ?1", params![before_epoch])?;
+        Ok(removed)
+    }
+
     /// Count all usage records. Useful for tests + empty-state checks.
     #[allow(dead_code)]
     pub fn count_usage(&self) -> Result<i64, AppError> {

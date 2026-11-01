@@ -1,6 +1,7 @@
 /// Proxy-side types + Tauri command wrappers.
 /// Mirror Rust types from `src-tauri/src/proxy/`.
 import { invoke } from '@tauri-apps/api/core';
+import type { Provider_failure_health } from './provider_failure_health.js';
 
 // ----- Types -----
 
@@ -18,10 +19,17 @@ export interface ProxyProvider {
   /** Per-provider model mapping: display model -> upstream model.
    *  Example: { "claude-sonnet-5": "deepseek-v4-pro" } */
   modelMapping: Record<string, string>;
-  /** Per-provider extra request headers merged into every upstream request.
+/** Per-provider extra request headers merged into every upstream request.
    *  Reserved auth/content headers are never overridden.
    *  Example: { "x-opencode-session": "..." } */
   extraHeaders: Record<string, string>;
+  /** Model auto-discovery opt-out (discovery upgrades this provider). */
+  autoTrackModels: boolean;
+  /** Optional display icon: designed glyph id or literal character.
+   *  Presentation-only; absent on rows saved before the icon fields. */
+  icon?: string | null;
+  /** Optional display tile color for `icon` (hex string). */
+  iconColor?: string | null;
 }
 
 export interface CircuitBreakerConfig {
@@ -52,6 +60,22 @@ export interface ProxyConfig {
 export interface ProxyStatus {
   running: boolean;
   config: ProxyConfig;
+  /** True when the running proxy's routing snapshot no longer matches the
+   *  current database configuration (routes or pool providers were added /
+   *  edited / removed since the last `proxy_start`). False when the proxy
+   *  is not running and when the snapshot is current. */
+  /** True only when a listener/auth change or a failed hot apply remains;
+      ordinary provider/route/supplier edits hot-apply and clear this. */
+  config_changed: boolean;
+  /** Hot-reload view of the live routing snapshot. `lastError` holds a stable
+   *  error code when the most recent reload attempt failed while the previous
+   *  snapshot kept serving. Absent while the proxy is not running. */
+  hot_reload?: {
+    generation: number;
+    routingRevision: number;
+    active: boolean;
+    lastError: string | null;
+  } | null;
 }
 
 export interface CircuitState {
@@ -66,10 +90,17 @@ export interface ProviderHealth {
   id: string;
   enabled: boolean;
   breaker: CircuitState;
+  /** Derived terminal-attempt failure view for this provider. An
+   *  `observed: false` view is unobserved, never a measured zero. */
+  failure: Provider_failure_health;
 }
 
 export interface ProxyHealth {
   status: 'ok';
+  runtime_kind?: 'desktop' | 'node';
+  /** Configured runnable catalog, not individual inference validation. */
+  availableModels?: string[];
+  available_models?: string[];
   providers: ProviderHealth[];
   models: string[];
   lastUsed: string | null;
@@ -114,6 +145,14 @@ export async function deleteProxyProvider(id: string): Promise<void> {
   await invoke('proxy_provider_delete', { id });
 }
 
+/// Proxy-provider ids referenced by a supplier endpoint projection. Supplier
+/// saves own those rows' contents, and the backend refuses direct deletion
+/// (`AAG_SUPPLIER_PROJECTION_IN_USE`), so the providers page hides direct
+/// edit/delete actions for them.
+export async function listSupplierMappedProviders(): Promise<string[]> {
+  return invoke<string[]>('proxy_provider_supplier_mapped');
+}
+
 export async function listRoutes(): Promise<Route[]> {
   return invoke<Route[]>('route_list');
 }
@@ -133,11 +172,9 @@ export async function renameRoute(from: string, to: string): Promise<void> {
 }
 
 /// Review fix: `reorderRouteHops` was the Phase 18 drag-and-drop backend
-/// round-trip. The current route editor uses pointer-based local
-/// reordering (see AppPage `applyHopMove`), so this export has no consumer
-/// in the UI. The underlying `route_reorder_hops` Tauri command is
-/// retained in lib.rs in case other code paths need it later — only the
-/// dead frontend wrapper is removed.
+/// round-trip. The current route editor reorders hops locally (see AppPage
+/// `applyHopMove`), and no `route_reorder_hops` command exists in the
+/// backend — re-adding a wrapper would target a missing command.
 
 /// Get the currently pinned proxy provider (force-pin mode). Returns null if none.
 export async function getPinnedProvider(): Promise<string | null> {
@@ -147,6 +184,23 @@ export async function getPinnedProvider(): Promise<string | null> {
 /// Set (or clear) the pinned proxy provider. Empty string clears (restores normal failover).
 export async function setPinnedProvider(providerId: string): Promise<void> {
   await invoke('proxy_set_pinned_provider', { providerId });
+}
+
+/// Failover-queue spread mode: `order` (configured order — the default),
+/// `rotate` (round-robin the chain's first position), `weight` (smooth
+/// weighted round-robin by each provider's weight), or `usage` (least
+/// recorded token traffic over the last hour first). Only queue-built
+/// chains are spread; explicit routes keep their order in every mode.
+export type RoutingMode = 'order' | 'rotate' | 'weight' | 'usage';
+
+export async function getRoutingMode(): Promise<RoutingMode> {
+  return invoke<RoutingMode>('proxy_get_routing_mode');
+}
+
+/// Persist and hot-apply the spread mode. Invalid values are rejected
+/// backend-side with `routing_mode_invalid`.
+export async function setRoutingMode(mode: RoutingMode): Promise<void> {
+  await invoke('proxy_set_routing_mode', { mode });
 }
 
 /// Read the `/v1/responses` chain-of-thought prompt toggle (true =
@@ -180,6 +234,92 @@ export async function fetchProviderModels(providerId: string): Promise<Array<{ i
   return invoke<Array<{ id: string; owned_by?: string }>>('proxy_fetch_models', { providerId });
 }
 
+// ----- Model auto-discovery -----
+
+export interface ModelHopRewrite {
+  alias: string;
+  oldModel: string;
+  newModel: string;
+}
+
+export interface ModelMappingRewrite {
+  display: string;
+  oldModel: string;
+  newModel: string;
+}
+
+export interface ModelDiscoveryProviderReport {
+  providerId: string;
+  ok: boolean;
+  error?: string;
+  addedModels: string[];
+  hopRewrites: ModelHopRewrite[];
+  mappingRewrites: ModelMappingRewrite[];
+  skippedAmbiguous: string[];
+}
+
+export type ModelDiscoveryTrigger = 'startup' | 'periodic' | 'manual';
+
+export interface ModelDiscoveryReport {
+  ranAt: string;
+  trigger: ModelDiscoveryTrigger;
+  hasChanges: boolean;
+  deduplicated: boolean;
+  providers: ModelDiscoveryProviderReport[];
+}
+
+export interface ModelDiscoveryStatus {
+  report: ModelDiscoveryReport | null;
+  pendingRestart: boolean;
+  intervalHours: number;
+  lastRunEpoch: number;
+}
+
+/// Run model discovery manually: one provider when `providerId` is given,
+/// every eligible provider otherwise. Returns the applied report.
+export async function refreshProviderModels(providerId?: string): Promise<ModelDiscoveryReport> {
+  return invoke<ModelDiscoveryReport>('proxy_refresh_models', { providerId: providerId ?? null });
+}
+
+/// Read the stored discovery status (last report + pending hot-apply flag).
+export async function getDiscoveryStatus(): Promise<ModelDiscoveryStatus> {
+  return invoke<ModelDiscoveryStatus>('model_discovery_status');
+}
+
+/// Toggle model auto-discovery for one pool provider.
+export async function setProviderAutoTrack(providerId: string, enabled: boolean): Promise<void> {
+  await invoke('proxy_set_auto_track', { providerId, enabled });
+}
+
+// ----- Client endpoint (bind host -> dialable target) -----
+
+/// The host a local client must dial for this listen configuration. A
+/// wildcard bind is not a client target: `0.0.0.0`/`::` mean "accept on
+/// every interface", and the `localhost` alias or an unset host both mean
+/// the local loopback. Any other host is a real endpoint the user chose.
+/// Mirrors `ProxyConfig::client_endpoint_host` in
+/// `src-tauri/src/database/dao/proxy_config.rs`, which applies the same
+/// rule when it writes a client's endpoint configuration.
+function client_endpoint_host(host: string): string {
+  switch (host.trim()) {
+    case '':
+    case '0.0.0.0':
+    case 'localhost':
+      return '127.0.0.1';
+    case '::':
+    case '::1':
+      return '[::1]';
+    default:
+      return host.trim();
+  }
+}
+
+/// The endpoint URL to display, copy, and dial for this listen
+/// configuration — never the raw bind host.
+export function proxy_client_url(config: ProxyConfig): string {
+  return `http://${client_endpoint_host(config.host)}:${config.port}`;
+}
+
 // ----- Direct HTTP fetches (call the proxy as a client would) -----
 
 export async function fetchProxyHealth(
@@ -188,7 +328,7 @@ export async function fetchProxyHealth(
 ): Promise<ProxyHealth> {
   const headers: Record<string, string> = {};
   if (config.authToken) headers['authorization'] = `Bearer ${config.authToken}`;
-  const res = await fetch(`http://${config.host}:${config.port}/health`, {
+  const res = await fetch(`${proxy_client_url(config)}/health`, {
     headers,
     signal,
   });

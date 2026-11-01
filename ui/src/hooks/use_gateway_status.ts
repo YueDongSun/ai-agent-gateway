@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchProxyHealth, getProxyStatus } from '../lib/api/proxy.js';
+import { gateway_readiness, type Gateway_readiness } from '../lib/gateway_readiness.js';
 
 const health_timeout_ms = 2500;
 const polling_interval_ms = 5000;
@@ -8,9 +9,11 @@ export type Gateway_status = 'stopped' | 'running' | 'degraded' | 'unknown';
 
 export function use_gateway_status(): {
   gateway_status: Gateway_status;
+  readiness: Gateway_readiness | null;
   refresh_gateway_status: () => Promise<void>;
 } {
   const [gateway_status, set_gateway_status] = useState<Gateway_status>('unknown');
+  const [readiness, set_readiness] = useState<Gateway_readiness | null>(null);
   const request_id_ref = useRef(0);
   const health_controller_ref = useRef<AbortController | null>(null);
 
@@ -25,6 +28,7 @@ export function use_gateway_status(): {
       if (request_id !== request_id_ref.current) return;
       if (typeof status.running !== 'boolean') throw new Error('Invalid gateway status response');
       if (!status.running) {
+        set_readiness(null);
         set_gateway_status('stopped');
         return;
       }
@@ -35,16 +39,17 @@ export function use_gateway_status(): {
       try {
         const health = await fetchProxyHealth(status.config, controller.signal);
         if (request_id !== request_id_ref.current) return;
-        const has_open_breaker = health.providers.some((provider) => provider.breaker?.state === 'open');
-        set_gateway_status(has_open_breaker ? 'degraded' : 'running');
+        const next = gateway_readiness(status, health);
+        set_readiness(next);
+        set_gateway_status(next.reason === 'ready' ? 'running' : 'degraded');
       } catch {
-        if (request_id === request_id_ref.current) set_gateway_status('degraded');
+        if (request_id === request_id_ref.current) { set_readiness(null); set_gateway_status('degraded'); }
       } finally {
         window.clearTimeout(timeout_id);
         if (health_controller_ref.current === controller) health_controller_ref.current = null;
       }
     } catch {
-      if (request_id === request_id_ref.current) set_gateway_status('unknown');
+      if (request_id === request_id_ref.current) { set_readiness(null); set_gateway_status('unknown'); }
     }
   }, []);
 
@@ -60,5 +65,5 @@ export function use_gateway_status(): {
     };
   }, [refresh_gateway_status]);
 
-  return { gateway_status, refresh_gateway_status };
+  return { gateway_status, readiness, refresh_gateway_status };
 }

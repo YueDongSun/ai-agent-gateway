@@ -15,19 +15,32 @@ export const CircuitBreakerConfig = z.object({
 });
 export type CircuitBreakerConfig = z.infer<typeof CircuitBreakerConfig>;
 
-export const ProviderConfig = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  type: ProviderType.default('openai'),
-  apiKey: z.string().default(''),
-  baseURL: z.string().default(''),
-  models: z.array(z.string()).default([]),
-  timeoutMs: z.number().int().min(1000).default(60_000),
-  enabled: z.boolean().default(true),
-  circuitBreaker: CircuitBreakerConfig.default({}),
-  // weight for load balancing among equally-ranked providers
-  weight: z.number().int().min(1).default(1),
-});
+export const ProviderConfig = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    type: ProviderType.default('openai'),
+    apiKey: z.string().default(''),
+    baseURL: z.string().default(''),
+    models: z.array(z.string()).default([]),
+    timeoutMs: z.number().int().min(1000).default(60_000),
+    enabled: z.boolean().default(true),
+    circuitBreaker: CircuitBreakerConfig.default({}),
+    // weight for load balancing among equally-ranked providers
+    weight: z.number().int().min(1).default(1),
+  })
+  .superRefine((provider, ctx) => {
+    // The Node gateway has no Gemini-native provider; serving one through
+    // the OpenAI wire would silently produce malformed requests.
+    if (provider.type === 'gemini') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['type'],
+        message:
+          "provider type 'gemini' is not served by the Node gateway; use the desktop runtime's Gemini-native routing",
+      });
+    }
+  });
 export type ProviderConfig = z.infer<typeof ProviderConfig>;
 
 /* ------------------------------------------------------------------ */

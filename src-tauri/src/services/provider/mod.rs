@@ -1,27 +1,31 @@
-//! Provider service - live config writing per AI coding tool.
+//! Provider service - per-app adapters for live client configuration.
 //!
 //! Mirrors cc-switch's `services/provider/live.rs` `write_live_snapshot`
-//! (`live.rs:998`). Each app writes its config in a different format:
-//! - Claude Code: `~/.claude/settings.json` (JSON)
-//! - Codex: `~/.codex/config.toml` (TOML) + `~/.codex/auth.json` (JSON)
-//! - Others: stubbed for later phases.
+//! (`live.rs:998`). Each client stores configuration in a different shape;
+//! see `README.md` in this directory for the per-app file contracts and the
+//! mirror isolation boundaries (native config roots stay untouched).
 
 pub mod antigravity;
 pub mod claude_code;
+pub(crate) mod claude_desktop;
 pub mod claude_mirror;
 pub mod client_config;
+pub mod cline;
 pub mod codex;
+pub mod config_editor;
 pub mod config_paths;
 pub mod config_writes;
 pub mod copilot;
 pub mod gemini;
+pub mod jsonc_edit;
 pub mod kilo;
 pub mod opencode;
 pub mod pi;
 pub mod switching;
-pub mod vscode_extension;
 #[cfg(test)]
 pub mod test_support;
+pub mod toml_merge;
+pub mod vscode_extension;
 
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -42,6 +46,8 @@ pub enum AppType {
     OpenCode,
     /// Kilo CLI (fork of OpenCode; shares `~/.config/opencode/opencode.json`).
     KiloCli,
+    /// Cline CLI.
+    ClineCli,
     /// Claude Code VS Code extension (`anthropic.claude-code`).
     ClaudeVsCode,
     /// Kilo Code VS Code extension (`kilocode.kilo-code`).
@@ -64,6 +70,7 @@ impl AppType {
             "gemini" => Ok(Self::Gemini),
             "opencode" => Ok(Self::OpenCode),
             "kilo_cli" => Ok(Self::KiloCli),
+            "cline_cli" => Ok(Self::ClineCli),
             "claude_vscode" => Ok(Self::ClaudeVsCode),
             "kilo_vscode" => Ok(Self::KiloVsCode),
             "openclaw" => Ok(Self::OpenClaw),
@@ -88,6 +95,7 @@ impl AppType {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::KiloCli => "kilo_cli",
+            Self::ClineCli => "cline_cli",
             Self::ClaudeVsCode => "claude_vscode",
             Self::KiloVsCode => "kilo_vscode",
             Self::OpenClaw => "openclaw",
@@ -108,6 +116,7 @@ impl AppType {
             Self::Gemini => "Gemini CLI",
             Self::OpenCode => "OpenCode",
             Self::KiloCli => "Kilo CLI",
+            Self::ClineCli => "Cline CLI",
             Self::ClaudeVsCode => "Claude Code (VS Code)",
             Self::KiloVsCode => "Kilo Code (VS Code)",
             Self::OpenClaw => "OpenClaw",
@@ -152,6 +161,7 @@ pub fn write_live_snapshot(
         AppType::Antigravity => antigravity::write_live(provider),
         AppType::OpenCode => opencode::write_live(provider),
         AppType::KiloCli => kilo::write_live(provider),
+        AppType::ClineCli => cline::write_live(provider),
         AppType::ClaudeVsCode => {
             vscode_extension::write_live(vscode_extension::VsCodeApp::ClaudeCode, provider)
         }
@@ -179,6 +189,7 @@ pub fn detect_app(app_type: AppType) -> bool {
         AppType::Antigravity => antigravity::detect(),
         AppType::OpenCode => opencode::detect(),
         AppType::KiloCli => kilo::detect(),
+        AppType::ClineCli => cline::detect(),
         AppType::ClaudeVsCode | AppType::KiloVsCode => vscode_extension::detect(),
         _ => false,
     }
@@ -200,6 +211,7 @@ mod tests {
             ("gemini", AppType::Gemini),
             ("opencode", AppType::OpenCode),
             ("kilo_cli", AppType::KiloCli),
+            ("cline_cli", AppType::ClineCli),
             ("claude_vscode", AppType::ClaudeVsCode),
             ("kilo_vscode", AppType::KiloVsCode),
             ("openclaw", AppType::OpenClaw),

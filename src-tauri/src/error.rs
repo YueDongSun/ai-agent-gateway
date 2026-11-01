@@ -6,6 +6,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("session_client_authority_unavailable")]
+    SessionClientAuthorityUnavailable,
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -83,6 +86,9 @@ impl AppError {
     /// URLs, provider responses, database details, or credentials.
     pub fn external_message(&self) -> String {
         match self {
+            AppError::SessionClientAuthorityUnavailable => {
+                "session_client_authority_unavailable".to_string()
+            }
             AppError::Config(detail) => stable_detail(detail)
                 .unwrap_or("configuration_error")
                 .to_string(),
@@ -127,11 +133,53 @@ mod tests {
             assert_ne!(external, "secret");
         }
     }
+
+    #[test]
+    fn authority_unavailable_has_a_payload_free_stable_ipc_code() {
+        assert_eq!(
+            String::from(AppError::SessionClientAuthorityUnavailable),
+            "session_client_authority_unavailable"
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_ipc_codes_are_exact_and_keep_private_details_redacted() {
+        for code in [
+            "codex_reasoning_effort_unsupported",
+            "codex_reasoning_effort_invalid",
+            "codex_reasoning_levels_invalid",
+            "codex_reasoning_default_invalid",
+        ] {
+            assert_eq!(String::from(AppError::Config(code.into())), code);
+        }
+        for detail in [
+            "codex_reasoning_effort_unsupported_sk_private_value",
+            "codex_reasoning_effort_invalid:https://private.example.invalid?token=secret",
+            "codex_reasoning_levels_invalid private credential",
+            "codex_reasoning_future_private_detail",
+            "https://private.example.invalid?token=secret",
+            "sk-private-value",
+        ] {
+            assert_eq!(
+                String::from(AppError::Config(detail.into())),
+                "configuration_error"
+            );
+        }
+    }
 }
 
 fn stable_detail(value: &str) -> Option<&str> {
     if value.is_empty() || value.len() > 96 {
         return None;
+    }
+    if matches!(
+        value,
+        "codex_reasoning_effort_unsupported"
+            | "codex_reasoning_effort_invalid"
+            | "codex_reasoning_levels_invalid"
+            | "codex_reasoning_default_invalid"
+    ) {
+        return Some(value);
     }
     if ["DSH_", "MCP_", "AAG_"]
         .iter()

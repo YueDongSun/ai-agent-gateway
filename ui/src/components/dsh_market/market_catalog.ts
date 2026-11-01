@@ -63,7 +63,7 @@ export function github_url(value: string | null | undefined): string | null {
   } catch { return null; }
 }
 export function registry_source_url(catalog: Market_catalog): string | null {
-  return github_url(catalog.registry_url);
+  return catalog.registry_url === 'https://dsh.market/plugins.json' ? catalog.registry_url : github_url(catalog.registry_url);
 }
 export function localized_date(value: string | null | undefined, locale: Market_locale): string | null {
   if (!value) return null;
@@ -74,17 +74,34 @@ export function localized_date(value: string | null | undefined, locale: Market_
 export function format_count(value: number, locale: Market_locale): string {
   return new Intl.NumberFormat(locale === 'zh' ? 'zh-CN' : 'en-US').format(value);
 }
-export function filter_entries(entries: Market_entry[], query: string, category: string, use_case: string, module: string = 'all'): Market_entry[] {
+/** Precomputed search text plus parsed updated_at timestamp for one catalog
+ *  entry. Built once per catalog load so keystroke filtering and the 'recent'
+ *  sort never re-join/re-lowercase (or re-parse) the full entry text. */
+export interface Market_entry_haystack {
+  hay: string;
+  ts: number;
+}
+/** Lowercase joined search text for one entry (name, descriptions, author,
+ *  package, and every category/use-case/module label in both locales). */
+export function entry_haystack(entry: Market_entry): string {
+  return [entry.name, entry.full_name, entry.description, entry.description_en, entry.description_zh, entry.package_name, entry.author,
+    ...entry.categories.map((id) => `${category_label(id, 'en')} ${category_label(id, 'zh')}`),
+    ...entry.use_cases.map((id) => `${use_case_label(id, 'en')} ${use_case_label(id, 'zh')}`),
+    ...(entry.modules ?? []).map((id) => `${module_label(id, 'en')} ${module_label(id, 'zh')}`)].join(' ').toLocaleLowerCase();
+}
+export function build_entry_haystacks(entries: Market_entry[]): Map<string, Market_entry_haystack> {
+  const haystacks = new Map<string, Market_entry_haystack>();
+  for (const entry of entries) haystacks.set(entry.id, { hay: entry_haystack(entry), ts: Date.parse(entry.updated_at ?? '') || 0 });
+  return haystacks;
+}
+export function filter_entries(entries: Market_entry[], haystacks: Map<string, Market_entry_haystack>, query: string, category: string, use_case: string, module: string = 'all'): Market_entry[] {
   const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   return entries.filter((entry) => {
     if (category !== 'all' && !entry.categories.includes(category)) return false;
     if (use_case !== 'all' && !entry.use_cases.includes(use_case)) return false;
     if (module !== 'all' && !(entry.modules ?? []).includes(module)) return false;
     if (!words.length) return true;
-    const text = [entry.name, entry.full_name, entry.description, entry.description_en, entry.description_zh, entry.package_name, entry.author,
-      ...entry.categories.map((id) => `${category_label(id, 'en')} ${category_label(id, 'zh')}`),
-      ...entry.use_cases.map((id) => `${use_case_label(id, 'en')} ${use_case_label(id, 'zh')}`),
-      ...(entry.modules ?? []).map((id) => `${module_label(id, 'en')} ${module_label(id, 'zh')}`)].join(' ').toLocaleLowerCase();
+    const text = haystacks.get(entry.id)?.hay ?? entry_haystack(entry);
     return words.every((word) => text.includes(word));
   });
 }

@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     net::TcpListener,
     path::Path,
-    sync::atomic::Ordering,
+    sync::{atomic::Ordering, Arc},
     thread,
     time::{Duration, Instant},
 };
@@ -190,7 +190,19 @@ impl Dsh_service {
             let mut effective_settings =
                 config::read_json(&settings_path)?.unwrap_or_else(|| serde_json::json!({}));
             let binding_path = self.root.join("aag_model_binding.json");
-            let previous_binding = config::read_json(&binding_path)?;
+            // The binding is an AAG-internal sidecar, so an absent target with
+            // a retained recovery copy unambiguously means write_atomic died
+            // between its two renames; recovering it here keeps that crash
+            // from wedging later starts with upstream_key_conflict.
+            let recorded_binding = config::read_json_recoverable(&binding_path)?;
+            // An interrupted previous start can leave the sidecar marker and
+            // settings.json describing different generations. resolve_previous
+            // promotes a pending marker only when settings still carries exactly
+            // the value that interrupted start wrote, so a crash between the
+            // marker and settings writes can never wedge later starts with
+            // upstream_key_conflict.
+            let previous_binding =
+                super::model_settings::resolve_previous(&recorded_binding, &effective_settings);
             let next_binding = super::model_settings::apply(
                 &mut effective_settings,
                 &llm_settings,
@@ -203,11 +215,25 @@ impl Dsh_service {
                     "ui-theme".into(),
                     serde_json::json!({"preference":settings.theme}),
                 );
+            // Two-phase sidecar marker: publish the intent, commit settings,
+            // then seal. A crash in either window is recovered on the next
+            // start by resolve_previous.
+            let committed_marker = super::model_settings::committed_binding(&recorded_binding);
+            config::write_atomic(
+                &binding_path,
+                &serde_json::to_vec_pretty(&super::model_settings::pending_binding(
+                    &committed_marker,
+                    &next_binding,
+                ))?,
+            )?;
             config::write_atomic(
                 &settings_path,
                 &serde_json::to_vec_pretty(&effective_settings)?,
             )?;
-            config::write_atomic(&binding_path, &serde_json::to_vec_pretty(&next_binding)?)?;
+            config::write_atomic(
+                &binding_path,
+                &serde_json::to_vec_pretty(&super::model_settings::commit_binding(&next_binding))?,
+            )?;
             let overlay_path = self.root.join("aag_runtime.patch.json");
             config::write_atomic(
                 &overlay_path,
@@ -392,27 +418,53 @@ impl Dsh_service {
         self.snapshot()
     }
 
-    /// App-exit hook: request cancellation, allow the owned package worker to
-    /// reap descendants and persist its receipt, then stop the owned runtime.
+    /// App-exit hook: request cancellation and return immediately. The
+    /// bounded wait for the package worker plus the runtime stop run on a
+    /// detached thread — the caller is the window-procedure event loop, and
+    /// a synchronous 5 s busy-wait there would block Windows' shutdown
+    /// grace period (WM_ENDSESSION returns "the app may now be killed").
+    ///
+    /// The never-started case takes the idle fast path and costs nothing.
+    /// If the process dies before the worker finishes, the Windows job
+    /// object's kill-on-close reaps the child, so the detach is safe.
     pub fn shutdown(&self) -> Result<(), AppError> {
-        self.cancel();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let busy = self
+        {
+            // Idle fast path: nothing started, no job in flight.
+            let state = self
                 .state
                 .lock()
-                .map_err(|_| failure("state_lock_failed"))?
-                .job
-                .is_some();
-            if !busy {
-                self.stop()?;
+                .map_err(|_| failure("state_lock_failed"))?;
+            if state.job.is_none() && state.child.is_none() && state.runtime.phase == "stopped" {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
-                return Err(failure("shutdown_timed_out"));
-            }
-            thread::sleep(Duration::from_millis(25));
         }
+        self.cancel();
+        let service = Self {
+            root: Arc::clone(&self.root),
+            state: Arc::clone(&self.state),
+        };
+        thread::Builder::new()
+            .name("aag_dsh_shutdown".into())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let busy = match service.state.lock() {
+                        Ok(state) => state.job.is_some(),
+                        Err(_) => break,
+                    };
+                    if !busy {
+                        let _ = service.stop();
+                        return;
+                    }
+                    if Instant::now() >= deadline {
+                        log::warn!("dsh: shutdown timed out, relying on job teardown");
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+            })
+            .map_err(|_| failure("dsh_shutdown_spawn_failed"))?;
+        Ok(())
     }
 
     pub fn stop(&self) -> Result<Dsh_snapshot, AppError> {

@@ -1,4 +1,4 @@
-//! Read-only marketplace catalog and explicit bounded GitHub refresh.
+//! Read-only marketplace catalog and explicit bounded live feed refresh.
 //! Registry metadata is not a security audit or authority to install a package.
 #![allow(non_camel_case_types)]
 
@@ -32,12 +32,12 @@ pub struct Market_privacy_scrub {
 }
 
 pub const SOURCE_REGISTRY: &str = "YELEBAI/dsh-plugin-marketplace";
-pub const MAX_FEED_BYTES: usize = 24 * 1024 * 1024;
-pub const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_FEED_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CATALOG_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 20_000;
 const REFRESH_TIMEOUT_SECS: u64 = 30;
 const CACHE_FILE: &str = "catalog.json";
-const BUNDLED_CATALOG: &str = include_str!("../../../../shared/dsh_market_catalog.json");
+pub const SITE_FEED_URL: &str = "https://dsh.market/plugins.json";
 static REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,20 +108,12 @@ pub fn get_catalog(root: &Path) -> Result<Market_catalog, AppError> {
     })();
     match read_result {
         Ok(Some(catalog)) => Ok(catalog),
-        result => {
-            let mut catalog = normalize::parse_catalog(BUNDLED_CATALOG.as_bytes())?;
-            catalog.cache_status = "bundled".into();
-            catalog.warning = if result.is_err() {
-                Some("cache_invalid_using_bundled".into())
-            } else {
-                None
-            };
-            Ok(catalog)
-        }
+        Ok(None) => Err(failure("catalog_unavailable")),
+        Err(error) => Err(error),
     }
 }
 
-/// Two credential-free, allowlisted GETs. Failure leaves the existing cache intact.
+/// One credential-free, allowlisted GET. Failure leaves the existing cache intact.
 /// The caller should retain its current view and display this command's error.
 pub async fn refresh_catalog(root: &Path) -> Result<Market_catalog, AppError> {
     let _guard = REFRESH_LOCK
@@ -136,33 +128,25 @@ pub async fn refresh_catalog(root: &Path) -> Result<Market_catalog, AppError> {
         .build()
         .map_err(|_| failure("http_client_failed"))?;
     let mut catalog = tokio::time::timeout(Duration::from_secs(REFRESH_TIMEOUT_SECS), async {
-        let commit_url = format!("https://api.github.com/repos/{SOURCE_REGISTRY}/commits/main");
-        let commit_data = fetch_bounded(&client, &commit_url, 2 * 1024 * 1024).await?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&commit_data).map_err(|_| failure("invalid_commit_response"))?;
-        let commit = value
-            .get("sha")
-            .and_then(|value| value.as_str())
-            .filter(|value| normalize::valid_sha(value))
-            .ok_or_else(|| failure("invalid_commit_response"))?;
-        let feed_url = format!(
-            "https://raw.githubusercontent.com/{SOURCE_REGISTRY}/{commit}/registry/plugins.json"
-        );
-        let feed = fetch_bounded(&client, &feed_url, MAX_FEED_BYTES).await?;
-        normalize::normalize_feed(
+        let feed = fetch_bounded(&client, SITE_FEED_URL, MAX_FEED_BYTES).await?;
+        normalize::normalize_site_feed(
             &feed,
-            commit,
             &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         )
     })
     .await
     .map_err(|_| failure("refresh_timeout"))??;
     catalog.cache_status = "refreshed".into();
-    replace_cache(root, &catalog)?;
+    if replace_cache(root, &catalog).is_err() {
+        catalog.warning = Some("cache_update_failed_live_data_available".into());
+    }
     Ok(catalog)
 }
 
 fn fetch_url_allowed(value: &str) -> bool {
+    if value == SITE_FEED_URL {
+        return true;
+    }
     if value == format!("https://api.github.com/repos/{SOURCE_REGISTRY}/commits/main") {
         return true;
     }
@@ -185,6 +169,7 @@ async fn fetch_bounded(
     let response = client
         .get(target)
         .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
         .map_err(|_| failure("registry_unreachable"))?;

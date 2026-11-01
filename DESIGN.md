@@ -55,8 +55,9 @@ consumer resolves it identically.
 4. Advance only on network errors, HTTP 429, or HTTP 5xx responses.
 5. Propagate 4xx errors without failover.
 
-The Rust router snapshots providers and routes when `proxy_start` runs. A
-restart is required after persistent route or provider changes. Streaming
+The Rust router hot-applies provider, route, supplier, model, pin, and catalog
+changes to new requests; in-flight requests keep their admitted snapshot.
+Listener host/port and gateway-auth changes still require a restart. Streaming
 failover probes the first chunk before committing and cannot transparently
 restart a stream after commitment. Providers whose upstream targets AAG's own
 listen address are skipped in every provider-build path (self-loop guard).

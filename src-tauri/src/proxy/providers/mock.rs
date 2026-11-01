@@ -109,6 +109,8 @@ impl Provider for MockProvider {
                 extra: Default::default(),
             }),
             source_anthropic_response: None,
+            source_gemini_response: None,
+            source_responses_response: None,
             extra: Default::default(),
         })
     }

@@ -344,10 +344,10 @@ impl Scanner {
         };
         let (package_name, supported_version) = package_identity(kind);
         if manifest.get("name").and_then(Value::as_str) != Some(package_name) {
-            if configured.is_some() {
+            if let Some(configured_path) = configured {
                 self.candidate(
                     kind,
-                    configured.unwrap(),
+                    configured_path,
                     source,
                     None,
                     "rejected",
@@ -377,7 +377,7 @@ impl Scanner {
             Some("unsupported_runtime_version")
         } else if entry.is_none() {
             Some("runtime_bin_invalid")
-        } else if !entry.as_ref().unwrap().is_file() {
+        } else if !entry.as_ref().is_some_and(|path| path.is_file()) {
             Some("runtime_file_missing")
         } else if !entry
             .as_ref()

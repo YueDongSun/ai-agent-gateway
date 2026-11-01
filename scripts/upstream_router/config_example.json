@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "listener": {"host": "127.0.0.1", "port": 4000},
+  "master_key_env": "ROUTER_MASTER_KEY",
+  "models": [
+    {"alias": "cc_auto", "model": "openai/replace_me_primary", "model_info_id": "cc_auto_primary", "api_base": "https://provider-a.example.test/v1", "api_key_env": "PROVIDER_A_KEY", "max_input_tokens": 500000},
+    {"alias": "cc_open_code_go", "model": "openai/replace_me_open_code_go", "api_base": "https://provider-b.example.test/v1", "api_key_env": "PROVIDER_B_KEY", "max_input_tokens": 500000},
+    {"alias": "cc_deepseek", "model": "openai/replace_me_deepseek", "api_base": "https://provider-c.example.test/v1", "api_key_env": "PROVIDER_C_KEY", "max_input_tokens": 128000},
+    {"alias": "cc_minimax", "model": "openai/replace_me_minimax", "api_base": "https://provider-d.example.test/v1", "api_key_env": "PROVIDER_D_KEY", "max_input_tokens": 200000},
+    {"alias": "cc_mimo", "model": "openai/replace_me_mimo", "api_base": "https://provider-e.example.test/v1", "api_key_env": "PROVIDER_E_KEY", "max_input_tokens": 500000},
+    {"alias": "cc_glm", "model": "openai/replace_me_glm", "api_base": "https://provider-f.example.test/v1", "api_key_env": "PROVIDER_F_KEY", "max_input_tokens": 200000}
+  ],
+  "fallbacks": {
+    "cc_auto": ["cc_deepseek", "cc_minimax", "cc_mimo", "cc_glm"],
+    "cc_open_code_go": ["cc_deepseek", "cc_minimax", "cc_mimo", "cc_glm"],
+    "cc_deepseek": ["cc_minimax", "cc_mimo", "cc_open_code_go", "cc_glm"],
+    "cc_minimax": ["cc_deepseek", "cc_mimo", "cc_open_code_go", "cc_glm"],
+    "cc_mimo": ["cc_deepseek", "cc_minimax", "cc_open_code_go", "cc_glm"],
+    "cc_glm": ["cc_deepseek", "cc_minimax", "cc_mimo", "cc_open_code_go"]
+  },
+  "context_window_fallbacks": {
+    "cc_auto": ["cc_mimo", "cc_open_code_go"],
+    "cc_deepseek": ["cc_minimax", "cc_mimo", "cc_open_code_go"],
+    "cc_minimax": ["cc_mimo", "cc_open_code_go"],
+    "cc_glm": ["cc_mimo", "cc_open_code_go"]
+  }
+}

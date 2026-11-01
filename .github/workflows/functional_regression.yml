@@ -1,0 +1,214 @@
+name: functional_regression
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'ui/**'
+      - 'src-tauri/**'
+      - 'shared/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - '.github/workflows/functional_regression.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'ui/**'
+      - 'src-tauri/**'
+      - 'shared/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - '.github/workflows/functional_regression.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: functional_regression_${{ github.workflow }}_${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed_surfaces:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      node: ${{ steps.changes.outputs.node }}
+      ui: ${{ steps.changes.outputs.ui }}
+      rust: ${{ steps.changes.outputs.rust }}
+    steps:
+      - name: checkout_reviewed_tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: classify_changed_surfaces
+        id: changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as event_file:
+              event = json.load(event_file)
+          base = (event.get('pull_request') or {}).get('base', {}).get('sha') or event.get('before', '')
+          valid_base = bool(re.fullmatch(r'[0-9a-f]{40}', base)) and set(base) != {'0'}
+          if valid_base:
+              valid_base = subprocess.run(['git', 'cat-file', '-e', base + '^{commit}'],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+          args = ['git', 'diff', '--name-only', '-z', base, 'HEAD'] if valid_base else ['git', 'ls-files', '-z']
+          paths = subprocess.check_output(args).decode('utf-8').split('\0')
+          common_files = {'package.json', 'package-lock.json',
+                          '.github/workflows/functional_regression.yml'}
+          common = any(path in common_files or path.startswith('shared/') for path in paths)
+          node = common or any(path.startswith(('src/', 'tests/', 'ui/', 'scripts/')) or path in {
+              'tsconfig.json', 'vitest.config.ts',
+          } for path in paths)
+          ui = common or any(path.startswith(('ui/', 'scripts/ui_smoke/')) or path in {
+              'scripts/smoke-demo.mjs', 'scripts/ui_build_config.mjs', 'scripts/ui_build_config.test.mjs',
+              'scripts/desktop_environment.mjs', 'scripts/tauri_dev_config.mjs',
+          } for path in paths)
+          rust = common or any(path.startswith(('src-tauri/', 'ui/', 'scripts/verification/')) or path ==
+                               'scripts/desktop_environment.mjs' for path in paths)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              for name, selected in [('node', node), ('ui', ui), ('rust', rust)]:
+                  output.write(f'{name}={str(selected).lower()}\n')
+                  print(f'{name}: {str(selected).lower()}')
+          PY
+
+  node_regression:
+    needs: changed_surfaces
+    if: needs.changed_surfaces.outputs.node == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      AAG_TEST_CCSWITCH_DB: ''
+      AAG_MODEL_DISCOVERY_PROBE: ''
+      AAG_LIVE_CANARY_MODEL: ''
+    steps:
+      - name: checkout_reviewed_tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: setup_node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+      - name: prepare_isolated_state
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/aag_functional_node/config" "$RUNNER_TEMP/aag_functional_node/home"
+          printf 'AAG_CONFIG_DIR=%s\nAAG_HOME_DIR=%s\n' "$RUNNER_TEMP/aag_functional_node/config" "$RUNNER_TEMP/aag_functional_node/home" >> "$GITHUB_ENV"
+      - name: install_locked_dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix ui --ignore-scripts
+      - name: typecheck_node
+        run: npm run typecheck
+      - name: test_node_and_ui_domain_contracts
+        run: npm test
+      - name: test_desktop_runner
+        run: npm run test:desktop_runner
+      - name: test_rust_acceptance_runner
+        run: npm run test:rust_acceptance
+      - name: test_browser_runner
+        run: npm run test:ui_smoke_runner
+
+  ui_regression:
+    needs: changed_surfaces
+    if: needs.changed_surfaces.outputs.ui == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      AAG_TEST_CCSWITCH_DB: ''
+      AAG_MODEL_DISCOVERY_PROBE: ''
+      AAG_LIVE_CANARY_MODEL: ''
+    steps:
+      - name: checkout_reviewed_tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: setup_node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+      - name: prepare_isolated_state
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/aag_functional_ui/config" "$RUNNER_TEMP/aag_functional_ui/home"
+          printf 'AAG_CONFIG_DIR=%s\nAAG_HOME_DIR=%s\n' "$RUNNER_TEMP/aag_functional_ui/config" "$RUNNER_TEMP/aag_functional_ui/home" >> "$GITHUB_ENV"
+      - name: install_locked_dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix ui --ignore-scripts
+      - name: typecheck_ui
+        run: npm run typecheck --prefix ui
+      - name: build_native_frontend
+        run: npm run ui:build
+      # These own browser/server resources and must remain sequential.
+      - name: smoke_source_ui
+        run: npm run ui:smoke
+      - name: build_and_smoke_demo_ui
+        run: npm run ui:smoke_demo
+
+  ordinary_rust:
+    needs: changed_surfaces
+    if: needs.changed_surfaces.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: checkout_reviewed_tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: install_linux_dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - name: setup_node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+      - name: install_rust_stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-09-01
+      - name: restore_rust_cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: ./src-tauri -> target
+      - name: install_locked_dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix ui --ignore-scripts
+      - name: build_native_frontend_prerequisite
+        run: npm run ui:build
+      # The ordinary runner deliberately uses --offline; populate cold caches
+      # from the tracked lock before invoking it, without changing that policy.
+      - name: fetch_locked_rust_dependencies
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu
+      - name: check_rust
+        working-directory: src-tauri
+        run: cargo check --locked --offline
+      - name: compile_ordinary_test_binary
+        working-directory: src-tauri
+        timeout-minutes: 25
+        run: cargo test --locked --offline --lib --no-run
+      - name: test_ordinary_rust_with_isolated_state
+        run: npm run verify:rust -- --profile ordinary --run

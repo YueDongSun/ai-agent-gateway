@@ -1,6 +1,5 @@
 /** Browser-demo evidence only; backend file-safety is covered by Rust tests. */
-export async function run_mcp_checks({ cdp, check_in_page, check }) {
-  await cdp.eval_value(`(() => {
+export function install_mcp_smoke_helpers() {
     if (window.__aagDemoIsDemo !== true) throw new Error('MCP smoke requires synthetic IPC');
     const bridge = window.__TAURI_INTERNALS__;
     const original = bridge.invoke;
@@ -13,46 +12,94 @@ export async function run_mcp_checks({ cdp, check_in_page, check }) {
       return command === 'mcp_preview_sync' && override.expired_preview ? { ...result, expires_at: new Date(Date.now() - 1000).toISOString() } : result;
     };
     const element = (id) => document.querySelector('[data-testid="' + id + '"]');
+    const pending_waits = new Set();
+    // The CDP client owns a host-side deadline. DOM observation keeps these
+    // waits responsive when Chromium suspends timers in a background page.
     const wait_for = async (predicate) => {
-      const deadline = Date.now() + 4000;
-      while (Date.now() < deadline) {
-        const value = await predicate(); if (value) return value;
-        await new Promise((resolve) => setTimeout(resolve, 40));
-      }
-      throw new Error('MCP UI condition timed out');
+      const initial = await predicate();
+      if (initial) return initial;
+      return new Promise((resolve_wait, reject_wait) => {
+        let settled = false;
+        let checking = false;
+        let check_again = false;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          observer.disconnect();
+          pending_waits.delete(cancel);
+          if (error) reject_wait(error); else resolve_wait(value);
+        };
+        const cancel = () => finish(new Error('MCP smoke restored before condition settled'));
+        const inspect = async () => {
+          if (settled) return;
+          if (checking) { check_again = true; return; }
+          checking = true;
+          try {
+            do {
+              check_again = false;
+              const value = await predicate();
+              if (value) finish(null, value);
+            } while (!settled && check_again);
+          } catch (error) { finish(error); }
+          finally { checking = false; }
+        };
+        const observer = new MutationObserver(() => { void inspect(); });
+        observer.observe(document.documentElement, {
+          subtree: true, childList: true, attributes: true, characterData: true,
+        });
+        pending_waits.add(cancel);
+        // Recheck after subscribing so a mutation during the initial await
+        // cannot be missed.
+        void inspect();
+      });
     };
     const click = async (id) => {
       const target = await wait_for(() => { const item = element(id); return item && !item.disabled ? item : null; });
-      target.focus(); target.click(); await new Promise((resolve) => setTimeout(resolve, 70));
+      target.focus();
+      target.click();
+      // Page timers can be delayed far beyond their requested duration during
+      // a full smoke run. Let the event finish; checks wait for their UI state.
+      await Promise.resolve();
     };
     const input = async (id, value) => {
       const target = element(id);
       const prototype = target instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(prototype, 'value').set.call(target, value);
       target.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 70));
+      await Promise.resolve();
     };
     window.__aag_mcp_smoke = { element, wait_for, click, input, calls, override,
       invoke: (command, args) => bridge.invoke(command, args),
       count: (command) => calls.filter((call) => call.command === command).length,
-      restore: () => { bridge.invoke = original; } };
+      restore: () => {
+        for (const cancel of [...pending_waits]) cancel();
+        bridge.invoke = original;
+      } };
     return true;
-  })()`);
+}
+
+export async function run_mcp_checks({ cdp, check_in_page, check }) {
+  await cdp.eval_value('(' + install_mcp_smoke_helpers.toString() + ')()');
   try {
     await check_in_page(cdp, check, 'MCP mount and refresh are read-only with English empty state', async () => {
       const api = window.__aag_mcp_smoke;
       await api.click('mcp_nav'); await api.wait_for(() => api.element('mcp_add') && !api.element('mcp_add').disabled);
       await api.click('mcp_refresh');
+      await api.wait_for(() => api.element('mcp_page')?.textContent.includes('Your tools start here'));
       const read_only = api.calls.every((call) => call.command === 'mcp_list_servers');
       return { ok: read_only && api.element('mcp_page').textContent.includes('Your tools start here'), detail: 'read-only=' + read_only };
     });
     await check_in_page(cdp, check, 'MCP editor rejects invalid JSON then saves a masked definition without a client write', async () => {
       const api = window.__aag_mcp_smoke;
-      await api.click('mcp_add'); await api.input('mcp_id', 'smoke_mcp'); await api.input('mcp_name', 'Automation fixture');
-      await api.input('mcp_config', '{broken'); await api.click('mcp_save');
+      await api.click('mcp_add'); await api.wait_for(() => api.element('mcp_id'));
+      await api.input('mcp_id', 'smoke_mcp'); await api.input('mcp_name', 'Automation fixture');
+      await api.input('mcp_config', '{broken');
+      await api.click('mcp_save');
+      await api.wait_for(() => api.element('mcp_editor_error'));
       if (!api.element('mcp_editor_error') || api.count('mcp_save_server') !== 0) return 'invalid-json-crossed-ipc';
       await api.input('mcp_config', JSON.stringify({ command: 'node', args: ['/synthetic/server.mjs'], env: { TEST_TOKEN: 'synthetic_mcp_secret' } }));
-      await api.click('mcp_save'); await api.wait_for(() => api.element('mcp_server_smoke_mcp'));
+      await api.click('mcp_save');
+      await api.wait_for(() => api.element('mcp_server_smoke_mcp'));
       const summary = (await api.invoke('mcp_list_servers'))[0];
       return { ok: !api.element('mcp_editor') && !document.body.innerText.includes('synthetic_mcp_secret') && !JSON.stringify(summary).includes('synthetic_mcp_secret') && api.count('mcp_apply_sync') === 0,
         detail: 'definition-saved=true secret-not-rendered=true client-writes=' + api.count('mcp_apply_sync') };
@@ -170,11 +217,11 @@ export async function run_mcp_checks({ cdp, check_in_page, check }) {
       return { ok: rejected && (await api.invoke('mcp_list_servers')).length === 0, detail: 'deleted-row-remains-absent=' + rejected };
     });
   } finally {
-    await cdp.eval_value(`(() => {
+    await cdp.eval_value(`(async () => {
       window.__aagDemoSetError(null);
       window.__aag_mcp_smoke?.override.release_save?.();
       window.__aag_mcp_smoke?.restore(); delete window.__aag_mcp_smoke;
-      document.querySelector('.app-switcher button')?.click();
+      await window.__aag_open_client_management('claude_code');
       return true;
     })()`);
     await cdp.eval_value(`(async () => { for (let i = 0; i < 40; i++) { if (document.querySelector('[data-testid="gateway-start"]')) return true; await new Promise(r => setTimeout(r, 50)); } throw new Error('Claude page not restored after MCP checks'); })()`);

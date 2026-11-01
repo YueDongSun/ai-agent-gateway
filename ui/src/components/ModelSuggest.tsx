@@ -33,6 +33,8 @@ interface ModelSuggestProps {
   onFetch?: () => void;
   /** When true the ⤓ button shows a spinner instead. */
   fetching?: boolean;
+  /** Locks typing and picker actions during the owning editor operation. */
+  disabled?: boolean;
 }
 
 export function ModelSuggest({
@@ -43,6 +45,7 @@ export function ModelSuggest({
   ariaLabel,
   onFetch,
   fetching,
+  disabled = false,
 }: ModelSuggestProps) {
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -63,6 +66,7 @@ export function ModelSuggest({
 
   // ---- open / close helpers ----
   const openMenu = () => {
+    if (disabled) return;
     const el = wrapRef.current?.querySelector('input');
     if (el) setRect(el.getBoundingClientRect());
     setOpen(true);
@@ -75,10 +79,13 @@ export function ModelSuggest({
   };
 
   const accept = (next: string) => {
+    if (disabled) return;
     onChange(next);
     closeMenu();
     // NOTE: no inputRef.focus() — that was the bug (focus→onFocus→setOpen race).
   };
+
+  useEffect(() => { if (disabled) closeMenu(); }, [disabled]);
 
   // ---- outside click (checks BOTH wrapper and portal) ----
   useEffect(() => {
@@ -112,6 +119,7 @@ export function ModelSuggest({
 
   // ---- keyboard ----
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (disabled) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (!open) openMenu();
@@ -177,6 +185,7 @@ export function ModelSuggest({
       <input
         className="input"
         type="text"
+        disabled={disabled}
         value={value}
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder}
@@ -196,15 +205,16 @@ export function ModelSuggest({
           type="button"
           className="model-suggest-toggle"
           tabIndex={-1}
-          disabled={fetching}
+          disabled={disabled || fetching}
           title={fetching ? '…' : '⤓ fetch upstream models'}
-          onMouseDown={(e) => { e.preventDefault(); onFetch(); }}
+          onMouseDown={(e) => { e.preventDefault(); if (!disabled) onFetch(); }}
         >
           {fetching ? '…' : '⤓'}
         </button>
       )}
       <button
         type="button"
+        disabled={disabled}
         className="model-suggest-toggle"
         tabIndex={-1}
         aria-hidden="true"

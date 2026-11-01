@@ -124,17 +124,19 @@ export function validate_icns(bytes, file_name = 'icon.icns') {
 
 export function validate_desktop_versions({ tauri_config, ui_package, cargo_toml }) {
   const errors = [];
-  const desktop_version = tauri_config.version;
+  const desktop_version = tauri_config?.version;
   if (typeof desktop_version !== 'string' || desktop_version.length === 0) {
     return ['src-tauri/tauri.conf.json: missing desktop version'];
   }
-  if (ui_package.version !== desktop_version) {
+  if (ui_package && ui_package.version !== desktop_version) {
     errors.push(`ui/package.json: version ${ui_package.version} does not match desktop version ${desktop_version}`);
   }
-  const package_section = cargo_toml.split(/\r?\n(?=\[)/).find((section) => section.startsWith('[package]')) ?? '';
-  const cargo_version = package_section.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1];
-  if (cargo_version !== desktop_version) {
-    errors.push(`src-tauri/Cargo.toml: version ${cargo_version ?? 'missing'} does not match desktop version ${desktop_version}`);
+  if (typeof cargo_toml === 'string') {
+    const package_section = cargo_toml.split(/\r?\n(?=\[)/).find((section) => section.startsWith('[package]')) ?? '';
+    const cargo_version = package_section.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1];
+    if (cargo_version !== desktop_version) {
+      errors.push(`src-tauri/Cargo.toml: version ${cargo_version ?? 'missing'} does not match desktop version ${desktop_version}`);
+    }
   }
   return errors;
 }
@@ -146,24 +148,50 @@ export function validate_native_frontend_dist(tauri_config) {
   return [];
 }
 
+async function read_text_file(repository_root, relative_path) {
+  try {
+    return { content: await readFile(path.join(repository_root, relative_path), 'utf8'), errors: [] };
+  } catch (error) {
+    const code = typeof error?.code === 'string' ? error.code : 'unknown';
+    return { content: null, errors: [`${relative_path}: unable to read (${code})`] };
+  }
+}
+
+async function read_json_manifest(repository_root, relative_path) {
+  const { content, errors } = await read_text_file(repository_root, relative_path);
+  if (errors.length > 0) return { value: null, errors };
+
+  let value;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return { value: null, errors: [`${relative_path}: unable to parse (invalid_json)`] };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { value: null, errors: [`${relative_path}: invalid manifest (expected object)`] };
+  }
+  return { value, errors: [] };
+}
+
 export async function run_release_preflight(repository_root) {
-  const tauri_config_path = path.join(repository_root, 'src-tauri', 'tauri.conf.json');
-  const ui_package_path = path.join(repository_root, 'ui', 'package.json');
-  const cargo_path = path.join(repository_root, 'src-tauri', 'Cargo.toml');
-  const [tauri_config_text, ui_package_text, cargo_toml] = await Promise.all([
-    readFile(tauri_config_path, 'utf8'),
-    readFile(ui_package_path, 'utf8'),
-    readFile(cargo_path, 'utf8'),
+  const [tauri_config_result, ui_package_result, cargo_result] = await Promise.all([
+    read_json_manifest(repository_root, 'src-tauri/tauri.conf.json'),
+    read_json_manifest(repository_root, 'ui/package.json'),
+    read_text_file(repository_root, 'src-tauri/Cargo.toml'),
   ]);
-  const tauri_config = JSON.parse(tauri_config_text);
   const errors = [
-    ...validate_desktop_versions({
-      tauri_config,
-      ui_package: JSON.parse(ui_package_text),
-      cargo_toml,
-    }),
-    ...validate_native_frontend_dist(tauri_config),
+    ...tauri_config_result.errors,
+    ...ui_package_result.errors,
+    ...cargo_result.errors,
   ];
+  if (tauri_config_result.value) {
+    errors.push(...validate_desktop_versions({
+      tauri_config: tauri_config_result.value,
+      ui_package: ui_package_result.value,
+      cargo_toml: cargo_result.content,
+    }));
+    errors.push(...validate_native_frontend_dist(tauri_config_result.value));
+  }
   const icons_directory = path.join(repository_root, 'src-tauri', 'icons');
   for (const [file_name, expected_size] of Object.entries(required_png_files)) {
     try {

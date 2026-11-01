@@ -7,6 +7,10 @@ import { canonical_temporary_directory, inspect_desktop_environment } from '../d
 
 const command_timeout_ms = 15 * 60 * 1000;
 const cleanup_timeout_ms = 10_000;
+const removed_environment = [
+  'AAG_TEST_CCSWITCH_DB', // Opt-in access to a real database.
+  'AAG_MODEL_DISCOVERY_PROBE', 'AAG_LIVE_CANARY_MODEL', // Opt-in live probes.
+];
 const cleanup_scope = process.platform === 'win32'
   ? 'foreground_and_best_effort_windows_tree'
   : 'foreground_and_owned_unix_process_group';
@@ -108,9 +112,13 @@ export async function run_check(check, { root, env, signal, timeout_ms = command
     ...(cleanup_failed ? { cleanup_error_code: cleanup_error_code ?? 'AAG_FOREGROUND_EXIT_UNCONFIRMED' } : {}) };
 }
 
+export function cleanup_path_is_owned(owned_root, temporary_root) {
+  return dirname(resolve(owned_root)) === temporary_root && basename(owned_root).startsWith('aag_feature_verify_');
+}
+
 /** Public orchestration seam: bounded allowlisted plans, no command strings. */
 export async function execute_plan(plan, {
-  root, signal, run = run_check, on_check = () => {},
+  root, signal, run = run_check, on_check = () => {}, remove = rm,
   preflight = inspect_desktop_environment, temporary_directory = tmpdir(),
 }) {
   const environment = signal?.aborted ? { status: 'cancelled', checks: [] }
@@ -129,9 +137,15 @@ export async function execute_plan(plan, {
   let retain_state = false;
   try {
     await mkdir(config_dir, { mode: 0o700 }); await mkdir(home_dir, { mode: 0o700 }); await mkdir(temporary_dir, { mode: 0o700 });
-    const env = { ...process.env, AAG_CONFIG_DIR: config_dir, AAG_HOME_DIR: home_dir,
+    const isolated_environment = { AAG_CONFIG_DIR: config_dir, AAG_HOME_DIR: home_dir,
       TMPDIR: temporary_dir, TMP: temporary_dir, TEMP: temporary_dir };
-    delete env.AAG_TEST_CCSWITCH_DB;
+    const env = { ...process.env };
+    for (const name of Object.keys(env)) {
+      // Windows lookups ignore case even after process.env becomes a plain object.
+      const normalized_name = process.platform === 'win32' ? name.toUpperCase() : name;
+      if (removed_environment.includes(normalized_name) || Object.hasOwn(isolated_environment, normalized_name)) delete env[name];
+    }
+    Object.assign(env, isolated_environment);
     for (const check of plan.checks) {
       if (signal?.aborted) { status = 'cancelled'; break; }
       on_check(check);
@@ -147,8 +161,17 @@ export async function execute_plan(plan, {
       if (result.status !== 'passed') { status = result.status; break; }
     }
   } finally {
-    if (dirname(resolve(owned_root)) !== temporary_root || !basename(owned_root).startsWith('aag_feature_verify_')) throw new Error('AAG_UNEXPECTED_CLEANUP_PATH');
-    if (!retain_state) await rm(owned_root, { recursive: true, force: true, maxRetries: 3 });
+    if (!cleanup_path_is_owned(owned_root, temporary_root)) {
+      // Never remove a directory whose ownership cannot be established.
+      retain_state = true;
+      status = 'cleanup_failed';
+    }
+    if (!retain_state) {
+      // A failed removal (file locks, antivirus scans) must not discard the
+      // whole receipt: retain the owned root and report it instead.
+      try { await remove(owned_root, { recursive: true, force: true, maxRetries: 3 }); }
+      catch { retain_state = true; status = 'cleanup_failed'; }
+    }
   }
   return { schema_version: 1, scope: plan.scope, status, preflight: environment, results, unrun_checks: plan.checks.slice(results.length).map((check) => check.id), evidence_class: 'local_and_synthetic_only', ...cleanup_evidence,
     runtime_state: retain_state ? 'retained' : 'removed', ...(retain_state ? { retained_state_id: basename(owned_root) } : {}) };

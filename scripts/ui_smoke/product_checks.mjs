@@ -1,3 +1,5 @@
+import { run_optimization_checks } from './optimization_checks.mjs';
+
 const responsive_viewports = [
   { width: 1200, height: 900 },
   { width: 900, height: 900 },
@@ -61,8 +63,8 @@ export async function run_product_initial_checks({ cdp, check_in_page, check, sl
 
   await check_in_page(cdp, check, 'switching applications hides a revealed gateway key', async () => {
     const visibility_button = document.querySelector('[data-testid="gateway_key_visibility"]');
-    const codex_button = [...document.querySelectorAll('.app-switcher button')].find((button) => button.textContent.trim() === 'Codex');
-    const claude_button = [...document.querySelectorAll('.app-switcher button')].find((button) => button.textContent.trim() === 'Claude');
+    const codex_button = [...document.querySelectorAll('.client_management_switcher button')].find((button) => button.textContent.trim() === 'Codex');
+    const claude_button = [...document.querySelectorAll('.client_management_switcher button')].find((button) => button.textContent.trim() === 'Claude');
     if (!visibility_button || !codex_button || !claude_button) return 'missing-key-or-app-controls';
     visibility_button.click();
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -139,6 +141,7 @@ export async function run_product_initial_checks({ cdp, check_in_page, check, sl
   try {
     for (const viewport of responsive_viewports) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1, mobile: false });
+      await cdp.eval_value('window.scrollTo(0, 0)');
       await sleep(150);
       await check_in_page(cdp, check, 'layout contains controls at viewport ' + viewport.width, async () => {
         const viewport_width = document.documentElement.clientWidth;
@@ -163,6 +166,136 @@ export async function run_product_initial_checks({ cdp, check_in_page, check, sl
     await cdp.send('Emulation.clearDeviceMetricsOverride');
     await sleep(150);
   }
+
+  // Direct JSON editor (Kilo family): open from the client-configuration
+  // card, edit, save, and verify the round-trip plus the status refresh.
+  // Returns to Claude at the end so later checks observe the default page.
+  await check_in_page(cdp, check, 'kilo direct JSON editor round-trips through the client configuration card', async () => {
+    const kilo_button = [...document.querySelectorAll('.client_management_switcher button')].find((button) => button.textContent.trim() === 'Kilo CLI');
+    if (!kilo_button) return 'missing-kilo-tab';
+    kilo_button.click();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (document.querySelector('[data-testid="client-config-status"]')) break;
+    }
+    const edit_button = document.querySelector('[data-testid="client-config-edit"]');
+    if (!edit_button) return 'missing-edit-json-button';
+    edit_button.click();
+    let editor = null;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      editor = document.querySelector('[data-testid="config-editor-modal"]');
+      if (editor && document.querySelector('[data-testid="config-editor-text"]')?.value) break;
+    }
+    const textarea = document.querySelector('[data-testid="config-editor-text"]');
+    if (!editor || !textarea?.value) return 'editor-did-not-open';
+    const had_skeleton = textarea.value.includes('provider');
+    const edited = '{\n  // smoke round-trip\n  "provider": { "smoke": { "npm": "@ai-sdk/openai-compatible" } },\n  "model": "smoke/demo"\n}\n';
+    // React controlled textarea: use the native value setter so React's
+    // change tracking sees the programmatic edit (a plain .value= write is
+    // ignored by the controlled component).
+    const value_setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    value_setter.call(textarea, edited);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const invalid_banner = document.querySelector('[data-testid="config-editor-invalid"]');
+    if (invalid_banner) return 'valid-jsonc-flagged-invalid';
+    const save_button = document.querySelector('[data-testid="config-editor-save"]');
+    if (!save_button || save_button.disabled) return 'save-disabled-for-valid-document';
+    save_button.click();
+    let saved = false;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (!document.querySelector('[data-testid="config-editor-modal"]')) { saved = true; break; }
+    }
+    if (!saved) return 'editor-did-not-close-after-save';
+    // Re-open and confirm the saved contents (mock is in-memory).
+    document.querySelector('[data-testid="client-config-edit"]')?.click();
+    let reopened = '';
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      reopened = document.querySelector('[data-testid="config-editor-text"]')?.value ?? '';
+      if (reopened) break;
+    }
+    if (!reopened.includes('smoke round-trip')) return 'edited-contents-did-not-persist';
+    document.querySelector('[data-testid="config_editor_cancel"]')?.click();
+    let closed = false;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (!document.querySelector('[data-testid="config-editor-modal"]')) { closed = true; break; }
+    }
+    if (!closed) return 'editor-did-not-close-after-cancel';
+    const claude_button = [...document.querySelectorAll('.client_management_switcher button')].find((button) => button.textContent.trim() === 'Claude');
+    claude_button?.click();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return { ok: had_skeleton, detail: 'skeleton=' + had_skeleton + ' persisted=true' };
+  });
+
+  // Unified pool: create a standalone upstream row from the pool section
+  // ("+ Add upstream"), verify it lands as a card, then delete it again so
+  // the fixture state is unchanged for later checks.
+  await check_in_page(cdp, check, 'standalone pool row can be created and removed from the pool section', async () => {
+    const claude_button = [...document.querySelectorAll('.client_management_switcher button')].find((button) => button.textContent.trim() === 'Claude');
+    if (!claude_button) return 'missing-claude-tab';
+    claude_button.click();
+    let add_button = null;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      add_button = document.querySelector('[data-testid="providers-add-standalone"]');
+      if (add_button) break;
+    }
+    if (!add_button) return 'missing-add-standalone-button';
+    add_button.click();
+    let modal = null;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      modal = document.querySelector('[data-testid="provider-modal"]');
+      if (modal) break;
+    }
+    if (!modal) return 'modal-did-not-open';
+    const name_input = modal.querySelector('input:not([type="hidden"])');
+    if (!name_input) return 'missing-name-input';
+    const native_setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    native_setter.call(name_input, 'smoke-pool-row');
+    name_input.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    // Empty base URL must block the save (validation contract).
+    let save = modal.querySelector('[data-testid="provider-modal-save"]');
+    save?.click();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (!document.querySelector('[data-testid="provider-modal"]')) return 'empty-base-url-save-was-accepted';
+    // Fill the upstream base URL and save for real. The base-URL field is
+    // identified by its deepseek placeholder (several other empty inputs —
+    // id/icon/website — precede it in DOM order).
+    const base_url_input = [...modal.querySelectorAll('input')].find((input) => input.placeholder === 'https://api.deepseek.com/v1');
+    if (!base_url_input) return 'missing-base-url-input';
+    native_setter.call(base_url_input, 'https://smoke-pool.example.invalid/v1');
+    base_url_input.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    save = document.querySelector('[data-testid="provider-modal-save"]');
+    save?.click();
+    let created = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      if (!document.querySelector('[data-testid="provider-modal"]') && document.body.innerText.includes('smoke-pool-row')) { created = true; break; }
+    }
+    if (!created) return 'pool-row-was-not-created';
+    // Delete the row again so the fixture state is unchanged for later
+    // checks (the mock pool persists for the page session).
+    window.confirm = () => true;
+    const delete_button = document.querySelector('[data-testid="provider-delete-smoke-pool-row"]');
+    if (!delete_button) return 'missing-delete-button';
+    delete_button.click();
+    let removed = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      if (!document.body.innerText.includes('smoke-pool-row')) { removed = true; break; }
+    }
+    if (!removed) return 'pool-row-was-not-removed';
+    return 'ok';
+  });
+
+  await run_optimization_checks({ cdp, check_in_page, check });
 }
 
 export async function run_gateway_feedback_checks({ cdp, check_in_page, check }) {

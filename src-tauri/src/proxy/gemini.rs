@@ -16,19 +16,19 @@
 //!    back to canonical (`gemini_resp_to_oai_resp`,
 //!    `gemini_stream_to_oai_chunks`).
 //!
-//! Unlike the Anthropic edge there is no lossless same-protocol relay: the
-//! canonical projection is always used (Gemini CLI tolerates the round trip —
-//! it has no thinking signatures or opaque blocks that must survive).
+//! Private source envelopes retain native Gemini bodies and SSE data objects.
+//! Foreign providers receive a strict projection that refuses unsupported
+//! semantics instead of silently dropping native state or controls.
 
 use crate::proxy::canonical::{
     ChatCompletionRequest, ChatMessage, OAIChatResponse, OAIChoice, OAIMessage, OAIStreamChunk,
-    StreamChoice, StreamDelta, Usage,
+    ProviderError, StreamChoice, StreamDelta, Usage,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 
 // ----- wire types -----
@@ -111,6 +111,339 @@ fn finish_to_gemini(reason: Option<&str>) -> &'static str {
 
 // ----- entry surface: Gemini request -> canonical -----
 
+fn gemini_conversion_error(code: &str) -> ProviderError {
+    crate::proxy::canonical::make_provider_error(
+        code,
+        "request_conversion",
+        Some(400),
+        Some(false),
+        None,
+    )
+}
+
+fn known_gemini_fields(value: &Value, names: &[&str]) -> Result<(), ProviderError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))?;
+    if object.keys().any(|key| !names.contains(&key.as_str())) {
+        return Err(gemini_conversion_error("gemini_feature_unsupported"));
+    }
+    Ok(())
+}
+
+/// Admit only the Gemini subset that the canonical bridge can represent.
+/// Unsupported data must fail before an upstream call, rather than disappear
+/// during the tolerant projection retained for internal conversion callers.
+pub fn try_gemini_req_to_oai_req(body: &Value) -> Result<ChatCompletionRequest, ProviderError> {
+    known_gemini_fields(
+        body,
+        &[
+            "contents",
+            "systemInstruction",
+            "tools",
+            "toolConfig",
+            "generationConfig",
+        ],
+    )?;
+    let contents = body
+        .get("contents")
+        .and_then(Value::as_array)
+        .filter(|contents| !contents.is_empty())
+        .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))?;
+    for content in contents {
+        known_gemini_fields(content, &["role", "parts"])?;
+        let role = content
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        if !matches!(role, "user" | "model") {
+            return Err(gemini_conversion_error("gemini_invalid_request"));
+        }
+        let parts = content
+            .get("parts")
+            .and_then(Value::as_array)
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))?;
+        for part in parts {
+            known_gemini_fields(
+                part,
+                &[
+                    "text",
+                    "thought",
+                    "thoughtSignature",
+                    "functionCall",
+                    "functionResponse",
+                    "inlineData",
+                ],
+            )?;
+            let count = ["text", "functionCall", "functionResponse", "inlineData"]
+                .iter()
+                .filter(|name| part.get(**name).is_some())
+                .count();
+            if count != 1 {
+                return Err(gemini_conversion_error("gemini_invalid_request"));
+            }
+            if let Some(text) = part.get("text") {
+                if !text.is_string() || part.get("thought").is_some_and(|value| !value.is_boolean())
+                {
+                    return Err(gemini_conversion_error("gemini_invalid_request"));
+                }
+                // The bridge retains function-call signatures. A signature
+                // attached to a text block has no canonical equivalent yet.
+                if part.get("thoughtSignature").is_some() {
+                    return Err(gemini_conversion_error("gemini_feature_unsupported"));
+                }
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    return Err(gemini_conversion_error("gemini_feature_unsupported"));
+                }
+            } else if let Some(call) = part.get("functionCall") {
+                known_gemini_fields(call, &["name", "args"])?;
+                if role != "model"
+                    || call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    || call.get("args").is_some_and(|args| !args.is_object())
+                    || part
+                        .get("thoughtSignature")
+                        .is_some_and(|signature| !signature.is_string())
+                {
+                    return Err(gemini_conversion_error("gemini_invalid_request"));
+                }
+            } else if let Some(response) = part.get("functionResponse") {
+                known_gemini_fields(response, &["name", "response"])?;
+                if role != "user"
+                    || response
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    || response
+                        .get("response")
+                        .is_none_or(|response| !response.is_object())
+                {
+                    return Err(gemini_conversion_error("gemini_invalid_request"));
+                }
+                if part.get("thoughtSignature").is_some() || part.get("thought").is_some() {
+                    return Err(gemini_conversion_error("gemini_feature_unsupported"));
+                }
+            } else if let Some(inline) = part.get("inlineData") {
+                known_gemini_fields(inline, &["mimeType", "data"])?;
+                let mime = inline.get("mimeType").and_then(Value::as_str).unwrap_or("");
+                if role != "user"
+                    || !mime.starts_with("image/")
+                    || inline
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    || part.get("thoughtSignature").is_some()
+                    || part.get("thought").is_some()
+                {
+                    return Err(gemini_conversion_error("gemini_feature_unsupported"));
+                }
+            }
+        }
+    }
+    if let Some(system) = body.get("systemInstruction") {
+        known_gemini_fields(system, &["role", "parts"])?;
+        let parts = system
+            .get("parts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))?;
+        for part in parts {
+            known_gemini_fields(part, &["text"])?;
+            if !part.get("text").is_some_and(Value::is_string) {
+                return Err(gemini_conversion_error("gemini_invalid_request"));
+            }
+        }
+    }
+    if let Some(generation) = body.get("generationConfig") {
+        known_gemini_fields(
+            generation,
+            &["temperature", "maxOutputTokens", "topP", "stopSequences"],
+        )?;
+        if generation
+            .get("temperature")
+            .is_some_and(|value| value.as_f64().is_none())
+            || generation
+                .get("topP")
+                .is_some_and(|value| value.as_f64().is_none())
+            || generation.get("maxOutputTokens").is_some_and(|value| {
+                value
+                    .as_u64()
+                    .is_none_or(|number| number == 0 || number > u32::MAX as u64)
+            })
+            || generation.get("stopSequences").is_some_and(|value| {
+                value
+                    .as_array()
+                    .is_none_or(|items| items.iter().any(|item| !item.is_string()))
+            })
+        {
+            return Err(gemini_conversion_error("gemini_invalid_request"));
+        }
+    }
+    if let Some(tools) = body.get("tools") {
+        let tools = tools
+            .as_array()
+            .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))?;
+        for tool in tools {
+            known_gemini_fields(tool, &["functionDeclarations"])?;
+            let declarations = tool
+                .get("functionDeclarations")
+                .and_then(Value::as_array)
+                .ok_or_else(|| gemini_conversion_error("gemini_feature_unsupported"))?;
+            for declaration in declarations {
+                known_gemini_fields(declaration, &["name", "description", "parameters"])?;
+                if declaration
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                    || declaration
+                        .get("description")
+                        .is_some_and(|value| !value.is_string())
+                    || declaration
+                        .get("parameters")
+                        .is_some_and(|value| !value.is_object())
+                {
+                    return Err(gemini_conversion_error("gemini_invalid_request"));
+                }
+            }
+        }
+    }
+    if let Some(tool_config) = body.get("toolConfig") {
+        known_gemini_fields(tool_config, &["functionCallingConfig"])?;
+        if let Some(config) = tool_config.get("functionCallingConfig") {
+            known_gemini_fields(config, &["mode", "allowedFunctionNames"])?;
+            let mode = config.get("mode").and_then(Value::as_str).unwrap_or("AUTO");
+            let allowed = config
+                .get("allowedFunctionNames")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| gemini_conversion_error("gemini_invalid_request"))
+                })
+                .transpose()?;
+            if !matches!(mode, "AUTO" | "NONE" | "ANY")
+                || allowed.is_some_and(|names| {
+                    names.len() > 1 || names.iter().any(|name| !name.is_string())
+                })
+                || (mode != "ANY" && allowed.is_some_and(|names| !names.is_empty()))
+            {
+                return Err(gemini_conversion_error("gemini_feature_unsupported"));
+            }
+        }
+    }
+    Ok(gemini_req_to_oai_req(body))
+}
+
+/// Strict projection for a foreign upstream, after a native Gemini request
+/// has been admitted. Preserve routing context and any explicitly injected
+/// system prefix while refusing to silently change the original body.
+pub(crate) fn request_for_foreign_hop(
+    req: &ChatCompletionRequest,
+) -> Result<ChatCompletionRequest, ProviderError> {
+    let Some(source) = req.source_gemini_request.as_ref() else {
+        return Ok(req.clone());
+    };
+    let baseline = gemini_req_to_oai_req(source);
+    let prefix_len = req.messages.len().saturating_sub(baseline.messages.len());
+    if req.messages.len() < baseline.messages.len()
+        || req.messages[..prefix_len]
+            .iter()
+            .any(|message| message.role != "system")
+        || serde_json::to_value(&req.messages[prefix_len..]).ok()
+            != serde_json::to_value(&baseline.messages).ok()
+    {
+        return Err(gemini_conversion_error("gemini_feature_unsupported"));
+    }
+    let mut strict = try_gemini_req_to_oai_req(source)?;
+    let mut messages = req.messages[..prefix_len].to_vec();
+    messages.append(&mut strict.messages);
+    // Signatures bind Gemini-native function calls. Foreign schemas receive
+    // the actual call identity/name/arguments without Gemini-only wire fields.
+    for message in &mut messages {
+        for call in message.tool_calls.iter_mut().flatten() {
+            if let Some(call) = call.as_object_mut() {
+                call.remove("thoughtSignature");
+            }
+        }
+    }
+    strict.messages = messages;
+    strict.model = req.model.clone();
+    strict.stream = req.stream;
+    strict.request_id = req.request_id.clone();
+    strict.client_credential = req.client_credential.clone();
+    strict.source_gemini_request = None;
+    Ok(strict)
+}
+
+/// A native Gemini upstream consumes the preserved source body, including
+/// signatures and provider-specific native controls. Cross-protocol callers
+/// use the explicit canonical request conversion.
+pub(crate) fn request_body(req: &ChatCompletionRequest) -> Result<Value, ProviderError> {
+    // Codex effort has no supported projection in this Gemini adapter. Refuse
+    // that explicit control before sending instead of silently ignoring it.
+    if let Some(source) = &req.source_responses_request {
+        let source_effort = source
+            .extra
+            .get("reasoning")
+            .and_then(|value| value.get("effort"));
+        if source_effort.is_some_and(|value| !value.is_null())
+            || req
+                .extra
+                .get("reasoning_effort")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(gemini_conversion_error("responses_feature_unsupported"));
+        }
+    }
+    if let Some(source) = &req.source_gemini_request {
+        let baseline = gemini_req_to_oai_req(source);
+        if serde_json::to_value(&req.messages).ok() != serde_json::to_value(&baseline.messages).ok()
+        {
+            return Err(gemini_conversion_error("gemini_feature_unsupported"));
+        }
+        return Ok(source.clone());
+    }
+    serde_json::to_value(oai_req_to_gemini_req(req))
+        .map_err(|_| gemini_conversion_error("gemini_invalid_request"))
+}
+
+/// Foreign client surfaces cannot express native media/code parts or several
+/// Gemini candidates. Refuse those responses before projection; native Gemini
+/// callers retain the complete source envelope instead.
+pub(crate) fn validate_response_for_foreign(body: &Value) -> Result<(), ProviderError> {
+    let candidates = body.get("candidates").and_then(Value::as_array);
+    let unsupported = candidates.is_some_and(|candidates| {
+        candidates.len() > 1
+            || candidates.iter().any(|candidate| {
+                candidate.get("groundingMetadata").is_some()
+                    || candidate.get("citationMetadata").is_some()
+                    || candidate
+                        .pointer("/content/parts")
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts.iter().any(|part| {
+                                part.as_object().is_none_or(|part| {
+                                    part.keys().any(|key| {
+                                        !matches!(key.as_str(), "text" | "thought" | "functionCall")
+                                    })
+                                })
+                            })
+                        })
+            })
+    });
+    if unsupported {
+        return Err(crate::proxy::canonical::make_provider_error(
+            "gemini_response_unsupported",
+            "response_conversion",
+            Some(502),
+            Some(true),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Convert a Gemini `GenerateContentRequest` (parsed as raw JSON for
 /// tolerance) into the canonical chat-completions request.
 ///
@@ -140,13 +473,25 @@ pub fn gemini_req_to_oai_req(body: &Value) -> ChatCompletionRequest {
         }
     }
 
+    // function name → queue of generated call ids not yet matched by a
+    // functionResponse. Gemini round-trips only the function NAME, but
+    // foreign upstreams (OpenAI/Anthropic) correlate a tool result through
+    // `tool_call_id` == the assistant call's `id`; deterministic per-name
+    // queues keep that correlation intact across the canonical projection.
+    let mut pending_calls: HashMap<String, VecDeque<String>> = HashMap::new();
+    let mut call_counter: u64 = 0;
     for content in body
         .get("contents")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
     {
-        gemini_content_to_chat(content, &mut messages);
+        gemini_content_to_chat(
+            content,
+            &mut messages,
+            &mut pending_calls,
+            &mut call_counter,
+        );
     }
 
     let generation = body.get("generationConfig");
@@ -183,6 +528,8 @@ pub fn gemini_req_to_oai_req(body: &Value) -> ChatCompletionRequest {
         tool_choice: gemini_tool_choice_to_chat(body.get("toolConfig")),
         extra,
         source_anthropic_request: None,
+        source_responses_request: None,
+        source_gemini_request: Some(body.clone()),
         request_id: None,
         client_credential: None,
     }
@@ -191,8 +538,15 @@ pub fn gemini_req_to_oai_req(body: &Value) -> ChatCompletionRequest {
 /// Append one Gemini content entry to the canonical message list. Consecutive
 /// `functionCall` parts join a single assistant turn (chat completions expect
 /// one `tool_calls` array), and `functionResponse` entries become `tool`
-/// messages.
-fn gemini_content_to_chat(content: &Value, messages: &mut Vec<ChatMessage>) {
+/// messages whose `tool_call_id` is the id of the earliest unmatched call of
+/// the same function name (falling back to the bare name when the request
+/// history contains no matching call).
+fn gemini_content_to_chat(
+    content: &Value,
+    messages: &mut Vec<ChatMessage>,
+    pending_calls: &mut HashMap<String, VecDeque<String>>,
+    call_counter: &mut u64,
+) {
     let role = match content.get("role").and_then(Value::as_str) {
         Some("model") => "assistant",
         _ => "user",
@@ -233,8 +587,14 @@ fn gemini_content_to_chat(content: &Value, messages: &mut Vec<ChatMessage>) {
                 .get("thoughtSignature")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let id = format!("gemini_call_{name}_{call_counter}");
+            *call_counter += 1;
+            pending_calls
+                .entry(name.to_string())
+                .or_default()
+                .push_back(id.clone());
             tool_calls.push(json!({
-                "id": format!("call_{}", crate::proxy::converter::rand_hex(12)),
+                "id": id,
                 "type": "function",
                 "function": { "name": name, "arguments": arguments },
                 "thoughtSignature": signature,
@@ -247,11 +607,18 @@ fn gemini_content_to_chat(content: &Value, messages: &mut Vec<ChatMessage>) {
                 Some(value) => crate::proxy::converter::canonical_json_string(value),
                 None => "{}".to_string(),
             };
+            // Correlate with the earliest unmatched call of this function;
+            // a response whose call is not in this request keeps the bare
+            // name (foreign upstreams will reject the mismatch explicitly).
+            let tool_call_id = pending_calls
+                .get_mut(name)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or_else(|| name.to_string());
             messages.push(ChatMessage {
                 role: "tool".into(),
                 content: Value::String(payload),
                 tool_calls: None,
-                tool_call_id: Some(name.to_string()),
+                tool_call_id: Some(tool_call_id),
                 extra: Default::default(),
             });
             continue;
@@ -362,7 +729,7 @@ fn gemini_tools_to_chat(tools: Option<&Value>) -> Option<Vec<Value>> {
                             .get("description")
                             .and_then(Value::as_str)
                             .unwrap_or(""),
-                        "parameters": sanitize_gemini_schema(
+                        "parameters": gemini_schema_to_chat(
                             declaration.get("parameters")
                                 .cloned()
                                 .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
@@ -395,6 +762,50 @@ fn gemini_tool_choice_to_chat(tool_config: Option<&Value>) -> Option<Value> {
         }
         // AUTO (and Gemini 3's dynamic modes) map to the chat default.
         _ => Some(json!("auto")),
+    }
+}
+
+/// Gemini uses uppercase type names and an OpenAPI nullable flag. Translate
+/// those two conventions while retaining JSON Schema constraints for foreign
+/// providers; the outbound Gemini sanitizer has a different responsibility.
+fn gemini_schema_to_chat(schema: Value) -> Value {
+    let Value::Object(mut object) = schema else {
+        return schema;
+    };
+    let nullable = object.get("nullable").and_then(Value::as_bool);
+    if nullable.is_some() {
+        object.remove("nullable");
+    }
+    for (key, value) in &mut object {
+        match key.as_str() {
+            "type" if value.is_string() => {
+                *value = Value::String(value.as_str().unwrap().to_ascii_lowercase());
+            }
+            "properties" | "$defs" | "definitions" => {
+                if let Some(properties) = value.as_object_mut() {
+                    for property in properties.values_mut() {
+                        *property = gemini_schema_to_chat(std::mem::take(property));
+                    }
+                }
+            }
+            "items" | "additionalProperties" | "not" => {
+                *value = gemini_schema_to_chat(std::mem::take(value));
+            }
+            "anyOf" | "oneOf" | "allOf" => {
+                if let Some(variants) = value.as_array_mut() {
+                    for variant in variants {
+                        *variant = gemini_schema_to_chat(std::mem::take(variant));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let schema = Value::Object(object);
+    if nullable == Some(true) {
+        json!({"anyOf":[schema,{"type":"null"}]})
+    } else {
+        schema
     }
 }
 
@@ -825,6 +1236,8 @@ pub fn gemini_resp_to_oai_resp(body: &Value, requested_model: &str) -> OAIChatRe
         usage,
         extra: Default::default(),
         source_anthropic_response: None,
+        source_responses_response: None,
+        source_gemini_response: Some(body.clone()),
     }
 }
 
@@ -833,6 +1246,9 @@ pub fn gemini_resp_to_oai_resp(body: &Value, requested_model: &str) -> OAIChatRe
 /// Convert a canonical chat-completions response into a Gemini
 /// `GenerateContentResponse` body.
 pub fn oai_resp_to_gemini_resp(resp: &OAIChatResponse, requested_model: &str) -> Value {
+    if let Some(source) = &resp.source_gemini_response {
+        return source.clone();
+    }
     let model = if resp.model.is_empty() {
         requested_model.to_string()
     } else {
@@ -916,9 +1332,25 @@ pub fn gemini_stream_to_oai_chunks<S>(
 where
     S: Stream<Item = String> + Send + 'static,
 {
+    gemini_stream_to_oai_chunks_for_client(data_strings, model, true)
+}
+
+pub(crate) fn gemini_stream_to_oai_chunks_for_client<S>(
+    data_strings: S,
+    model: String,
+    native_client: bool,
+) -> Pin<Box<dyn Stream<Item = OAIStreamChunk> + Send>>
+where
+    S: Stream<Item = String> + Send + 'static,
+{
     use async_stream::stream;
     let mut data_strings = Box::pin(data_strings);
     Box::pin(stream! {
+        // Stream-wide call counter: each Gemini functionCall part is a
+        // complete, distinct call, so its chat `index` must be unique across
+        // the whole stream — a per-frame 0-based index would make consumers
+        // merging deltas by index collapse two calls into one.
+        let mut next_tool_index: u64 = 0;
         while let Some(data) = data_strings.next().await {
             let event: Value = match serde_json::from_str(&data) {
                 Ok(value) => value,
@@ -928,6 +1360,10 @@ where
                 let status = crate::proxy::canonical::stream_error_status(error);
                 yield crate::proxy::canonical::stream_error_chunk(&model, status, "upstream_error");
                 continue;
+            }
+            if !native_client && validate_response_for_foreign(&event).is_err() {
+                yield crate::proxy::canonical::stream_error_chunk(&model, 502, "gemini_response_unsupported");
+                return;
             }
             let candidate = event
                 .get("candidates")
@@ -955,7 +1391,7 @@ where
                 if let Some(call) = part.get("functionCall") {
                     has_function_call = true;
                     tool_calls.push(json!({
-                        "index": tool_calls.len(),
+                        "index": next_tool_index,
                         "id": format!("call_{}", crate::proxy::converter::rand_hex(12)),
                         "type": "function",
                         "function": {
@@ -966,6 +1402,7 @@ where
                                 .unwrap_or_else(|| "{}".to_string()),
                         },
                     }));
+                    next_tool_index += 1;
                 }
             }
 
@@ -975,12 +1412,6 @@ where
                     .and_then(Value::as_str),
                 has_function_call,
             );
-
-            if text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && finish.is_none()
-                && event.get("usageMetadata").is_none()
-            {
-                continue;
-            }
 
             let mut delta = StreamDelta::default();
             if !text.is_empty() {
@@ -1013,6 +1444,8 @@ where
                 }],
                 extra,
                 source_anthropic_event: None,
+                source_responses_event: None,
+                source_gemini_event: Some(event),
             };
         }
     })
@@ -1025,11 +1458,59 @@ where
 /// argument deltas.
 #[allow(non_camel_case_types)]
 struct Gemini_stream_tool_call {
-    id: String,
     name: String,
     arguments: String,
-    /// chat tool_calls index of the call already flushed before this one.
-    flushed: bool,
+    /// False for index-gap placeholders: they must never be emitted as
+    /// empty-name function calls.
+    touched: bool,
+}
+
+/// Drain accumulated calls into Gemini `functionCall` parts in stream-index
+/// order. Untouched index-gap placeholders are skipped. A touched call that
+/// never carried a function name is an upstream protocol error, not a valid
+/// Gemini part, and fails the drain explicitly.
+fn drain_pending_calls(
+    pending: &mut Vec<Gemini_stream_tool_call>,
+    parts: &mut Vec<Value>,
+) -> Result<(), ()> {
+    let mut malformed = false;
+    for call in pending.drain(..) {
+        if !call.touched {
+            continue;
+        }
+        if call.name.is_empty() {
+            malformed = true;
+            continue;
+        }
+        let args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+        parts.push(json!({ "functionCall": { "name": call.name, "args": args } }));
+    }
+    if malformed {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+fn gemini_stream_error_frame() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": 502,
+            "message": crate::proxy::canonical::public_error_message("upstream_stream_error", Some(502)),
+            "status": "INTERNAL",
+        }
+    }))
+    .unwrap_or_default()
+}
+
+/// Canonical chunk usage -> Gemini `usageMetadata` (stream and metadata-only
+/// trailing frames share this shape).
+fn gemini_usage_metadata(usage: &Value) -> Value {
+    json!({
+        "promptTokenCount": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "candidatesTokenCount": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "totalTokenCount": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0),
+    })
 }
 
 /// Convert a canonical chunk stream into a Gemini SSE `data:` string stream
@@ -1044,6 +1525,10 @@ pub fn oai_chunks_to_gemini_stream(
     Box::pin(stream! {
         let mut pending_calls: Vec<Gemini_stream_tool_call> = Vec::new();
         while let Some(chunk) = chunks.next().await {
+            if let Some(source) = chunk.source_gemini_event {
+                yield serde_json::to_string(&source).unwrap_or_default();
+                continue;
+            }
             if let Some(error) = chunk.extra.get("error") {
                 let status = crate::proxy::canonical::stream_error_status(error);
                 yield serde_json::to_string(&json!({
@@ -1056,6 +1541,19 @@ pub fn oai_chunks_to_gemini_stream(
                 .unwrap_or_default();
                 continue;
             }
+            // The OpenAI `stream_options.include_usage` terminal chunk carries
+            // `"choices": []` with a trailing usage payload — relay it as a
+            // metadata-only Gemini frame instead of dropping the usage.
+            if chunk.choices.is_empty() {
+                if let Some(usage) = chunk.extra.get("usage") {
+                    let body = json!({
+                        "modelVersion": model,
+                        "usageMetadata": gemini_usage_metadata(usage),
+                    });
+                    yield serde_json::to_string(&body).unwrap_or_default();
+                }
+                continue;
+            }
             for choice in &chunk.choices {
                 let delta = &choice.delta;
                 let mut parts: Vec<Value> = Vec::new();
@@ -1066,7 +1564,10 @@ pub fn oai_chunks_to_gemini_stream(
                     parts.push(json!({ "text": content }));
                 }
 
-                // Flush any completed earlier calls once a new one starts.
+                // Accumulate argument deltas per call index. A new index does
+                // NOT complete the previous call — upstreams may interleave
+                // parallel calls — so calls flush only with the terminal
+                // chunk (or an unterminated stream end), never mid-stream.
                 if let Some(calls) = &delta.tool_calls {
                     for call in calls {
                         let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -1080,38 +1581,19 @@ pub fn oai_chunks_to_gemini_stream(
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        if index >= pending_calls.len() {
-                            // Flush everything before this new index.
-                            let completed: Vec<Gemini_stream_tool_call> =
-                                pending_calls.drain(..).collect();
-                            for mut completed_call in completed {
-                                completed_call.flushed = true;
-                                let args: Value = serde_json::from_str(&completed_call.arguments)
-                                    .unwrap_or_else(|_| json!({}));
-                                parts.push(json!({
-                                    "functionCall": {
-                                        "name": completed_call.name,
-                                        "args": args,
-                                    }
-                                }));
-                            }
-                            while pending_calls.len() <= index {
-                                pending_calls.push(Gemini_stream_tool_call {
-                                    id: String::new(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                    flushed: false,
-                                });
-                            }
+                        while pending_calls.len() <= index {
+                            pending_calls.push(Gemini_stream_tool_call {
+                                name: String::new(),
+                                arguments: String::new(),
+                                touched: false,
+                            });
                         }
                         let slot = &mut pending_calls[index];
+                        slot.touched = true;
                         if !name.is_empty() {
                             slot.name = name;
                         }
                         slot.arguments.push_str(&arguments);
-                        if let Some(id) = call.get("id").and_then(Value::as_str) {
-                            slot.id = id.to_string();
-                        }
                     }
                 }
 
@@ -1122,32 +1604,26 @@ pub fn oai_chunks_to_gemini_stream(
                     }],
                     "modelVersion": model,
                 });
+                let mut malformed_tools = false;
                 if let Some(reason) = choice.finish_reason.as_deref() {
-                    if reason == "tool_calls" || reason == "stop" {
-                        // Flush remaining calls with the terminal chunk.
-                        let completed: Vec<Gemini_stream_tool_call> =
-                            pending_calls.drain(..).collect();
-                        let parts = body
-                            .pointer_mut("/candidates/0/content/parts")
-                            .and_then(Value::as_array_mut);
-                        if let Some(parts) = parts {
-                            for call in completed {
-                                let args: Value = serde_json::from_str(&call.arguments)
-                                    .unwrap_or_else(|_| json!({}));
-                                parts.push(json!({
-                                    "functionCall": { "name": call.name, "args": args }
-                                }));
-                            }
-                        }
+                    // Flush every accumulated call with the terminal chunk,
+                    // whatever the finish reason — completed calls must not
+                    // be dropped when the finish is `length`/`content_filter`.
+                    let terminal_parts = body
+                        .pointer_mut("/candidates/0/content/parts")
+                        .and_then(Value::as_array_mut);
+                    if let Some(terminal_parts) = terminal_parts {
+                        malformed_tools =
+                            drain_pending_calls(&mut pending_calls, terminal_parts).is_err();
                     }
                     body["candidates"][0]["finishReason"] = json!(finish_to_gemini(Some(reason)));
                 }
+                if malformed_tools {
+                    yield gemini_stream_error_frame();
+                    continue;
+                }
                 if let Some(usage) = chunk.extra.get("usage") {
-                    body["usageMetadata"] = json!({
-                        "promptTokenCount": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                        "candidatesTokenCount": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-                        "totalTokenCount": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0),
-                    });
+                    body["usageMetadata"] = gemini_usage_metadata(usage);
                 }
                 let has_parts = body
                     .pointer("/candidates/0/content/parts")
@@ -1161,25 +1637,22 @@ pub fn oai_chunks_to_gemini_stream(
                 }
             }
         }
-        // Any calls that never saw a finish_reason still need flushing.
-        if !pending_calls.is_empty() {
-            let parts: Vec<Value> = pending_calls
-                .drain(..)
-                .map(|call| {
-                    let args: Value =
-                        serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-                    json!({ "functionCall": { "name": call.name, "args": args } })
-                })
-                .collect();
-            let body = json!({
-                "candidates": [{
-                    "content": { "role": "model", "parts": parts },
-                    "finishReason": "STOP",
-                    "index": 0,
-                }],
-                "modelVersion": model,
-            });
-            yield serde_json::to_string(&body).unwrap_or_default();
+        // The stream ended without a terminal chunk: flush accumulated calls
+        // truthfully, without fabricating a finishReason.
+        if pending_calls.iter().any(|call| call.touched) {
+            let mut parts: Vec<Value> = Vec::new();
+            if drain_pending_calls(&mut pending_calls, &mut parts).is_err() {
+                yield gemini_stream_error_frame();
+            } else if !parts.is_empty() {
+                let body = json!({
+                    "candidates": [{
+                        "content": { "role": "model", "parts": parts },
+                        "index": 0,
+                    }],
+                    "modelVersion": model,
+                });
+                yield serde_json::to_string(&body).unwrap_or_default();
+            }
         }
     })
 }
@@ -1187,6 +1660,151 @@ pub fn oai_chunks_to_gemini_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_schema_translation_preserves_constraints_and_enum_values() {
+        let schema = json!({"type":"OBJECT","additionalProperties":false,"properties":{
+            "value":{"type":"STRING","nullable":true,"default":"fallback"},
+            "kind":{"enum":[{"type":"LITERAL_VALUE"}]}
+        }});
+        let translated = gemini_schema_to_chat(schema);
+        assert_eq!(translated["type"], "object");
+        assert_eq!(translated["additionalProperties"], false);
+        assert_eq!(
+            translated["properties"]["value"]["anyOf"][0]["type"],
+            "string"
+        );
+        assert_eq!(
+            translated["properties"]["value"]["anyOf"][0]["default"],
+            "fallback"
+        );
+        assert_eq!(
+            translated["properties"]["value"]["anyOf"][1]["type"],
+            "null"
+        );
+        assert_eq!(
+            translated["properties"]["kind"]["enum"][0]["type"],
+            "LITERAL_VALUE"
+        );
+    }
+
+    #[test]
+    fn native_gemini_request_preserves_opaque_controls_but_foreign_projection_refuses_them() {
+        let body = json!({
+            "contents":[{"role":"user","parts":[{"fileData":{"mimeType":"application/pdf","fileUri":"fixture://document"}}]}],
+            "cachedContent":"cachedContents/fixture",
+            "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT"}},
+        });
+        let req = gemini_req_to_oai_req(&body);
+        assert_eq!(request_body(&req).unwrap(), body);
+        let error = request_for_foreign_hop(&req).unwrap_err();
+        assert_eq!(error.code, "gemini_feature_unsupported");
+        assert_eq!(error.status, Some(400));
+        assert!(!error.retriable);
+    }
+
+    #[test]
+    fn foreign_projection_preserves_context_and_removes_only_native_call_metadata() {
+        let body = json!({"contents":[
+            {"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"query":"fixture"}},"thoughtSignature":"native_signature"}]},
+            {"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"ok":true}}}]}
+        ]});
+        let mut req = gemini_req_to_oai_req(&body);
+        req.model = "client-role".into();
+        req.stream = true;
+        req.request_id = Some("request_fixture".into());
+        req.messages.insert(
+            0,
+            ChatMessage {
+                role: "system".into(),
+                content: json!("explicit prefix"),
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            },
+        );
+        let projected = request_for_foreign_hop(&req).unwrap();
+        assert_eq!(projected.model, "client-role");
+        assert!(projected.stream);
+        assert_eq!(projected.request_id.as_deref(), Some("request_fixture"));
+        assert_eq!(projected.messages[0].content, "explicit prefix");
+        let call = &projected.messages[1].tool_calls.as_ref().unwrap()[0];
+        assert!(call.get("thoughtSignature").is_none());
+        assert_eq!(
+            call["id"],
+            projected.messages[2].tool_call_id.as_deref().unwrap()
+        );
+        assert!(projected.source_gemini_request.is_none());
+        assert_eq!(request_body(&gemini_req_to_oai_req(&body)).unwrap(), body);
+    }
+
+    #[test]
+    fn foreign_projection_refuses_silent_tool_choice_and_media_changes() {
+        for patch in [
+            json!({"tools":[{"googleSearch":{}}]}),
+            json!({"generationConfig":{"responseMimeType":"application/json"}}),
+            json!({"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["one","two"]}}}),
+            json!({"contents":[{"parts":[{"inlineData":{"mimeType":"audio/wav","data":"fixture"}}]}]}),
+        ] {
+            let mut body = json!({"contents":[{"role":"user","parts":[{"text":"fixture"}]}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert_eq!(
+                request_for_foreign_hop(&gemini_req_to_oai_req(&body))
+                    .unwrap_err()
+                    .code,
+                "gemini_feature_unsupported"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_gemini_response_and_events_preserve_signatures_and_opaque_parts() {
+        let body = json!({
+            "candidates":[{"content":{"role":"model","parts":[
+                {"text":"fixture","thoughtSignature":"text_signature"},
+                {"functionCall":{"name":"lookup","args":{}},"thoughtSignature":"function_signature"},
+                {"inlineData":{"mimeType":"image/png","data":"fixture"}},
+            ]},"finishReason":"STOP","groundingMetadata":{"fixture":true}}],
+            "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3},
+            "modelVersion":"native-model","nativeExtension":{"preserve":true}
+        });
+        let canonical = gemini_resp_to_oai_resp(&body, "requested-model");
+        assert_eq!(oai_resp_to_gemini_resp(&canonical, "requested-model"), body);
+        let opaque = json!({"nativeSignatureChunk":{"preserve":true}});
+        let frames = futures_util::stream::iter(vec![opaque.to_string(), body.to_string()]);
+        let projected = gemini_stream_to_oai_chunks(frames, "native-model".into());
+        let restored: Vec<_> = oai_chunks_to_gemini_stream(projected, "native-model".into())
+            .collect()
+            .await;
+        assert_eq!(restored.len(), 2);
+        assert_eq!(serde_json::from_str::<Value>(&restored[0]).unwrap(), opaque);
+        assert_eq!(serde_json::from_str::<Value>(&restored[1]).unwrap(), body);
+        assert!(serde_json::to_value(&canonical)
+            .unwrap()
+            .get("source_gemini_response")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_clients_refuse_native_only_gemini_response_parts() {
+        let body = json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"fixture"}}]}}]});
+        assert_eq!(
+            validate_response_for_foreign(&body).unwrap_err().code,
+            "gemini_response_unsupported"
+        );
+        let chunks: Vec<_> = gemini_stream_to_oai_chunks_for_client(
+            futures_util::stream::iter(vec![body.to_string()]),
+            "model".into(),
+            false,
+        )
+        .collect()
+        .await;
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].extra.get("error").is_some());
+        assert!(chunks[0].source_gemini_event.is_none());
+    }
 
     #[test]
     fn gemini_request_to_chat_maps_system_tools_and_history() {
@@ -1220,7 +1838,13 @@ mod tests {
             Some(&json!("get_weather"))
         );
         assert_eq!(req.messages[3].role, "tool");
-        assert_eq!(req.messages[3].tool_call_id.as_deref(), Some("get_weather"));
+        // The tool result carries the generated call id, not the bare
+        // function name, so foreign upstreams can correlate it.
+        let call_id = req.messages[2].tool_calls.as_ref().unwrap()[0]
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        assert_eq!(req.messages[3].tool_call_id, call_id);
         assert_eq!(req.temperature, Some(0.5));
         assert_eq!(req.max_tokens, Some(1024));
         assert_eq!(req.extra.get("top_p"), Some(&json!(0.9)));
@@ -1229,12 +1853,17 @@ mod tests {
             tools[0].pointer("/function/name"),
             Some(&json!("get_weather"))
         );
-        // $schema and additionalProperties stripped from the schema.
+        // Foreign schemas retain constraints; only outbound Gemini schema
+        // normalization strips fields unsupported by the native API.
         let params = tools[0].pointer("/function/parameters").unwrap();
-        assert!(params.pointer("/properties/city/$schema").is_none());
-        assert!(params
-            .pointer("/properties/city/additionalProperties")
-            .is_none());
+        assert_eq!(
+            params.pointer("/properties/city/$schema"),
+            Some(&json!("x"))
+        );
+        assert_eq!(
+            params.pointer("/properties/city/additionalProperties"),
+            Some(&json!(false))
+        );
         assert_eq!(params.get("required"), Some(&json!(["city"])));
         assert_eq!(req.tool_choice, Some(json!("auto")));
     }
@@ -1436,6 +2065,203 @@ mod tests {
     }
 
     #[test]
+    fn gemini_tool_results_correlate_with_their_call_ids() {
+        let body = json!({
+            "contents": [
+                { "role": "user", "parts": [{ "text": "weather?" }] },
+                { "role": "model", "parts": [
+                    { "functionCall": { "name": "get_weather", "args": { "city": "sf" } } },
+                    { "functionCall": { "name": "get_weather", "args": { "city": "nyc" } } },
+                ]},
+                { "role": "user", "parts": [
+                    { "functionResponse": { "name": "get_weather", "response": { "temp": 18 } } },
+                    { "functionResponse": { "name": "get_weather", "response": { "temp": 20 } } },
+                    { "functionResponse": { "name": "unknown_fn", "response": { "x": 1 } } },
+                ]},
+            ],
+        });
+        let req = gemini_req_to_oai_req(&body);
+        assert_eq!(req.messages[1].role, "assistant");
+        let calls = req.messages[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2);
+        let id0 = calls[0]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let id1 = calls[1]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_ne!(id0, id1);
+        // Same-name responses correlate in call order; a response with no
+        // matching call in this request keeps the bare name.
+        assert_eq!(req.messages[2].tool_call_id.as_deref(), Some(id0.as_str()));
+        assert_eq!(req.messages[3].tool_call_id.as_deref(), Some(id1.as_str()));
+        assert_eq!(req.messages[4].tool_call_id.as_deref(), Some("unknown_fn"));
+
+        // Round trip back to Gemini: names resolve from the correlated ids.
+        let back = oai_req_to_gemini_req(&req);
+        assert_eq!(
+            back.contents[2].parts.pointer("/0/functionResponse/name"),
+            Some(&json!("get_weather"))
+        );
+        assert_eq!(
+            back.contents[3]
+                .parts
+                .pointer("/0/functionResponse/response"),
+            Some(&json!({ "temp": 20 }))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_tool_call_indices_are_stable_across_frames() {
+        use futures_util::stream;
+        let upstream = stream::iter(vec![
+            json!({
+                "candidates": [{ "content": { "role": "model", "parts": [
+                    { "functionCall": { "name": "first", "args": { "a": 1 } } },
+                ]}, "index": 0 }]
+            })
+            .to_string(),
+            json!({
+                "candidates": [{ "content": { "role": "model", "parts": [
+                    { "functionCall": { "name": "second", "args": { "b": 2 } } },
+                ]}, "finishReason": "STOP", "index": 0 }]
+            })
+            .to_string(),
+        ]);
+        let chunks: Vec<OAIStreamChunk> = gemini_stream_to_oai_chunks(upstream, "m".into())
+            .collect()
+            .await;
+        assert_eq!(chunks.len(), 2);
+        let first = &chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0];
+        let second = &chunks[1].choices[0].delta.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(first.get("index"), Some(&json!(0)));
+        assert_eq!(second.get("index"), Some(&json!(1)));
+        assert_eq!(second.pointer("/function/name"), Some(&json!("second")));
+    }
+
+    fn tool_delta_chunk(
+        index: u64,
+        name: Option<&str>,
+        arguments: &str,
+        finish: Option<&str>,
+    ) -> OAIStreamChunk {
+        let mut call = json!({ "index": index, "function": { "arguments": arguments } });
+        if let Some(name) = name {
+            call["id"] = json!(format!("call_{index}"));
+            call["type"] = json!("function");
+            call["function"]["name"] = json!(name);
+        }
+        OAIStreamChunk {
+            id: "t".into(),
+            object: "chat.completion.chunk".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: StreamDelta {
+                    tool_calls: Some(vec![call]),
+                    ..Default::default()
+                },
+                finish_reason: finish.map(str::to_string),
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+            source_anthropic_event: None,
+            source_responses_event: None,
+            source_gemini_event: None,
+        }
+    }
+
+    async fn gemini_frames(chunks: Vec<OAIStreamChunk>) -> Vec<Value> {
+        use futures_util::stream;
+        oai_chunks_to_gemini_stream(Box::pin(stream::iter(chunks)), "m".into())
+            .filter_map(|frame| async move { serde_json::from_str(&frame).ok() })
+            .collect()
+            .await
+    }
+
+    fn function_call_parts(frames: &[Value]) -> Vec<Value> {
+        frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter(|part| part.get("functionCall").is_some())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn interleaved_tool_deltas_flush_complete_calls_once() {
+        let frames = gemini_frames(vec![
+            tool_delta_chunk(0, Some("first"), "{\"x\":", None),
+            tool_delta_chunk(1, Some("second"), "{\"y\":", None),
+            tool_delta_chunk(0, None, "1}", None),
+            tool_delta_chunk(1, None, "2}", Some("tool_calls")),
+        ])
+        .await;
+        let calls = function_call_parts(&frames);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].pointer("/functionCall/name"),
+            Some(&json!("first"))
+        );
+        assert_eq!(
+            calls[0].pointer("/functionCall/args"),
+            Some(&json!({ "x": 1 }))
+        );
+        assert_eq!(
+            calls[1].pointer("/functionCall/name"),
+            Some(&json!("second"))
+        );
+        assert_eq!(
+            calls[1].pointer("/functionCall/args"),
+            Some(&json!({ "y": 2 }))
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_index_gaps_never_emit_empty_placeholder_calls() {
+        let frames = gemini_frames(vec![
+            tool_delta_chunk(2, Some("only"), "{\"a\":1}", None),
+            tool_delta_chunk(2, None, "", Some("tool_calls")),
+        ])
+        .await;
+        let calls = function_call_parts(&frames);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pointer("/functionCall/name"), Some(&json!("only")));
+    }
+
+    #[tokio::test]
+    async fn nameless_tool_call_surfaces_stream_error_instead_of_invalid_call() {
+        let frames = gemini_frames(vec![
+            tool_delta_chunk(0, None, "{}", None),
+            tool_delta_chunk(0, None, "", Some("tool_calls")),
+        ])
+        .await;
+        assert!(function_call_parts(&frames).is_empty());
+        assert!(frames.iter().any(|frame| frame.get("error").is_some()));
+    }
+
+    #[tokio::test]
+    async fn unterminated_tool_stream_flushes_without_fabricated_finish() {
+        let frames = gemini_frames(vec![tool_delta_chunk(0, Some("f"), "{\"a\":1}", None)]).await;
+        let calls = function_call_parts(&frames);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pointer("/functionCall/name"), Some(&json!("f")));
+        assert!(frames
+            .iter()
+            .all(|frame| frame.pointer("/candidates/0/finishReason").is_none()));
+    }
+
+    #[test]
     fn normalize_gemini_model_id_strips_prefix() {
         assert_eq!(
             normalize_gemini_model_id("models/gemini-2.5-pro"),
@@ -1479,5 +2305,44 @@ mod tests {
             .pointer("/properties/nested/properties/x/exclusiveMinimum")
             .is_none());
         assert_eq!(sanitized.get("required"), Some(&json!(["city"])));
+    }
+
+    /// The OpenAI `stream_options.include_usage` terminal chunk carries
+    /// `"choices": []` with a trailing usage payload — the Gemini surface
+    /// must relay it as a metadata-only frame instead of dropping the usage
+    /// (P3 regression).
+    #[tokio::test]
+    async fn gemini_stream_surfaces_usage_only_terminal_chunk() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "usage".to_string(),
+            json!({ "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5 }),
+        );
+        let usage_only = OAIStreamChunk {
+            id: "m".into(),
+            object: "chat.completion.chunk".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![],
+            extra,
+            source_anthropic_event: None,
+            source_responses_event: None,
+            source_gemini_event: None,
+        };
+        let frames = gemini_frames(vec![usage_only]).await;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].get("candidates").is_none());
+        assert_eq!(
+            frames[0].pointer("/usageMetadata/promptTokenCount"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            frames[0].pointer("/usageMetadata/candidatesTokenCount"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            frames[0].pointer("/usageMetadata/totalTokenCount"),
+            Some(&json!(5))
+        );
     }
 }

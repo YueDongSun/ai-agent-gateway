@@ -83,7 +83,10 @@ impl Drop for Owned_process {
             extern "C" {
                 fn kill(pid: i32, signal: i32) -> i32;
             }
-            // A new process group was explicitly assigned at spawn.
+            // A new process group was explicitly assigned at spawn. Drop-only
+            // teardown cannot run when AAG itself is hard-killed and Unix has
+            // no job-object equivalent here, so that crash can orphan the
+            // group: a documented platform limitation, not a fixed behavior.
             unsafe {
                 kill(-(self.child.id() as i32), 9);
             }
@@ -189,7 +192,7 @@ mod windows_job {
                     &limits as *const _ as *const c_void,
                     std::mem::size_of::<Extended_limits>() as u32,
                 ) == 0
-                    || AssignProcessToJobObject(handle.0, child.as_raw_handle() as *mut c_void) == 0
+                    || AssignProcessToJobObject(handle.0, child.as_raw_handle()) == 0
                 {
                     return Err(failure("process_job_assign_failed"));
                 }

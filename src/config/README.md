@@ -37,7 +37,9 @@ interactive menu.
   symlink/reparse paths, preserve tighter existing owner permissions, and
   retain exactly one pre-overwrite `config.json.backup`. Temporary failures
   never overwrite a colliding path.
-- `ProviderConfig.type` accepts `openai`, `anthropic`, `gemini`, or `mock`.
+- `ProviderConfig.type` accepts `openai`, `anthropic`, or `mock`. `gemini` is
+  rejected at validation: the Node gateway has no Gemini-native provider —
+  Gemini routing belongs to the desktop runtime.
 - `RouteConfig.alias` is the model name clients request; `hops` is the
   ordered fallback chain.
 - All identifiers default to a random six-character hex string so callers

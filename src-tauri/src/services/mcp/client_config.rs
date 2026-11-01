@@ -210,6 +210,28 @@ pub(super) fn create_private(path: &Path) -> Result<fs::File, AppError> {
         .map_err(|_| failure("client_write_preparation_failed"))
 }
 
+/// Remove regular files whose name starts with an AAG-owned sidecar prefix.
+/// Best-effort with a fixed warning on failure. Links are never followed and
+/// directories are never removed, so a foreign entry is left in place.
+fn prune_orphaned_sidecars(parent: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let matches_prefix = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix));
+        if matches_prefix && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            if let Err(error) = fs::remove_file(entry.path()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("client: sidecar prune failed code=remove_failed");
+                }
+            }
+        }
+    }
+}
+
 /// Serialize AAG writers with an exclusive lock, detect stale content, retain a
 /// private backup, and atomically replace only after the full new file is durable.
 /// Clients must be closed: an uncooperative external writer is not lock-aware.
@@ -239,6 +261,13 @@ pub(super) fn apply_claude(
     let lock_path = parent.join(".claude.json.aag_lock");
     let _lock =
         Owned_file::create(lock_path).map_err(|_| failure("client_sync_busy_or_interrupted"))?;
+    // The exclusive lock is held, so any pending temporary still in the home
+    // directory is an orphan of a crashed apply that holds no lock, and the
+    // per-review backup copies written by older builds are superseded by the
+    // single recovery copy this apply is about to write. Reclaiming those
+    // credential-bearing files bounds them even when the apply later aborts.
+    prune_orphaned_sidecars(parent, ".claude.json.aag_pending_");
+    prune_orphaned_sidecars(parent, ".claude.json.aag_backup_");
     if &read_client(path)? != original {
         return Err(failure("client_changed_since_preview"));
     }
@@ -264,7 +293,17 @@ pub(super) fn apply_claude(
     }
     pending.close();
     if let Some(previous) = original {
-        let backup_path = parent.join(format!(".claude.json.aag_backup_{nonce}"));
+        // One latest recovery copy per file. The earlier copy is superseded
+        // before the live replacement, so removing a token-bearing server
+        // definition cannot leave its token behind in a growing backup
+        // history; a crash before the replacement leaves the live file
+        // intact, which is the state the copy protected.
+        let backup_path = parent.join(".claude.json.aag_backup");
+        match fs::remove_file(&backup_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("client_backup_failed")),
+        }
         let mut backup = Owned_file::create(backup_path.clone())?;
         #[cfg(windows)]
         if let Some(permissions) = &source_acl {

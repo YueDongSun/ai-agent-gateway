@@ -9,7 +9,7 @@ export function Market_source_link({ entry_id, kind, url, label, t, on_error, cl
   entry_id: string; kind: Market_source_kind; url: string | null; label: string; t: Market_translate;
   on_error: (message: string) => void; class_name?: string;
 }) {
-  const safe_url = github_url(url);
+  const safe_url = kind === 'registry' && url === 'https://dsh.market/plugins.json' ? url : github_url(url);
   if (!safe_url) return null;
   const content = <><span>{label}</span><Market_icon name="external" /></>;
   return isDemo ? <a className={`market_source_link ${class_name}`} data-testid={`market_source_${kind}`} href={safe_url} target="_blank" rel="noopener noreferrer" title={t('open_external')}>{content}</a>
@@ -80,7 +80,7 @@ export function Market_detail({ entry, catalog, locale, t, return_focus, on_clos
         <dl className="market_metadata">
           <div><dt>{t('owner')}</dt><dd>{entry.author}</dd></div>
           <div><dt>{t('source_kind')}</dt><dd>{catalog.source_registry}</dd></div>
-          <div><dt>{t('registry_commit')}</dt><dd><code data-testid="market_registry_commit">{catalog.registry_commit}</code></dd></div>
+          <div><dt>{t('registry_commit')}</dt><dd><code data-testid="market_registry_commit">{catalog.registry_commit || t('commit_unknown')}</code></dd></div>
           <div><dt>{t('plugin_commit')}</dt><dd><code data-testid="market_plugin_commit">{entry.source_commit || t('commit_unknown')}</code></dd></div>
           <div><dt>{t('registry_updated')}</dt><dd>{localized_date(catalog.registry_generated_at, locale) || t('unknown')} UTC</dd></div>
           <div><dt>{t('snapshot_date')}</dt><dd>{localized_date(catalog.fetched_at, locale) || t('unknown')} UTC</dd></div>

@@ -5,7 +5,17 @@ import { run_dsh_checks } from './ui_smoke/dsh_checks.mjs';
 import { run_dsh_onboarding_checks } from './ui_smoke/dsh_onboarding_checks.mjs';
 import { run_dsh_market_checks } from './ui_smoke/dsh_market_checks.mjs';
 import { run_mcp_checks } from './ui_smoke/mcp_checks.mjs';
+import { run_workflow_checks } from './ui_smoke/workflow_checks.mjs';
+import { run_supplier_checks } from './ui_smoke/supplier_checks.mjs';
+import { run_provider_recheck_checks } from './ui_smoke/provider_recheck_checks.mjs';
+import { run_prompt_checks } from './ui_smoke/prompt_checks.mjs';
+import { run_prompt_reliability_checks } from './ui_smoke/prompt_reliability_checks.mjs';
+import { run_supplier_reliability_checks, run_mirror_reliability_checks } from './ui_smoke/supplier_reliability_checks.mjs';
+import { run_managed_cli_checks } from './ui_smoke/managed_cli_checks.mjs';
 import { check_in_page } from './ui_smoke/page_checks.mjs';
+import { install_client_management_navigation, open_client_management } from './ui_smoke/client_management_navigation.mjs';
+import { run_cli_display_checks } from './ui_smoke/cli_display_checks.mjs';
+import { run_provider_interaction_checks } from './ui_smoke/provider_interaction_checks.mjs';
 import { run_phase_23_regressions } from './ui_smoke/phase_23_regressions.mjs';
 import { run_gateway_feedback_checks, run_product_initial_checks } from './ui_smoke/product_checks.mjs';
 import { create_smoke_runtime, find_browser as find_owned_browser, format_error, sleep } from './ui_smoke/smoke_runtime.mjs';
@@ -37,6 +47,7 @@ function check(name, ok, detail = '') {
 const keep = process.argv.includes('--keep');
 const built_demo = process.argv.includes('--built-demo');
 let smoke_runtime = null;
+let browser_client = null;
 
 try {
   const exe = find_owned_browser();
@@ -45,6 +56,7 @@ try {
 
   smoke_runtime = await create_smoke_runtime(exe, { built_demo });
   const cdp = await attach_owned_page(smoke_runtime.cdp_origin);
+  browser_client = cdp;
 
   // --- load + render ---
   log('[smoke] owned Vite ' + smoke_runtime.demo_url + ' profile ' + smoke_runtime.profile_directory);
@@ -53,19 +65,30 @@ try {
   const initial_ready_deadline = Date.now() + 30_000;
   let initial_ui_ready = false;
   while (Date.now() < initial_ready_deadline) {
-    initial_ui_ready = await cdp.eval_value(`window.__aagDemoIsDemo === true && Boolean(document.querySelector('.aag-header')) && document.querySelector('.page-header h2')?.textContent === 'Claude'`);
+    initial_ui_ready = await cdp.eval_value(`window.__aagDemoIsDemo === true && Boolean(document.querySelector('.aag-header')) && Boolean(document.querySelector('[data-testid="suppliers_page"]'))`);
     if (initial_ui_ready) break;
     await sleep(100);
   }
-  if (!initial_ui_ready) throw new Error('owned demo did not render its header, synthetic backend marker and initial Claude page within 30s');
+  if (!initial_ui_ready) throw new Error('owned demo did not render its header, synthetic backend marker and initial provider workspace within 30s');
+  check('unified provider workspace is the initial page', initial_ui_ready);
+  await install_client_management_navigation(cdp);
+  await run_cli_display_checks({ cdp, check });
+  await open_client_management(cdp);
+  await run_provider_interaction_checks({ cdp, check });
+  const client_page_deadline = Date.now() + 10_000;
+  while (Date.now() < client_page_deadline) {
+    if (await cdp.eval_value(`document.querySelector('.page-header h2')?.textContent === 'Claude'`)) break;
+    await sleep(50);
+  }
 
   const loaded_url = await cdp.eval_value('location.href');
-  check('page stays on the owned runtime URL', loaded_url === smoke_runtime.demo_url, `loaded=${loaded_url} expected=${smoke_runtime.demo_url}`);
+  const expected_url = new URL('#/suppliers', smoke_runtime.demo_url).href;
+  check('page stays on the owned runtime URL and selected route', loaded_url === expected_url, `loaded=${loaded_url} expected=${expected_url}`);
 
   const bodyText = (await cdp.eval_value('document.body.innerText')) ?? '';
   check('page renders (no "UI error" crash screen)', !bodyText.includes('UI error'));
   check('header present', bodyText.includes('AI Agent Gateway'));
-  check('Claude page rendered', bodyText.includes('AAG 网关') || bodyText.includes('AAG Gateway'));
+  check('Suppliers renders Claude client management', bodyText.includes('AAG 网关') || bodyText.includes('AAG Gateway'));
   const favicon_href = await cdp.eval_value("document.querySelector('link[rel=\"icon\"]')?.getAttribute('href')");
   check('favicon points to the packaged app icon', favicon_href === '/app_icon.svg', `href=${favicon_href ?? 'missing'}`);
   const build_badge = await cdp.eval_value(`(() => {
@@ -125,10 +148,21 @@ try {
   await run_product_initial_checks({ cdp, check_in_page, check, sleep });
   await run_phase_23_regressions({ cdp, check_in_page, check, sleep });
   await run_gateway_feedback_checks({ cdp, check_in_page, check });
+  // Product-surface checks stay ahead of the heavy DSH/marketplace scenarios so
+  // an unrelated abort there cannot hide this page's evidence.
+  await run_prompt_checks({ cdp, check_in_page, check });
+  await run_managed_cli_checks({ cdp, check_in_page, check });
   await run_dsh_checks({ cdp, check_in_page, check, sleep });
   await run_dsh_onboarding_checks({ cdp, check_in_page, check });
   await run_dsh_market_checks({ cdp, cdp_origin: smoke_runtime.cdp_origin, demo_url: smoke_runtime.demo_url, check_in_page, check, sleep });
+  await run_workflow_checks({ cdp, check_in_page, check });
   await run_mcp_checks({ cdp, check_in_page, check });
+  await run_supplier_checks({ cdp, check_in_page, check, sleep });
+  await run_provider_recheck_checks({ cdp, check, check_in_page });
+  await run_supplier_reliability_checks({ cdp, check_in_page, check, open_client_management });
+  await run_mirror_reliability_checks({ cdp, check_in_page, check, open_client_management });
+  await run_prompt_reliability_checks({ cdp, check_in_page, check });
+  await open_client_management(cdp);
 
   // --- start the gateway ---
   await cdp.eval_value("document.querySelector('[data-testid=\"gateway-start\"]')?.click(); 1");
@@ -294,7 +328,7 @@ await check_in_page(cdp, check, 'cc-switch import flashes a report', async () =>
 });
 
   // ---- EDGE-CASE 2: proxy restart button (RouteEditor) ----
-  // "重启代理以生效" / "Restart proxy to apply" — should stop + start.
+  // "重启代理" / "Restart proxy" — should stop + start.
   await check_in_page(cdp, check, 'proxy restart button round-trips', async () => {
     const btn = document.querySelector('[data-testid="route-restart"]');
     if (!btn) return 'no-restart-btn';
@@ -436,9 +470,8 @@ await check_in_page(cdp, check, 'cc-switch import flashes a report', async () =>
     return 'ok';
   });
 
-  // The upstream type select exposes the anthropic passthrough option —
-  // the subscription-credential relay pool type (Workstream 2a).
-  await check_in_page(cdp, check, 'provider modal exposes anthropic passthrough type', async () => {
+  // The provider editor offers static API transports without imported login forwarding.
+  await check_in_page(cdp, check, 'provider modal excludes login-forwarding type and retains static API transports', async () => {
     const addBtn = document.querySelector('[data-testid="providers-add"]');
     if (!addBtn) return 'no-add-btn';
     addBtn.click();
@@ -456,7 +489,7 @@ await check_in_page(cdp, check, 'cc-switch import flashes a report', async () =>
     // Close without saving.
     [...modal.querySelectorAll('button')]
       .find(b => /取消|Cancel|×/.test(b.textContent))?.click();
-    return hasPassthrough ? 'ok' : 'no-passthrough-option';
+    return !hasPassthrough && [...typeSelect.options].some(o => o.value === 'anthropic') ? 'ok' : 'unexpected-login-option';
   });
 
   // ---- EDGE-CASE 6: clipboard copy (Base URL / API key buttons) ----
@@ -476,8 +509,16 @@ await check_in_page(cdp, check, 'cc-switch import flashes a report', async () =>
   // ---- EDGE-CASE 7: tab persistence — switch to Codex and back, ----
 // Claude's route set must round-trip identically; Codex tab must only
 // show codex-prefixed aliases.
+await check_in_page(cdp, check, 'route edits are explicitly saved before changing the managed client', async () => {
+  document.querySelector('[data-testid="route-save"]')?.click();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    if (!document.querySelector('.route-dirty') && !document.querySelector('[data-testid="route-save"]')?.disabled) return 'ok';
+  }
+  return 'route edits did not settle as saved';
+});
 await check_in_page(cdp, check, 'tab switch preserves Claude routes', async () => {
-  const claudeBtn = [...document.querySelectorAll('.app-switcher button')]
+  const claudeBtn = [...document.querySelectorAll('.client_management_switcher button')]
     .find(b => b.textContent.trim() === 'Claude');
   claudeBtn?.click();
   await new Promise(r => setTimeout(r, 1500));
@@ -489,13 +530,13 @@ await check_in_page(cdp, check, 'tab switch preserves Claude routes', async () =
 // ---- Claude mirror (CLAUDE_CONFIG_DIR) integration ----
 // The Claude page now carries the mirror rows: auth-mode toggle, mirror
 // home row, and the Open Claude Desktop launcher.
-await check_in_page(cdp, check, 'Claude page exposes mirror rows + launcher', async () => {
+await check_in_page(cdp, check, 'Claude client settings expose isolated home and launcher without account forwarding', async () => {
   const modeToggle = document.querySelector('[data-testid="claude-mirror-mode-toggle"]');
   const openBtn = document.querySelector('[data-testid="claude-open-desktop"]');
   const mirrorHomeLabel = [...document.querySelectorAll('.endpoint-label')]
     .some(l => (l.textContent || '').includes('CLAUDE_CONFIG_DIR'));
   return {
-    ok: Boolean(modeToggle) && Boolean(openBtn) && mirrorHomeLabel,
+    ok: !modeToggle && Boolean(openBtn) && mirrorHomeLabel,
     detail: `mode=${Boolean(modeToggle)} open=${Boolean(openBtn)} home=${mirrorHomeLabel}`,
   };
 });
@@ -527,31 +568,18 @@ await check_in_page(cdp, check, 'Claude Desktop launcher failure shows error ban
   }
 });
 
-// Mode toggle: flip to passthrough, verify persistence across an AppPage
-// remount, then restore token mode.
-await check_in_page(cdp, check, 'claude mirror mode toggle flips + persists across remount', async () => {
-  const sw = document.querySelector('[data-testid="claude-mirror-mode-toggle"]');
-  if (!sw) return 'no-toggle';
-  const was = sw.checked; // mock default: token (off)
-  sw.click();
-  await new Promise(r => setTimeout(r, 600));
-  const on1 = document.querySelector('[data-testid="claude-mirror-mode-toggle"]')?.checked;
-  // Force AppPage remount + refresh(): Claude -> Codex round-trip (also
-  // clears the forced-error banner from the previous check).
-  [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click();
-  await new Promise(r => setTimeout(r, 700));
-  [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click();
-  await new Promise(r => setTimeout(r, 900));
-  const on2 = document.querySelector('[data-testid="claude-mirror-mode-toggle"]')?.checked;
-  // Restore token mode.
-  if (on2) document.querySelector('[data-testid="claude-mirror-mode-toggle"]')?.click();
-  await new Promise(r => setTimeout(r, 500));
-  const off = document.querySelector('[data-testid="claude-mirror-mode-toggle"]')?.checked;
-  return { ok: !was && on1 && on2 && !off, detail: `was=${was} on1=${on1} on2=${on2} off=${off}` };
+await check_in_page(cdp, check, 'imported login forwarding options remain absent across client remounts', async () => {
+  const absent = () => !document.querySelector('[data-testid="claude-mirror-mode-toggle"]');
+  const before = absent();
+  document.querySelector('[data-testid="client-settings-tab-codex"]')?.click();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  document.querySelector('[data-testid="client-settings-tab-claude_code"]')?.click();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  return { ok: before && absent() };
 });
 
 await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', async () => {
-  const codexBtn = [...document.querySelectorAll('.app-switcher button')]
+  const codexBtn = [...document.querySelectorAll('.client_management_switcher button')]
     .find(b => b.textContent.trim() === 'Codex');
   codexBtn?.click();
   await new Promise(r => setTimeout(r, 1500));
@@ -570,7 +598,7 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
 
   // ---- EDGE-CASE 8: Codex page renders all four routes ----
   // Codex has its own advanced-routes open state (starts collapsed).
-  await cdp.eval_value("[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
+  await cdp.eval_value("[...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
   await sleep(1500);
   await cdp.eval_value(`(() => {
     const t = document.querySelector('[data-testid="advanced-routes-toggle"]');
@@ -596,7 +624,7 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
   });
 
   // --- tab switch to Codex ---
-  await cdp.eval_value("[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
+  await cdp.eval_value("[...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1");
   await sleep(1500);
   const codexText = (await cdp.eval_value('document.body.innerText')) ?? '';
   check('Codex tab renders mirror row', codexText.includes('~/.codex-cli'));
@@ -616,9 +644,9 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
   })()`);
   check('Codex mirror error override armed', mirrorArm === 'armed', String(mirrorArm));
   // Switch Claude <-> Codex to force AppPage's mount-time fetch.
-  await cdp.eval_value(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click(); 1`);
+  await cdp.eval_value(`[...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Claude')?.click(); 1`);
   await sleep(800);
-  await cdp.eval_value(`[...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1`);
+  await cdp.eval_value(`[...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Codex')?.click(); 1`);
   await sleep(1500);
   await check_in_page(cdp, check, 'Codex mirror row shows error chip on fetch failure', async () => {
     const chip = document.querySelector('[data-testid="codex-mirror-error"]');
@@ -654,17 +682,21 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
     const addHopBtn = [...document.querySelectorAll('.route-card-actions button')]
       .find(b => b.textContent.includes('添加跳转') || b.textContent.includes('Add Hop'));
     if (!addHopBtn) return 'no-add-hop-btn';
+    const card_now = () => document.querySelector('.route-card');
+    const initial = card_now()?.querySelectorAll('.hop-row').length ?? -1;
+    if (initial < 0) return 'no-route-card';
     addHopBtn.click();
     await new Promise(r => setTimeout(r, 500));
-    const firstCard = document.querySelector('.route-card');
-    if (!firstCard) return 'no-route-card';
-    const after = firstCard.querySelectorAll('.hop-row').length;
-    const removeBtn = firstCard.querySelector('.hop-remove-cell button');
+    // Re-query the card: React may re-render the list, detaching the
+    // node the click targeted.
+    const after = card_now()?.querySelectorAll('.hop-row').length ?? -1;
+    if (after !== initial + 1) return 'add-failed: ' + initial + '->' + after;
+    const removeBtn = [...(card_now()?.querySelectorAll('.hop-remove-cell button') ?? [])].at(-1);
     if (!removeBtn) return 'no-remove-btn';
     removeBtn.click();
     await new Promise(r => setTimeout(r, 500));
-    const final = firstCard.querySelectorAll('.hop-row').length;
-    if (after === final) return 'ok: ' + after + '->' + final + ' (no change)';
+    const final = card_now()?.querySelectorAll('.hop-row').length ?? -1;
+    if (final !== initial) return 'remove-failed: ' + after + '->' + final;
     return 'ok';
   });
 
@@ -687,9 +719,9 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
     await new Promise(r => setTimeout(r, 600));
     const on1 = document.querySelector('[data-testid="gateway-cot-toggle"]')?.checked;
     // Force AppPage remount + refresh(): Claude -> Codex round-trip.
-    [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click();
+    [...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Claude')?.click();
     await new Promise(r => setTimeout(r, 700));
-    [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click();
+    [...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Codex')?.click();
     await new Promise(r => setTimeout(r, 900));
     const on2 = document.querySelector('[data-testid="gateway-cot-toggle"]')?.checked;
     // Restore off.
@@ -710,9 +742,9 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
     await new Promise(r => setTimeout(r, 600));
     const on1 = document.querySelector('[data-testid="codex-mirror-mode-toggle"]')?.checked;
     // Force AppPage remount + refresh(): Claude -> Codex round-trip.
-    [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Claude')?.click();
+    [...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Claude')?.click();
     await new Promise(r => setTimeout(r, 700));
-    [...document.querySelectorAll('.app-switcher button')].find(b => b.textContent.trim() === 'Codex')?.click();
+    [...document.querySelectorAll('.client_management_switcher button')].find(b => b.textContent.trim() === 'Codex')?.click();
     await new Promise(r => setTimeout(r, 900));
     const on2 = document.querySelector('[data-testid="codex-mirror-mode-toggle"]')?.checked;
     // Restore exclusive.
@@ -733,7 +765,7 @@ await check_in_page(cdp, check, 'Codex tab filters routes to codex- prefix', asy
 } finally {
   if (smoke_runtime && (!keep || failed)) {
     try {
-      await smoke_runtime.close();
+      await smoke_runtime.close(browser_client);
       log('[smoke] owned runtime closed and profile removed.');
     } catch (error) {
       failed = true;

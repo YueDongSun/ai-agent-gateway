@@ -1,4 +1,5 @@
 import type { AppConfig, AgentTarget, AgentId } from '../config/schema.js';
+import { existsSync } from 'node:fs';
 import { defaultAgentTargets, createAdapter, type AgentAdapter, type SwitchResult } from './adapters.js';
 import { logger } from '../util/log.js';
 
@@ -33,7 +34,6 @@ export class Switcher {
     if (!path) return { ok: false, agent: id, path: '', message: 'no config path resolved' };
 
     const gwURL = `http://${this.cfg.gateway.host}:${this.cfg.gateway.port}`;
-    const prev = adapter.read();
 
     try {
       const content = adapter.buildGatewayConfig(gwURL, this.cfg.gateway.authToken, model);
@@ -42,7 +42,7 @@ export class Switcher {
       t.pointedAtGateway = true;
       t.activeProfileId = '';
       logger.info('switch', `${id} -> gateway (${gwURL}) at ${path}`);
-      return { ok: true, agent: id, path, message: `pointed at gateway ${gwURL}`, previous: prev };
+      return { ok: true, agent: id, path, message: `pointed at gateway ${gwURL}` };
     } catch (e) {
       return { ok: false, agent: id, path, message: (e as Error).message };
     }
@@ -54,7 +54,6 @@ export class Switcher {
     const path = adapter.resolveConfigPath();
     if (!path) return { ok: false, agent: id, path: '', message: 'no config path resolved' };
 
-    const prev = adapter.read();
     try {
       const content = adapter.buildDirectConfig(baseURL, apiKey, model);
       adapter.write(content);
@@ -62,7 +61,7 @@ export class Switcher {
       t.pointedAtGateway = false;
       t.activeProfileId = '';
       logger.info('switch', `${id} -> direct ${baseURL} at ${path}`);
-      return { ok: true, agent: id, path, message: `pointed at ${baseURL}`, previous: prev };
+      return { ok: true, agent: id, path, message: `pointed at ${baseURL}` };
     } catch (e) {
       return { ok: false, agent: id, path, message: (e as Error).message };
     }
@@ -88,13 +87,7 @@ export class Switcher {
     return {
       pointedAtGateway: t.pointedAtGateway,
       baseURL: adapter.detectCurrentBaseURL(),
-      path: t.configPaths.find((x) => {
-        try {
-          return true;
-        } catch {
-          return false;
-        }
-      }),
+      path: t.configPaths.find((x) => existsSync(x)),
     };
   }
 

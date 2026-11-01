@@ -163,6 +163,8 @@ mod tests {
                     responses_cot_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     passthrough_auth_allowed: false,
                     db: None, // e2e doesn't exercise failover-winner persistence
+                    live: None,
+                    allow_client_config_repair: false,
                 };
                 let handle = tokio::spawn(async move {
                     if let Err(e) = serve(addr, state_for_try, rx).await {

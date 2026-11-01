@@ -1,11 +1,30 @@
 /// Typed Tauri command wrappers. All commands are defined in
 /// `src-tauri/src/lib.rs` `invoke_handler!`.
 import { invoke } from '@tauri-apps/api/core';
-import type { LiveWriteResult, Provider, Provider_config_status } from './types';
+import type {
+  Config_edit_target,
+  LiveWriteResult,
+  Provider,
+  Provider_config_status,
+  Provider_switch_all_entry,
+} from './types';
 
 /** Resolve the current OS and configuration target without writing files. */
 export async function get_provider_config_status(appType: string): Promise<Provider_config_status> {
   return invoke<Provider_config_status>('provider_config_status', { appType });
+}
+
+/** Read the live Kilo config file verbatim for in-app editing. */
+export async function read_client_config(appType: string): Promise<Config_edit_target> {
+  return invoke<Config_edit_target>('client_config_read', { appType });
+}
+
+/** Validate edited text (JSON/JSONC, object root) and write it back atomically. */
+export async function save_client_config(
+  appType: string,
+  contents: string,
+): Promise<LiveWriteResult> {
+  return invoke<LiveWriteResult>('client_config_save', { appType, contents });
 }
 
 /// List all providers for an app.
@@ -45,6 +64,12 @@ export async function switchProvider(
   appType: string,
 ): Promise<LiveWriteResult> {
   return invoke<LiveWriteResult>('provider_switch', { id, appType });
+}
+
+/// One-click fill: apply every supported client's current provider to its
+/// live configuration in one action. Per-app outcome, never a total abort.
+export async function switchAllProviders(): Promise<Provider_switch_all_entry[]> {
+  return invoke<Provider_switch_all_entry[]>('provider_switch_all');
 }
 
 /// Reorder providers by writing a new sort_index for each id. Used by

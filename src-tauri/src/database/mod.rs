@@ -15,6 +15,7 @@
 //! ```
 
 pub mod dao;
+pub(crate) mod operator;
 mod schema;
 pub(crate) mod seed;
 
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 /// Current schema version. Increment on every schema change and add a migration
 /// branch in `schema.rs::apply_schema_migrations`.
-pub(crate) const SCHEMA_VERSION: i32 = 19;
+pub(crate) const SCHEMA_VERSION: i32 = 25;
 
 /// Serialize a value to a JSON string, mapping errors to AppError.
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -61,7 +62,7 @@ impl Database {
     }
 
     #[cfg(test)]
-    fn init_at_path(db_path: &Path) -> Result<Self, AppError> {
+    pub(crate) fn init_at_path(db_path: &Path) -> Result<Self, AppError> {
         Self::init_at_path_with_policy(db_path, true)
     }
 
@@ -78,6 +79,15 @@ impl Database {
         }
         private_fs::ensure_private_file(db_path)?;
         private_fs::preflight_sqlite_files(db_path)?;
+        // SQLite opens these with OPEN_ALWAYS. Create absent WAL sidecars
+        // privately first so an elevated token's default group owner cannot
+        // make this new database fail its own post-open ownership check.
+        // Existing sidecars still pass the unchanged preflight above.
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = db_path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            private_fs::ensure_private_file(Path::new(&sidecar))?;
+        }
 
         let conn = Connection::open_with_flags(
             db_path,
@@ -94,6 +104,16 @@ impl Database {
         // e2e test in iteration 26; the same pattern was broken in
         // `memory()` below.)
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Cross-process readers (the read-only MCP companion scripts use the
+        // same ~/.aag/aag.db) can hold the write lock briefly. Without a
+        // busy timeout those windows surface as immediate SQLITE_BUSY, which
+        // callers like the periodic model-discovery run silently swallow —
+        // a whole discovery cycle skipped for a microsecond of contention.
+        // 1 s is the ceiling, not the typical wait: sync Tauri commands run
+        // on the UI thread, so a longer timeout would freeze the window on
+        // contention. Brief cross-process reader stalls recover well inside
+        // 1 s; anything longer surfaces as SQLITE_BUSY again.
+        conn.pragma_update(None, "busy_timeout", "1000")?;
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),

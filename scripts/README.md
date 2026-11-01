@@ -1,6 +1,6 @@
 # `scripts/` — Desktop tooling, release preflight, and browser smoke
 
-Cross-cutting Node scripts. Desktop dev / build runners, the icon
+Cross-cutting development tools. Desktop dev / build runners, the icon
 generator, the release preflight that verifies icons and the desktop
 version triple, the desktop runner / build configuration helpers plus
 their `node --test` unit tests, and the owned browser smoke runner.
@@ -34,11 +34,19 @@ their `node --test` unit tests, and the owned browser smoke runner.
   page checks and regression scenarios, and cleans up afterwards.
 - [`ui_smoke/`](ui_smoke/README.md) — owned browser runtime, CDP
   transport, page checks, and regression scenarios.
+- [`upstream_router/`](upstream_router/README.md) — optional Python
+  configuration adapter preserving the legacy Gemini/Grok LiteLLM route
+  aliases and ordered fallbacks. Validates operator-owned JSON, references
+  secrets through environment variables, and prepares a manual launch
+  contract without starting a listener or managing login tasks.
 
 ## Key contracts
 
-- These scripts use `node --test` for unit coverage, NOT the Vitest
+- Node scripts use `node --test` for unit coverage, NOT the Vitest
   suite. They are not subject to the `vitest.config.ts` glob.
+- The optional `upstream_router` adapter uses standard-library Python
+  tests documented in its README. It has no dependency on CC Switch or
+  OpenClaw private storage; LiteLLM remains an operator-supplied runtime.
 - The release preflight deliberately does not import an image library;
   it reads PNG / ICO / ICNS bytes directly so CI does not need
   Sharp / image-decoding dependencies.

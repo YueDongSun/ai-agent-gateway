@@ -1,7 +1,8 @@
 # `.github/workflows/` — CI workflows
 
 GitHub Actions workflows. Privacy checks run automatically for pushes and pull
-requests. The desktop build matrix remains manual-only.
+requests. Functional regressions run automatically for relevant changes. The
+desktop build matrix remains manual-only.
 
 ## Anchor files
 
@@ -20,10 +21,17 @@ requests. The desktop build matrix remains manual-only.
   and audits the reviewed repository tree. It has read-only contents
   permission and neither uploads artifacts nor creates a release.
 
+- [`functional_regression.yml`](functional_regression.yml) — automatic Node,
+  React/browser-demo and ordinary Rust checks selected by changed paths. It
+  installs tracked dependency locks and runs browser suites sequentially. The
+  Rust job builds the frontend and populates a cold dependency cache before
+  offline verification. It creates no package, release or uploaded artifact;
+  native Windows qualification and real-provider acceptance remain separate.
+
 ## Key contracts
 
-- `privacy_gate.yml` is the only automatic workflow and cannot publish or
-  upload build artifacts. `desktop_build.yml` is intentionally manual so a
+- The automatic privacy and functional workflows cannot publish or upload
+  build artifacts. `desktop_build.yml` is intentionally manual so a
   release candidate is never produced without an explicit human decision.
 - Workflows run with `contents: read` permission only. No secrets,
   no signing credentials, no notarization credentials, no updater

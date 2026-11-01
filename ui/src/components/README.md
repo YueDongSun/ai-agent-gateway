@@ -23,13 +23,17 @@ desktop build and the browser demo.
   or application changes. Copy receives the original value.
 - [`diagnostics_modal.tsx`](diagnostics_modal.tsx) — global local-log status,
   temporary Debug controls, directory opening, and safe summary copying.
+- [`workspace_header.tsx`](workspace_header.tsx) — sticky workspace header:
+  destination selector, gateway status, diagnostics, theme, and locale controls.
+- [`use_accessible_dialog.ts`](use_accessible_dialog.ts) — modal dialog
+  semantics: initial focus, Tab containment, Escape (blocked while busy), scroll
+  lock, and focus return to the trigger.
 - [`error_boundary.tsx`](error_boundary.tsx) — React render-failure fallback
   and sanitized native error reporting.
-- [`app/`](app/README.md) — the per-app page subtree (Claude, Codex,
-  Copilot, OpenCode, Kilo, VS Code variants) plus the shared
-  `GatewayPanel`, `ProvidersPanel` / `ProviderCard`, `AdvancedRoutes` /
-  `RouteEditor`, `Launchers`, and the split providers / routes state
-  contexts.
+- [`app/`](app/README.md) — model-only current-configuration views for clients.
+- [`suppliers/client_management/`](suppliers/client_management/README.md) —
+  retained gateway, provider, route, configuration and launcher controls. This
+  subtree mounts only from the Suppliers client-management disclosure.
 
 ## Key contracts
 

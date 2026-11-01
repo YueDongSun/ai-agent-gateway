@@ -233,7 +233,8 @@ This is a proposed mapping, not tested compatibility. Verify streaming text,
 tool calls/results, cancellation, token usage, reasoning fields, image claims,
 and error behavior against the selected model/route. Use request-compatibility
 settings only when the observed endpoint requires them. AAG takes a proxy
-snapshot at startup, so edits to AAG routes require a restart; merely adding a
+snapshot at startup, so listener/auth changes require a restart; routing and
+provider edits hot-apply to new requests, and merely adding a
 DSH consumer does not inherently require changing those routes.
 
 DSH search is a separate integration. `web-search-deepseek` resolves

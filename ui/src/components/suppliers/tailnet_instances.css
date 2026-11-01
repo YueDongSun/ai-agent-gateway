@@ -1,0 +1,22 @@
+.tailnet_instances { margin-top: 24px; }
+.tailnet_instances .card-head { align-items: flex-start; flex-wrap: wrap; }
+.tailnet_instances h3 { margin: 0; }
+.tailnet_instances .card-head p { margin: 5px 0 0; }
+.tailnet_auto { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-muted); margin: 14px 0; }
+.tailnet_instances .tailnet_auto input { flex: 0 0 auto; width: 16px; height: 16px; accent-color: var(--accent); }
+.tailnet_discovery_state { font-size: 11px; color: var(--fg-muted); padding: 5px 8px; border-radius: var(--radius-sm); background: var(--bg-elevated-2); }
+.tailnet_discovery_state.complete { color: var(--success-text); background: var(--success-bg); }
+.tailnet_discovery_state.error { color: var(--danger); background: var(--danger-bg); }
+.tailnet_discovery_state.scanning, .tailnet_discovery_state.cancelling { color: var(--accent-text); background: var(--accent-bg); }
+.tailnet_counts { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 16px 0; font-size: 11px; color: var(--fg-muted); }
+.tailnet_counts > div { display: flex; gap: 6px; }
+.tailnet_counts dt, .tailnet_counts dd { margin: 0; }
+.tailnet_counts dd { font-weight: 650; color: var(--fg); }
+.tailnet_instance_list { display: grid; gap: 10px; list-style: none; padding: 0; margin: 12px 0 0; }
+.tailnet_instance_list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.tailnet_instance_list li > div:first-child { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.tailnet_instance_list code { flex-basis: 100%; overflow-wrap: anywhere; color: var(--fg-code); font-size: 12px; }
+.tailnet_instance_status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tailnet_online { color: var(--success-text); font-size: 11px; }
+.tailnet_online::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--success); }
+@media (max-width: 520px) { .tailnet_instance_status { width: 100%; } .tailnet_instance_status .btn { margin-left: auto; min-height: 44px; } .tailnet_auto { min-height: 44px; } }

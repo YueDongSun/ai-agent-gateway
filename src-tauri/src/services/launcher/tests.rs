@@ -1,7 +1,118 @@
 use super::{discovery::*, process, terminal, vscode, *};
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+};
+
+#[test]
+fn managed_codex_launch_requires_authority_before_cwd_or_mirror_mutation() {
+    let fixture = crate::services::provider::test_support::isolated_home("managed-launch-guard");
+    let database = Database::memory().unwrap();
+    database
+        .set_setting("codex_session_authority_enabled", "1")
+        .unwrap();
+    database
+        .set_setting(
+            crate::database::dao::settings::KEY_CODEX_CLI_HOME,
+            crate::config::get_codex_config_dir().to_str().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        codex_open_cli_terminal(
+            &database,
+            Some(
+                fixture
+                    .root
+                    .join("missing-cwd")
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            None,
+            None
+        )
+        .unwrap_err(),
+        "session_client_authority_unavailable"
+    );
+    assert_eq!(
+        codex_open_desktop_window(&database, None, None).unwrap_err(),
+        "session_client_authority_unavailable"
+    );
+    assert!(!fixture.root.join(".codex").exists());
+    assert!(!fixture.root.join(".codex-cli").exists());
+}
+
+#[test]
+fn mirror_session_reset_hint_preserves_history_and_cache_contract() {
+    let hints = mirror_audit_hints("empty", false, true, None);
+    let hint = hints
+        .iter()
+        .find(|hint| hint.starts_with("session_cache_present:"))
+        .unwrap();
+    assert!(hint.contains("clears auth and known global login-state files"));
+    assert!(hint.contains("preserving cache, conversation history, and attachments"));
+    assert!(mirror_audit_hints("empty", false, false, None)
+        .iter()
+        .all(|hint| !hint.starts_with("session_cache_present:")));
+}
+
+#[test]
+fn managed_broker_key_is_redacted_in_launcher_receipts() {
+    let environment = vec![
+        ("AAG_SESSION_API_KEY".into(), "fixture_active_secret".into()),
+        (
+            "AAG_SESSION_BROKER_URL".into(),
+            "ws://127.0.0.1:43219/aag/codex".into(),
+        ),
+    ];
+    let receipt = serde_json::to_string(&redacted_environment(&environment)).unwrap();
+    assert!(!receipt.contains("fixture_active_secret"));
+    assert!(receipt.contains("AAG_SESSION_API_KEY"));
+    assert!(receipt.contains("[redacted]"));
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_cli_arguments_arrive_as_literal_values() {
+    // Use the documented Node prerequisite as a harmless argv receiver;
+    // PowerShell script execution policy must not affect CLI argument tests.
+    let program = discovery::find_tool("node", &["node.exe"])
+        .expect("Node.js is a documented project prerequisite");
+    let arguments = vec![
+        "--auto-approve".to_string(),
+        "false".into(),
+        "literal '$HOME'; $(throw 'must not execute') & | % !".into(),
+        "model with spaces".into(),
+    ];
+    let mut command = process::background_command(discovery::powershell().unwrap());
+    let mut invocation_arguments = vec![
+        "-e".to_string(),
+        "process.stdout.write(JSON.stringify(process.argv.slice(1)))".into(),
+        "--".into(),
+    ];
+    invocation_arguments.extend(arguments.iter().cloned());
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        terminal::WINDOWS_AGENT_SCRIPT,
+    ]);
+    command
+        .env("AAG_LAUNCH_PROGRAM", &program)
+        .env(
+            "AAG_LAUNCH_ARGUMENTS",
+            serde_json::to_string(&invocation_arguments).unwrap(),
+        )
+        .env_remove("AAG_LAUNCH_CWD");
+    let output = process::capture_stdout(&mut command, process::PROBE_TIMEOUT).unwrap();
+    let received: Vec<String> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(received, arguments);
+}
+// `Command`, `Duration`, and `Instant` are consumed only by the unix/macos
+// process-spawning probes below; importing them unconditionally would warn on
+// Windows where those tests are compiled out.
+#[cfg(unix)]
+use std::{
     process::Command,
     time::{Duration, Instant},
 };
@@ -103,17 +214,38 @@ fn mirror_modes_keep_upstream_behavior_with_isolated_configuration() {
 }
 
 #[test]
-fn mirror_seed_copies_allowlist_and_preserves_previous_mirror_bytes() {
+fn codex_mirror_set_mode_never_leaks_internal_error_details_over_ipc() {
+    use crate::database::dao::settings::*;
     let directory = process::private_temp_dir().unwrap();
-    let native = directory.path().join("native");
-    let mirror = directory.path().join("mirror");
+    let database = Database::memory().unwrap();
+    // Point the mirror home under a regular file so the mirror write fails
+    // with an io error carrying the absolute path and OS error text.
+    let blocker = directory.path().join("blocker");
+    fs::write(&blocker, b"not a directory").unwrap();
+    database
+        .set_setting(KEY_CODEX_CLI_HOME, blocker.join("sub").to_str().unwrap())
+        .unwrap();
+    let error = codex_mirror_set_mode(&database, "coexist".into()).unwrap_err();
+    // Every launcher sibling redacts through String::from(AppError) ==
+    // external_message(): the stable rule-2 code crosses verbatim; a Display
+    // stringification would mangle it into "config error: <code>" (and leak
+    // paths for the Io variant).
+    assert_eq!(error, "private_storage:non_directory_component", "{error}");
+    assert!(!error.contains(directory.path().to_str().unwrap()));
+}
+
+#[test]
+fn mirror_seed_copies_allowlist_and_preserves_previous_mirror_bytes() {
+    let home = crate::services::provider::test_support::isolated_home("instruction-initial-copy");
+    let native = home.root.join("native");
+    let mirror = home.root.join("mirror");
     fs::create_dir_all(native.join("skills/custom")).unwrap();
     fs::create_dir_all(native.join("agents")).unwrap();
     fs::write(native.join("AGENTS.md"), "# fixture instructions").unwrap();
     fs::write(native.join("skills/custom/skill.toml"), "name='fixture'").unwrap();
     fs::write(native.join("agents/helper.toml"), "fixture").unwrap();
     fs::write(native.join("auth.json"), "fixture secret").unwrap();
-    mirror_seed::seed_mirror_from_native(&native, &mirror).unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
     assert_eq!(
         fs::read_to_string(mirror.join("AGENTS.md")).unwrap(),
         "# fixture instructions"
@@ -122,20 +254,229 @@ fn mirror_seed_copies_allowlist_and_preserves_previous_mirror_bytes() {
     assert!(mirror.join("agents/helper.toml").is_file());
     assert!(!mirror.join("auth.json").exists());
     fs::write(native.join("AGENTS.md"), "# changed").unwrap();
-    mirror_seed::seed_mirror_from_native(&native, &mirror).unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
     assert_eq!(
-        fs::read_to_string(mirror.join("AGENTS.md.aag_backup")).unwrap(),
+        fs::read_to_string(mirror.join("AGENTS.md")).unwrap(),
         "# fixture instructions"
     );
+    assert!(!mirror.join("AGENTS.md.aag_backup").exists());
     crate::config::private_fs::verify_private_file(&mirror.join("AGENTS.md")).unwrap();
-    crate::config::private_fs::verify_private_file(&mirror.join("AGENTS.md.aag_backup")).unwrap();
+}
+
+#[test]
+fn claude_mirror_seed_copies_claude_instruction_roots() {
+    let home = crate::services::provider::test_support::isolated_home("claude-instruction-initial-copy");
+    let native = home.root.join("native");
+    let mirror = home.root.join("mirror");
+    fs::create_dir_all(native.join("skills/custom")).unwrap();
+    fs::create_dir_all(native.join("commands")).unwrap();
+    fs::create_dir_all(native.join("rules")).unwrap();
+    fs::write(native.join("CLAUDE.md"), "# claude fixture").unwrap();
+    fs::write(native.join("skills/custom/SKILL.md"), "fixture skill").unwrap();
+    fs::write(native.join("commands/build.md"), "fixture command").unwrap();
+    fs::write(native.join("rules/keep.md"), "fixture rule").unwrap();
+    fs::write(native.join("settings.json"), "{\"fixture\":true}").unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Claude, &native, &mirror).unwrap();
+    assert_eq!(
+        fs::read_to_string(mirror.join("CLAUDE.md")).unwrap(),
+        "# claude fixture"
+    );
+    assert!(mirror.join("skills/custom/SKILL.md").is_file());
+    assert!(mirror.join("commands/build.md").is_file());
+    // `rules` is sync-managed but not part of the bootstrap seed set.
+    assert!(!mirror.join("rules").exists());
+    assert!(!mirror.join("settings.json").exists());
+}
+
+fn seed_fixture_permissions(path: &Path) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        let mut command = process::background_command(discovery::powershell().unwrap());
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Acl -LiteralPath $env:AAG_TEST_SEED_PATH -ErrorAction Stop).Sddl",
+        ]);
+        // Windows PowerShell's filesystem provider does not accept Rust's
+        // canonical verbatim prefix; remove it only at this test probe boundary.
+        let native_path = path.to_string_lossy();
+        let shell_path = native_path
+            .strip_prefix(r"\\?\UNC\")
+            .map(|suffix| format!(r"\\{suffix}"))
+            .unwrap_or_else(|| {
+                native_path
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(&native_path)
+                    .to_string()
+            });
+        command.env("AAG_TEST_SEED_PATH", shell_path);
+        // PowerShell 7's module path may select incompatible modules in the
+        // Windows PowerShell child used only for this ACL snapshot.
+        command.env_remove("PSModulePath");
+        let permissions = process::capture_stdout(&mut command, process::PROBE_TIMEOUT).unwrap();
+        assert!(!permissions.is_empty());
+        permissions
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).unwrap();
+        format!("{}:{}:{}", metadata.mode(), metadata.uid(), metadata.gid()).into_bytes()
+    }
+}
+
+#[test]
+fn mirror_seed_preserves_initialized_instruction_roots_without_acl_or_content_changes() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    let mirror = directory.path().join("mirror");
+    fs::create_dir_all(native.join("skills/new_skill")).unwrap();
+    fs::create_dir_all(native.join("agents")).unwrap();
+    fs::write(native.join("AGENTS.md"), "native instructions").unwrap();
+    fs::write(native.join("skills/new_skill/SKILL.md"), "new native skill").unwrap();
+    fs::write(native.join("agents/new.toml"), "new native agent").unwrap();
+    crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+    // Ordinary runtime-created children inherit the private parent's ACL.
+    // They are still rejected by AAG's stricter protected-DACL copy boundary.
+    fs::create_dir(mirror.join("skills")).unwrap();
+    fs::create_dir(mirror.join("agents")).unwrap();
+    fs::write(mirror.join("AGENTS.md"), "mirror instructions").unwrap();
+    fs::write(mirror.join("skills/keep.md"), "mirror skill").unwrap();
+    fs::write(mirror.join("agents/keep.toml"), "mirror agent").unwrap();
+    let paths = [
+        mirror.join("AGENTS.md"),
+        mirror.join("skills"),
+        mirror.join("agents"),
+    ];
+    let permissions: Vec<_> = paths
+        .iter()
+        .map(|path| seed_fixture_permissions(path))
+        .collect();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
+    assert_eq!(
+        fs::read_to_string(mirror.join("AGENTS.md")).unwrap(),
+        "mirror instructions"
+    );
+    assert_eq!(
+        fs::read_to_string(mirror.join("skills/keep.md")).unwrap(),
+        "mirror skill"
+    );
+    assert_eq!(
+        fs::read_to_string(mirror.join("agents/keep.toml")).unwrap(),
+        "mirror agent"
+    );
+    assert!(!mirror.join("skills/new_skill").exists());
+    assert!(!mirror.join("agents/new.toml").exists());
+    assert!(!mirror.join("AGENTS.md.aag_backup").exists());
+    for (path, expected) in paths.iter().zip(permissions) {
+        assert_eq!(seed_fixture_permissions(path), expected);
+    }
+}
+
+#[test]
+fn mirror_sandbox_sync_preserves_initialized_setup_without_acl_or_content_changes() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    let mirror = directory.path().join("mirror");
+    for home in [&native, &mirror] {
+        crate::config::private_fs::prepare_managed_private_dir(home).unwrap();
+        fs::create_dir(home.join(".sandbox")).unwrap();
+        fs::create_dir(home.join(".sandbox-secrets")).unwrap();
+    }
+    for (name, native_bytes, mirror_bytes) in [
+        (
+            ".sandbox/setup_marker.json",
+            "native marker",
+            "mirror marker",
+        ),
+        (
+            ".sandbox-secrets/sandbox_users.json",
+            "native users",
+            "mirror users",
+        ),
+    ] {
+        fs::write(native.join(name), native_bytes).unwrap();
+        fs::write(mirror.join(name), mirror_bytes).unwrap();
+    }
+    let paths = [
+        mirror.join(".sandbox"),
+        mirror.join(".sandbox-secrets"),
+        mirror.join(".sandbox/setup_marker.json"),
+        mirror.join(".sandbox-secrets/sandbox_users.json"),
+    ];
+    let permissions: Vec<_> = paths
+        .iter()
+        .map(|path| seed_fixture_permissions(path))
+        .collect();
+    mirror_seed::sync_mirror_sandbox_credentials(&native, &mirror).unwrap();
+    assert_eq!(
+        fs::read_to_string(mirror.join(".sandbox/setup_marker.json")).unwrap(),
+        "mirror marker"
+    );
+    assert_eq!(
+        fs::read_to_string(mirror.join(".sandbox-secrets/sandbox_users.json")).unwrap(),
+        "mirror users"
+    );
+    assert!(!mirror
+        .join(".sandbox/setup_marker.json.aag_backup")
+        .exists());
+    assert!(!mirror
+        .join(".sandbox-secrets/sandbox_users.json.aag_backup")
+        .exists());
+    for (path, expected) in paths.iter().zip(permissions) {
+        assert_eq!(seed_fixture_permissions(path), expected);
+    }
+}
+
+#[test]
+fn mirror_seed_rejects_existing_destination_shapes_before_any_copy() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    fs::create_dir_all(native.join("skills")).unwrap();
+    fs::write(native.join("AGENTS.md"), "native instructions").unwrap();
+    for name in ["skills", "agents"] {
+        let mirror = directory.path().join(format!("invalid-{name}"));
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        fs::write(mirror.join(name), "preserve malformed destination").unwrap();
+        assert!(mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).is_err());
+        assert_eq!(
+            fs::read_to_string(mirror.join(name)).unwrap(),
+            "preserve malformed destination"
+        );
+        assert!(!mirror.join("AGENTS.md").exists());
+    }
+    let mirror = directory.path().join("invalid-sandbox");
+    fs::create_dir_all(mirror.join(".sandbox/setup_marker.json")).unwrap();
+    assert!(mirror_seed::sync_mirror_sandbox_credentials(&native, &mirror).is_err());
+}
+
+#[test]
+fn mirror_seed_preserves_the_clients_system_skill_runtime() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    let mirror = directory.path().join("mirror");
+    fs::create_dir_all(native.join("skills/.system")).unwrap();
+    fs::create_dir_all(native.join("skills/custom")).unwrap();
+    fs::write(native.join("skills/.system/vendor.txt"), "native runtime").unwrap();
+    fs::write(native.join("skills/custom/SKILL.md"), "custom instructions").unwrap();
+    crate::config::private_fs::prepare_private_dir(&mirror.join("skills")).unwrap();
+    fs::create_dir(mirror.join("skills/.system")).unwrap();
+    fs::write(mirror.join("skills/.system/vendor.txt"), "mirror runtime").unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
+    assert_eq!(
+        fs::read_to_string(mirror.join("skills/.system/vendor.txt")).unwrap(),
+        "mirror runtime"
+    );
+    assert!(!mirror.join("skills/custom/SKILL.md").exists());
 }
 
 #[test]
 fn mirror_sandbox_sync_requires_native_initialization_and_copies_only_setup_files() {
-    let directory = process::private_temp_dir().unwrap();
-    let native = directory.path().join("native");
-    let mirror = directory.path().join("mirror");
+    let home = crate::services::provider::test_support::isolated_home("sandbox-initial-copy");
+    let native = home.root.join("native");
+    let mirror = home.root.join("mirror");
     fs::create_dir(&native).unwrap();
     mirror_seed::sync_mirror_sandbox_credentials(&native, &mirror).unwrap();
     assert!(!mirror.exists());
@@ -164,6 +505,67 @@ fn mirror_sandbox_sync_requires_native_initialization_and_copies_only_setup_file
     .unwrap();
 }
 
+#[test]
+fn mirror_sandbox_sync_refuses_partial_setup_without_overwriting_existing_state() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    fs::create_dir_all(native.join(".sandbox")).unwrap();
+    fs::create_dir_all(native.join(".sandbox-secrets")).unwrap();
+    fs::write(native.join(".sandbox/setup_marker.json"), "native marker").unwrap();
+    fs::write(
+        native.join(".sandbox-secrets/sandbox_users.json"),
+        "native users",
+    )
+    .unwrap();
+    for (index, name) in [
+        ".sandbox/setup_marker.json",
+        ".sandbox-secrets/sandbox_users.json",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mirror = directory.path().join(format!("partial-{index}"));
+        let existing = mirror.join(name);
+        crate::config::private_fs::prepare_managed_private_dir(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, "preserved partial state").unwrap();
+        let permissions = seed_fixture_permissions(existing.parent().unwrap());
+        assert_eq!(
+            mirror_seed::sync_mirror_sandbox_credentials(&native, &mirror).unwrap_err(),
+            "codex_mirror_sandbox_setup_partial"
+        );
+        assert_eq!(
+            fs::read_to_string(&existing).unwrap(),
+            "preserved partial state"
+        );
+        assert_eq!(
+            seed_fixture_permissions(existing.parent().unwrap()),
+            permissions
+        );
+        assert!(!mirror.join(format!("{name}.aag_backup")).exists());
+        let missing = if index == 0 {
+            ".sandbox-secrets/sandbox_users.json"
+        } else {
+            ".sandbox/setup_marker.json"
+        };
+        assert!(!mirror.join(missing).exists());
+    }
+}
+
+#[test]
+fn mirror_sandbox_sync_preflights_both_source_files_before_creating_destinations() {
+    let directory = process::private_temp_dir().unwrap();
+    let native = directory.path().join("native");
+    let mirror = directory.path().join("mirror");
+    fs::create_dir_all(native.join(".sandbox")).unwrap();
+    fs::create_dir_all(native.join(".sandbox-secrets")).unwrap();
+    fs::write(native.join(".sandbox/setup_marker.json"), "native marker").unwrap();
+    assert_eq!(
+        mirror_seed::sync_mirror_sandbox_credentials(&native, &mirror).unwrap_err(),
+        "codex_mirror_sandbox_setup_incomplete"
+    );
+    assert!(!mirror.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn mirror_seed_skips_source_links_and_refuses_destination_links() {
@@ -177,32 +579,40 @@ fn mirror_seed_skips_source_links_and_refuses_destination_links() {
     fs::write(external.join("secret"), "untouched").unwrap();
     symlink(&external, native.join("skills")).unwrap();
     symlink(external.join("secret"), native.join("AGENTS.md")).unwrap();
-    mirror_seed::seed_mirror_from_native(&native, &mirror).unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
     assert!(!mirror.exists());
     fs::remove_file(native.join("AGENTS.md")).unwrap();
     fs::write(native.join("AGENTS.md"), "replacement").unwrap();
     crate::config::private_fs::prepare_private_dir(&mirror).unwrap();
     symlink(external.join("secret"), mirror.join("AGENTS.md")).unwrap();
-    assert!(mirror_seed::seed_mirror_from_native(&native, &mirror).is_err());
+    assert!(mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).is_err());
     assert_eq!(
         fs::read_to_string(external.join("secret")).unwrap(),
         "untouched"
     );
+    fs::remove_file(mirror.join("AGENTS.md")).unwrap();
+    for name in ["skills", "agents"] {
+        symlink(&external, mirror.join(name)).unwrap();
+        assert!(mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).is_err());
+        assert!(!mirror.join("AGENTS.md").exists());
+        fs::remove_file(mirror.join(name)).unwrap();
+    }
 }
 
 #[cfg(unix)]
 #[test]
 fn mirror_seed_keeps_skill_helpers_executable_and_private() {
     use std::os::unix::fs::PermissionsExt;
-    let directory = process::private_temp_dir().unwrap();
-    let native = directory.path().join("native");
-    let mirror = directory.path().join("mirror");
+    let home =
+        crate::services::provider::test_support::isolated_home("instruction-executable-copy");
+    let native = home.root.join("native");
+    let mirror = home.root.join("mirror");
     fs::create_dir_all(native.join("skills/helper")).unwrap();
     write_executable(
         &native.join("skills/helper/run.sh"),
         "#!/bin/sh\nprintf fixture",
     );
-    mirror_seed::seed_mirror_from_native(&native, &mirror).unwrap();
+    mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native, &mirror).unwrap();
     let helper = mirror.join("skills/helper/run.sh");
     assert_eq!(
         fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
@@ -230,7 +640,7 @@ fn macos_terminal_dispatch_uses_launch_services_with_literal_path() {
 fn executable_terminal_document_is_private_and_self_removes() {
     use std::os::unix::fs::PermissionsExt;
     let directory = process::private_temp_dir().unwrap();
-    let contents = terminal::unix_script(Path::new("/usr/bin/true"), &[], None).unwrap();
+    let contents = terminal::unix_script(Path::new("/usr/bin/true"), &[], &[], None).unwrap();
     let script = terminal::write_script(directory.path(), &contents).unwrap();
     assert_eq!(
         fs::metadata(&script).unwrap().permissions().mode() & 0o777,
@@ -255,6 +665,7 @@ fn macos_terminal_native_fixture_receives_environment_and_cleans_up() {
     let value = "native fixture '$HOME'; $(false)";
     terminal::launch_terminal(
         &program,
+        &[],
         &[
             ("AAG_FIXTURE_VALUE".into(), value.into()),
             (
@@ -387,7 +798,7 @@ fn invalid_environment_and_working_directory_are_rejected_before_launch() {
     let directory = process::private_temp_dir().unwrap();
     let missing = directory.path().join("missing");
     assert_eq!(
-        terminal::launch_terminal(Path::new("unused"), &[], missing.to_str()).unwrap_err(),
+        terminal::launch_terminal(Path::new("unused"), &[], &[], missing.to_str()).unwrap_err(),
         "launcher_working_directory_invalid"
     );
 }
@@ -430,7 +841,7 @@ fn unsupported_desktop_probe_does_not_report_false_success() {
         "codex_desktop_platform_unsupported"
     );
     assert_eq!(
-        codex_open_desktop_window(&Database::memory().unwrap()).unwrap_err(),
+        codex_open_desktop_window(&Database::memory().unwrap(), None, None).unwrap_err(),
         "codex_desktop_platform_unsupported"
     );
 }
@@ -450,7 +861,7 @@ fn terminal_script_preserves_literal_values_cwd_and_removes_credential_artifact(
     let output = fixture.path().join("result");
     let cwd = fixture.path().join("work ' directory");
     fs::create_dir(&cwd).unwrap();
-    write_executable(&program, "#!/bin/sh\nprintf '%s\\n' \"$AAG_TEST_VALUE\" > \"$AAG_TEST_OUTPUT\"\npwd >> \"$AAG_TEST_OUTPUT\"\n");
+    write_executable(&program, "#!/bin/sh\nprintf '%s\\n' \"$AAG_TEST_VALUE\" > \"$AAG_TEST_OUTPUT\"\npwd >> \"$AAG_TEST_OUTPUT\"\nprintf '%s\\n' \"$@\" >> \"$AAG_TEST_OUTPUT\"\n");
     let value = "literal '$HOME'; $(false) & | % !\nsecond line";
     let environment = vec![
         ("AAG_TEST_VALUE".into(), value.into()),
@@ -458,7 +869,12 @@ fn terminal_script_preserves_literal_values_cwd_and_removes_credential_artifact(
     ];
     let directory = process::private_temp_dir().unwrap();
     let script = directory.path().join("agent.sh");
-    let contents = terminal::unix_script(&program, &environment, Some(&cwd)).unwrap();
+    let arguments = vec![
+        "--auto-approve".into(),
+        "false".into(),
+        "literal ' $(false); & |".into(),
+    ];
+    let contents = terminal::unix_script(&program, &arguments, &environment, Some(&cwd)).unwrap();
     crate::config::private_fs::atomic_write(&script, contents.as_bytes()).unwrap();
     crate::config::private_fs::verify_private_file(&script).unwrap();
     let mut command = Command::new("/bin/sh");
@@ -466,7 +882,7 @@ fn terminal_script_preserves_literal_values_cwd_and_removes_credential_artifact(
     process::capture_stdout(&mut command, Duration::from_secs(2)).unwrap();
     assert_eq!(
         fs::read_to_string(output).unwrap(),
-        format!("{value}\n{}\n", cwd.display())
+        format!("{value}\n{}\n{}\n", cwd.display(), arguments.join("\n"))
     );
     assert!(!script.exists());
     assert!(!directory.path().exists());
@@ -488,7 +904,7 @@ fn invalid_cwd_at_execution_does_not_run_agent() {
     let directory = process::private_temp_dir().unwrap();
     let script = directory.path().join("agent.sh");
     let contents =
-        terminal::unix_script(&program, &[], Some(&fixture.path().join("missing"))).unwrap();
+        terminal::unix_script(&program, &[], &[], Some(&fixture.path().join("missing"))).unwrap();
     fs::write(&script, contents).unwrap();
     let mut command = Command::new("/bin/sh");
     command.arg(script);
@@ -568,4 +984,131 @@ fn editor_child_receives_profile_arguments_and_environment_without_shell_interpo
         profile.display()
     )));
     assert!(text.ends_with(&format!("{secret}\n")));
+}
+
+#[test]
+fn claude_local_install_prefers_the_shim_and_reports_the_newest_squirrel_version() {
+    let root = process::private_temp_dir().unwrap();
+    let home = root.path().join("home");
+    let local = root.path().join("local");
+    let anthropic = local.join("AnthropicClaude");
+    fs::create_dir_all(&anthropic).unwrap();
+    fs::write(anthropic.join("claude.exe"), "fixture shim").unwrap();
+    for version in ["app-1.46388.2", "app-1.46388.4"] {
+        let directory = anthropic.join(version);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("claude.exe"), "fixture executable").unwrap();
+    }
+    let install = super::claude::find_claude_desktop_local_install(
+        desktop_platform::windows,
+        &home,
+        Some(&local),
+        None,
+    )
+    .unwrap();
+    assert_eq!(install.exe, anthropic.join("claude.exe"));
+    assert_eq!(install.version, Some([1, 46388, 4, 0]));
+}
+
+#[test]
+fn claude_local_install_falls_back_to_versioned_exe_and_reports_unknown_version() {
+    let root = process::private_temp_dir().unwrap();
+    let home = root.path().join("home");
+    let local = root.path().join("local");
+    // No shim at the root: the newest app-* executable is the install.
+    let versioned = local.join("Claude/app-1.10.0");
+    fs::create_dir_all(&versioned).unwrap();
+    fs::write(versioned.join("claude.exe"), "fixture executable").unwrap();
+    let install = super::claude::find_claude_desktop_local_install(
+        desktop_platform::windows,
+        &home,
+        Some(&local),
+        None,
+    )
+    .unwrap();
+    assert_eq!(install.exe, versioned.join("claude.exe"));
+    assert_eq!(install.version, Some([1, 10, 0, 0]));
+    // A shim without versioned app directories is the stale leftover a store
+    // migration leaves behind: still locatable, but with no version, so any
+    // known store install supersedes it.
+    let stale = local.join("AnthropicClaude");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("claude.exe"), "fixture shim").unwrap();
+    let install = super::claude::find_claude_desktop_local_install(
+        desktop_platform::windows,
+        &home,
+        Some(&local),
+        None,
+    )
+    .unwrap();
+    assert_eq!(install.exe, stale.join("claude.exe"));
+    assert_eq!(install.version, None);
+    assert!(super::claude::find_claude_desktop_local_install(
+        desktop_platform::windows,
+        &home,
+        None,
+        None
+    )
+    .is_none());
+}
+
+#[test]
+fn claude_selection_prefers_a_newer_store_but_keeps_newer_or_unknown_local() {
+    use super::claude::{claude_install, select_claude_desktop_install};
+    let install = |name: &str, version| claude_install {
+        exe: PathBuf::from(name),
+        version,
+    };
+    for (local_version, store_version, expected) in [
+        (Some([1, 46388, 4, 0]), Some([3, 6556, 2, 0]), "store"),
+        (Some([4, 0, 0, 0]), Some([3, 6556, 2, 0]), "local"),
+        (Some([3, 6556, 2, 0]), Some([3, 6556, 2, 0]), "local"),
+        (None, Some([3, 6556, 2, 0]), "store"),
+        (Some([3, 6556, 2, 0]), None, "local"),
+        (None, None, "local"),
+    ] {
+        assert_eq!(
+            select_claude_desktop_install(
+                Some(install("local", local_version)),
+                Ok(Some(install("store", store_version))),
+            )
+            .unwrap(),
+            Some(PathBuf::from(expected)),
+        );
+    }
+    assert_eq!(
+        select_claude_desktop_install(None, Ok(Some(install("store", None)))).unwrap(),
+        Some(PathBuf::from("store")),
+    );
+}
+
+#[test]
+fn claude_store_query_failure_retains_verified_local_or_preserves_the_error() {
+    use super::claude::{claude_install, select_claude_desktop_install};
+    let error = "launcher_probe_timeout".to_string();
+    assert_eq!(
+        select_claude_desktop_install(
+            Some(claude_install {
+                exe: PathBuf::from("local"),
+                version: None
+            }),
+            Err(error.clone()),
+        )
+        .unwrap(),
+        Some(PathBuf::from("local")),
+    );
+    assert_eq!(
+        select_claude_desktop_install(None, Err(error.clone())),
+        Err(error)
+    );
+    assert_eq!(select_claude_desktop_install(None, Ok(None)).unwrap(), None);
+}
+#[cfg(windows)]
+#[test]
+fn windows_cmd_mixed_separator_path_executes_literal_command() {
+    let root = std::env::var_os("SystemRoot").unwrap();
+    let mut command = process::background_command(PathBuf::from(root).join("System32/cmd.exe"));
+    command.args(["/D", "/V:OFF", "/S", "/C", "echo native_path_ok"]);
+    let output = process::capture_stdout(&mut command, std::time::Duration::from_secs(3)).unwrap();
+    assert_eq!(String::from_utf8(output).unwrap().trim(), "native_path_ok");
 }

@@ -13,6 +13,7 @@
 //! what AAG needs.
 
 use crate::config::get_db_path;
+use crate::database::dao::sync_config::SyncTarget;
 use crate::database::Database;
 use crate::error::AppError;
 use chrono::Utc;
@@ -204,12 +205,14 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
 }
 
 /// Build the AWS SigV4 signing key via the canonical 4-step chain:
-/// `kDate -> kRegion -> kService -> kSigning`.
-fn derive_signing_key(secret: &str, datestamp: &str, region: &str) -> Vec<u8> {
+/// `kDate -> kRegion -> kService -> kSigning`. `service` is part of the
+/// signed scope: production callers pass `SIGNED_SERVICE`, while tests
+/// check the chain against AWS's published cross-service reference vector.
+fn derive_signing_key(secret: &str, datestamp: &str, region: &str, service: &str) -> Vec<u8> {
     let k_secret = format!("AWS4{}", secret);
     let k_date = hmac_sha256(k_secret.as_bytes(), datestamp.as_bytes());
     let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, SIGNED_SERVICE.as_bytes());
+    let k_service = hmac_sha256(&k_region, service.as_bytes());
     hmac_sha256(&k_service, SIGNED_REQUEST.as_bytes())
 }
 
@@ -313,7 +316,12 @@ fn sign_request(
         sha256_hex(canonical_request.as_bytes())
     );
 
-    let signing_key = derive_signing_key(&creds.secret_access_key, &datestamp, &creds.region);
+    let signing_key = derive_signing_key(
+        &creds.secret_access_key,
+        &datestamp,
+        &creds.region,
+        SIGNED_SERVICE,
+    );
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     let authorization = format!(
@@ -468,13 +476,13 @@ pub async fn download(creds: &S3Credentials) -> Result<S3Result, AppError> {
 
 pub async fn check_and_stamp(db: &Database, creds: &S3Credentials) -> Result<(), AppError> {
     let result = check_connection(creds).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::S3, "s3", &result);
     result
 }
 
 pub async fn upload_and_stamp(db: &Database, creds: &S3Credentials) -> Result<S3Result, AppError> {
     let result = upload(creds).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::S3, "s3", &result);
     result
 }
 
@@ -483,17 +491,8 @@ pub async fn download_and_stamp(
     creds: &S3Credentials,
 ) -> Result<S3Result, AppError> {
     let result = download(creds).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::S3, "s3", &result);
     result
-}
-
-async fn stamp_outcome<T, E>(db: &Database, result: &Result<T, E>) {
-    let target = crate::database::dao::sync_config::SyncTarget::S3;
-    let err_msg = result.as_ref().err().map(|_| "sync_operation_failed");
-    if let Err(stamp_err) = db.record_sync_result(target, err_msg.as_deref()) {
-        let _ = stamp_err;
-        log::warn!("s3: sync result stamp failed code=database_error");
-    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────
@@ -623,34 +622,31 @@ mod tests {
     }
 
     #[test]
-    fn derive_signing_key_matches_aws_reference() {
-        // Reference vector from AWS SigV4 docs:
-        // secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
-        // datestamp = "20150830"
-        // region = "us-east-1"
-        // service = "iam"  (we use "s3", but the chain before kService is the same)
-        // kSigning first 4 bytes hex = "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9" — wait, that's for service=iam
-        // For service=s3, the documented test vector is:
-        //   kSecret = "AWS4wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
-        //   kDate   = HMAC(kSecret, "20150830")
-        //   kRegion = HMAC(kDate, "us-east-1")
-        //   kService= HMAC(kRegion, "s3")              <-- differs from iam
-        //   kSigning= HMAC(kService, "aws4_request")
-        // Per AWS docs the resulting kSigning hex (service=s3) starts with
-        // "8afdbf4008c041a93cc53d12d2208dac" — but this varies by docs revision,
-        // so we just assert the call is deterministic and 32 bytes long.
-        let key = derive_signing_key(
-            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-            "20150830",
-            "us-east-1",
+    fn derive_signing_key_matches_aws_reference_vector() {
+        // AWS SigV4 reference vector from the AWS General Reference page
+        // "Examples of how to derive a signing key" (retrieved 2026-10-19):
+        // key wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY, dateStamp 20120215,
+        // regionName us-east-1, serviceName iam. AWS publishes the
+        // intermediate digests so implementations can test each step:
+        // kDate pins the "AWS4" key prefix and the key/data argument order
+        // (the classic swap bug), kSigning pins the whole chain.
+        let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+        let k_secret = format!("AWS4{secret}");
+        let k_date = hmac_sha256(k_secret.as_bytes(), b"20120215");
+        assert_eq!(
+            hex::encode(&k_date),
+            "969fbb94feb542b71ede6f87fe4d5fa29c789342b0f407474670f0c2489e0a0d"
         );
-        assert_eq!(key.len(), 32);
-        let key2 = derive_signing_key(
-            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-            "20150830",
-            "us-east-1",
+        let k_signing = derive_signing_key(secret, "20120215", "us-east-1", "iam");
+        assert_eq!(
+            hex::encode(&k_signing),
+            "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d"
         );
-        assert_eq!(key, key2, "signing key must be deterministic");
+        // The s3-service key stays deterministic across calls.
+        assert_eq!(
+            derive_signing_key(secret, "20120215", "us-east-1", SIGNED_SERVICE),
+            derive_signing_key(secret, "20120215", "us-east-1", SIGNED_SERVICE)
+        );
     }
 
     #[test]

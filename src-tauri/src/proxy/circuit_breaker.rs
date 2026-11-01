@@ -96,7 +96,7 @@ impl CircuitBreaker {
     /// Readiness check retained for compatibility. Executing requests must use
     /// `acquire` so half-open concurrency has a concrete owner.
     pub fn allow(&self) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         self.admission_ready(&mut inner)
     }
 
@@ -117,7 +117,7 @@ impl CircuitBreaker {
     }
 
     pub fn acquire(&self) -> Option<Circuit_permit> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if !self.admission_ready(&mut inner) {
             return None;
         }
@@ -132,7 +132,7 @@ impl CircuitBreaker {
     }
 
     pub fn settle(&self, permit: Circuit_permit, outcome: Circuit_outcome) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if permit.generation != inner.generation {
             return;
         }
@@ -147,7 +147,7 @@ impl CircuitBreaker {
     }
 
     pub fn record_success(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         self.success_locked(&mut inner);
     }
 
@@ -170,7 +170,7 @@ impl CircuitBreaker {
     }
 
     pub fn record_failure(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         self.failure_locked(&mut inner);
     }
 
@@ -202,7 +202,7 @@ impl CircuitBreaker {
         }
     }
     pub fn snapshot(&self) -> CircuitBreakerSnapshot {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         CircuitBreakerSnapshot {
             state: g.state,
             failures: g.failures,
@@ -218,7 +218,7 @@ impl CircuitBreaker {
 
     #[allow(dead_code)]
     pub fn reset(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         g.state = CircuitState::Closed;
         g.generation = g.generation.wrapping_add(1);
         g.failures = 0;

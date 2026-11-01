@@ -27,13 +27,15 @@ pub(crate) fn vscode_open_with_extension(
         .get_setting(crate::database::dao::settings::KEY_OUTBOUND_PROXY)
         .map_err(String::from)?;
 
-    // Host loopback normalization — match `proxy::commands::dsh_gateway_snapshot`.
-    let host = match proxy_cfg.host.as_str() {
-        "127.0.0.1" | "localhost" | "0.0.0.0" => "127.0.0.1",
-        "::" | "::1" => "[::1]",
-        _ => return Err("vscode_proxy_host_not_loopback".into()),
-    };
-    let base_url = format!("http://{host}:{}", proxy_cfg.port);
+    // Host loopback normalization — `ProxyConfig::client_endpoint_host`.
+    if !proxy_cfg.is_loopback_bind() {
+        return Err("vscode_proxy_host_not_loopback".into());
+    }
+    let base_url = format!(
+        "http://{}:{}",
+        proxy_cfg.client_endpoint_host(),
+        proxy_cfg.port
+    );
     let base_url_v1 = format!("{base_url}/v1");
     let auth_token = proxy_cfg.auth_token.trim();
 

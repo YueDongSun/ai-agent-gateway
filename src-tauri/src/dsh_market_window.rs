@@ -50,6 +50,9 @@ pub(crate) fn open(app: &tauri::AppHandle, locale: &str, theme: &str) -> Result<
             .unminimize()
             .map_err(|_| "dsh_market:window_restore_failed")?;
         window.show().map_err(|_| "dsh_market:window_show_failed")?;
+        window
+            .eval("window.dispatchEvent(new Event('dsh_market_opened'))")
+            .map_err(|_| "dsh_market:window_refresh_signal_failed")?;
         return window
             .set_focus()
             .map_err(|_| "dsh_market:window_focus_failed".into());
@@ -80,11 +83,14 @@ pub(crate) fn open(app: &tauri::AppHandle, locale: &str, theme: &str) -> Result<
 }
 pub(crate) fn open_source(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "dsh_market:invalid_source_url")?;
+    let is_site_feed = url == "https://dsh.market/plugins.json";
     if parsed.scheme() != "https"
-        || !matches!(
-            parsed.host_str(),
-            Some("github.com" | "raw.githubusercontent.com")
-        )
+        || (!is_site_feed
+            && !matches!(
+                parsed.host_str(),
+                Some("github.com" | "raw.githubusercontent.com")
+            ))
+        || (parsed.host_str() == Some("dsh.market") && !is_site_feed)
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.port().is_some()
@@ -171,6 +177,8 @@ mod tests {
             "settings_get",
             "settings_set",
             "diagnostics_get",
+            "diagnostics_request_timeline",
+            "diagnostics_clear_request_timeline",
             "dsh_get_snapshot",
             "dsh_list_upstreams",
             "dsh_start",

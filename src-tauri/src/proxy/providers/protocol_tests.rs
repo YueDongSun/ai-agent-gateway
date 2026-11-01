@@ -161,6 +161,8 @@ async fn proxy_with_cot(providers: Vec<Arc<dyn Provider>>, cot_enabled: bool) ->
         responses_cot_enabled: Arc::new(std::sync::atomic::AtomicBool::new(cot_enabled)),
         passthrough_auth_allowed: false,
         db: None,
+        live: None,
+        allow_client_config_repair: false,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let (bound, handle) = serve_detached("127.0.0.1:0".parse().unwrap(), state, rx)
@@ -318,7 +320,7 @@ async fn openai_http_stream_preserves_reasoning_aliases_extensions_and_usage() {
 #[tokio::test]
 async fn http_auth_validation_errors_never_fail_over_but_rate_limits_do() {
     for native in [false, true] {
-        for status in [400, 401, 403, 422, 429, 503] {
+        for status in [400, 401, 402, 403, 404, 422, 429, 503] {
             let (upstream, first) = fixture(
                 status,
                 json!({"error":{"message":"fixture"}}),

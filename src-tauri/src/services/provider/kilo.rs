@@ -23,7 +23,10 @@
 //!   - top-level `model` overwritten when the patch carries a non-empty
 //!     `model`;
 //!   - JSONC `//` and `/* */` comments stripped before parsing (Kilo
-//!     settings may be JSONC).
+//!     settings may be JSONC);
+//!   - an existing JSONC document is patched in place, preserving user
+//!     comments, key order and formatting (falling back to a full rewrite
+//!     when the raw text cannot be spliced safely).
 //!
 //! Atomic writes with a timestamped backup live in `~/.aag/backups/` (per
 //! `crate::config::get_backups_dir`).
@@ -69,61 +72,22 @@ fn resolve_config_path() -> PathBuf {
 }
 
 /// Strip JSONC `//` line and `/* */` block comments (mirrors the Node
-/// `KiloAdapter.read()` regex at `src/agents/adapters.ts:257-261`).
+/// `KiloAdapter.read()` regex at `src/agents/adapters.ts:257-261`; delegates
+/// to the shared stripper in [`super::config_editor`]).
 fn strip_jsonc_comments(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(c) = chars.next() {
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                chars.next();
-                for ch in chars.by_ref() {
-                    if ch == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
+    super::config_editor::strip_jsonc_comments(raw)
 }
 
-fn read_existing(path: &PathBuf) -> Result<Option<Value>, AppError> {
+/// Read the current config value together with its raw text, so the JSONC
+/// patcher can preserve the user's comments and formatting on rewrite.
+fn read_existing(path: &PathBuf) -> Result<Option<(String, Value)>, AppError> {
     if !path.exists() {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
     let stripped = strip_jsonc_comments(&raw);
     let value: Value = serde_json::from_str(&stripped).map_err(AppError::Json)?;
-    Ok(Some(value))
+    Ok(Some((raw, value)))
 }
 
 /// Build the patch the merge step writes into the Kilo config.
@@ -195,6 +159,42 @@ fn build_patch(provider: &Provider) -> Result<Value, AppError> {
     Ok(Value::Object(patch))
 }
 
+/// Apply the provider-entry and `model` edits to the raw document, then
+/// verify the patched text against `merged`.
+fn patch_jsonc(
+    raw: &str,
+    provider_id: &str,
+    entry: &Value,
+    model: Option<&str>,
+    merged: &Value,
+) -> Result<String, AppError> {
+    let mut editor = super::jsonc_edit::JsoncEditor::new(raw)?;
+    editor.set_provider_entry(provider_id, entry)?;
+    if let Some(model) = model {
+        editor.set_top_level("model", &Value::String(model.to_string()))?;
+    }
+    editor.finish(merged)
+}
+
+/// Serialize the merged config, preferring a byte-preserving JSONC patch of
+/// the raw text. Any patcher failure (or a missing file) falls back to the
+/// plain pretty-printed rewrite, so a switch never fails because of the
+/// patcher.
+fn serialize_write(
+    existing: Option<&str>,
+    provider_id: &str,
+    entry: &Value,
+    model: Option<&str>,
+    merged: &Value,
+) -> Result<Vec<u8>, AppError> {
+    if let Some(raw) = existing {
+        if let Ok(text) = patch_jsonc(raw, provider_id, entry, model, merged) {
+            return Ok(text.into_bytes());
+        }
+    }
+    Ok(serde_json::to_vec_pretty(merged)?)
+}
+
 /// Write one AAG provider into the Kilo config. Mirrors the Node
 /// `KiloAdapter.write()` at `src/agents/adapters.ts:263-282` with one
 /// addition: atomic write + timestamped backup of any pre-existing file.
@@ -220,7 +220,8 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
     let patch = build_patch(provider)?;
 
     let mut merged: Value = json!({});
-    if let Some(existing) = read_existing(&path)? {
+    let mut existing_text: Option<String> = None;
+    if let Some((raw, existing)) = read_existing(path)? {
         let obj = existing.as_object().ok_or_else(|| {
             AppError::Config(format!(
                 "Kilo config {} must be a JSON object",
@@ -236,12 +237,21 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
             }
         }
         merged = existing;
+        existing_text = Some(raw);
     }
 
     let patch_provider = patch
         .get("provider")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::Config("Kilo patch must contain an object provider".into()))?;
+    let patch_entry = patch_provider
+        .get(&provider.id)
+        .cloned()
+        .ok_or_else(|| AppError::Config("Kilo patch must contain an object provider".into()))?;
+    let patch_model = patch
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty());
     let merged_obj = merged
         .as_object_mut()
         .expect("merged is initialized as object");
@@ -257,13 +267,17 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
     for (k, v) in patch_provider {
         merged_provider_obj.insert(k.clone(), v.clone());
     }
-    if let Some(model) = patch.get("model").and_then(Value::as_str) {
-        if !model.is_empty() {
-            merged_obj.insert(String::from("model"), Value::String(model.to_string()));
-        }
+    if let Some(model) = patch_model {
+        merged_obj.insert(String::from("model"), Value::String(model.to_string()));
     }
 
-    let serialized = serde_json::to_vec_pretty(&merged)?;
+    let serialized = serialize_write(
+        existing_text.as_deref(),
+        &provider.id,
+        &patch_entry,
+        patch_model,
+        &merged,
+    )?;
     let (written, backups) =
         super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
             path,
@@ -363,7 +377,12 @@ mod tests {
         .unwrap();
 
         write_live(&provider()).expect("Kilo write");
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("// comment line"),
+            "the JSONC comment must survive the switch"
+        );
+        let value: Value = serde_json::from_str(&strip_jsonc_comments(&written)).unwrap();
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["small_model"], "aag/glm-mini");
         assert_eq!(
@@ -434,13 +453,187 @@ mod tests {
         )
         .unwrap();
         write_live(&provider()).expect("Kilo write tolerates JSONC");
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("/* header */"),
+            "block comment must survive"
+        );
+        assert!(written.contains("// existing user comment"));
+        assert!(written.contains("/* trailing */"));
+        let value: Value = serde_json::from_str(&strip_jsonc_comments(&written)).unwrap();
         assert_eq!(value["theme"], "dark");
         assert_eq!(
             value["provider"]["aag"]["options"]["baseURL"],
             "https://example.invalid/v1"
         );
         drop(home);
+    }
+
+    #[test]
+    fn write_live_preserves_jsonc_comments_and_formatting() {
+        let home = isolated_home("kilo-jsonc");
+        let path = kilo_config_paths()[0].clone();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            &path,
+            concat!(
+                "{\n",
+                "  // user comment\n",
+                "  \"theme\": \"dark\", /* trailing block */\n",
+                "  \"provider\": {\n",
+                "      \"openai\": { \"npm\": \"x\" },   // one-line sibling\n",
+                "      \"aag\": { \"npm\": \"old\", \"options\": { \"baseURL\": \"https://old.invalid\" } }\n",
+                "  },\n",
+                "  \"small_model\": \"aag/old\"\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        write_live(&provider()).expect("Kilo write");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            concat!(
+                "{\n",
+                "  // user comment\n",
+                "  \"theme\": \"dark\", /* trailing block */\n",
+                "  \"provider\": {\n",
+                "      \"openai\": { \"npm\": \"x\" },   // one-line sibling\n",
+                "      \"aag\": {\n",
+                "        \"npm\": \"@ai-sdk/openai-compatible\",\n",
+                "        \"name\": \"AAG\",\n",
+                "        \"options\": {\n",
+                "          \"baseURL\": \"https://example.invalid/v1\",\n",
+                "          \"apiKey\": \"sk-secret\"\n",
+                "        },\n",
+                "        \"models\": {\n",
+                "          \"glm-5\": {\n",
+                "            \"name\": \"GLM-5\"\n",
+                "          }\n",
+                "        }\n",
+                "      }\n",
+                "  },\n",
+                "  \"small_model\": \"aag/old\",\n",
+                "  \"model\": \"aag/glm-5\"\n",
+                "}\n",
+            )
+        );
+        drop(home);
+    }
+
+    #[test]
+    fn write_live_inserts_missing_provider_key_without_reformatting_siblings() {
+        let home = isolated_home("kilo-jsonc-insert");
+        let path = kilo_config_paths()[0].clone();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            &path,
+            concat!(
+                "{\n",
+                "    \"provider\": {\n",
+                "        \"openai\": { \"npm\": \"x\" } // keep sibling\n",
+                "    }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        write_live(&provider()).expect("Kilo write");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            concat!(
+                "{\n",
+                "    \"provider\": {\n",
+                "        \"aag\": {\n",
+                "            \"npm\": \"@ai-sdk/openai-compatible\",\n",
+                "            \"name\": \"AAG\",\n",
+                "            \"options\": {\n",
+                "                \"baseURL\": \"https://example.invalid/v1\",\n",
+                "                \"apiKey\": \"sk-secret\"\n",
+                "            },\n",
+                "            \"models\": {\n",
+                "                \"glm-5\": {\n",
+                "                    \"name\": \"GLM-5\"\n",
+                "                }\n",
+                "            }\n",
+                "        },\n",
+                "        \"openai\": { \"npm\": \"x\" } // keep sibling\n",
+                "    },\n",
+                "    \"model\": \"aag/glm-5\"\n",
+                "}\n",
+            )
+        );
+        drop(home);
+    }
+
+    #[test]
+    fn write_live_preserves_crlf_and_non_ascii_text() {
+        let home = isolated_home("kilo-crlf");
+        let path = kilo_config_paths()[0].clone();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            &path,
+            "{\r\n  // 备注\r\n  \"说明\": \"值 💡\",\r\n  \"provider\": {}\r\n}\r\n",
+        )
+        .unwrap();
+
+        write_live(&provider()).expect("Kilo write");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            concat!(
+                "{\r\n",
+                "  // 备注\r\n",
+                "  \"说明\": \"值 💡\",\r\n",
+                "  \"provider\": {\"aag\": {\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"AAG\",\"options\":{\"baseURL\":\"https://example.invalid/v1\",\"apiKey\":\"sk-secret\"},\"models\":{\"glm-5\":{\"name\":\"GLM-5\"}}}},\r\n",
+                "  \"model\": \"aag/glm-5\"\r\n",
+                "}\r\n",
+            )
+        );
+        drop(home);
+    }
+
+    #[test]
+    fn write_live_fails_closed_on_malformed_jsonc_without_touching_the_file() {
+        let home = isolated_home("kilo-malformed");
+        let path = kilo_config_paths()[0].clone();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let raw = "{\n  /* unterminated\n  \"theme\": \"dark\"\n}\n";
+        fs::write(&path, raw).unwrap();
+
+        let err = write_live(&provider()).expect_err("malformed JSONC must fail closed");
+        assert!(err.to_string().contains("json"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            raw,
+            "a rejected write must leave the file byte-identical"
+        );
+        drop(home);
+    }
+
+    #[test]
+    fn a_patcher_failure_falls_back_to_the_plain_pretty_rewrite() {
+        let merged = json!({ "provider": { "aag": { "npm": "x" } } });
+        let bytes = serialize_write(
+            Some("{ /* not patchable"),
+            "aag",
+            &json!({ "npm": "x" }),
+            None,
+            &merged,
+        )
+        .expect("a patcher failure must never fail the switch");
+        assert_eq!(
+            bytes,
+            serde_json::to_vec_pretty(&merged).unwrap(),
+            "fallback must reproduce today's rewrite exactly"
+        );
     }
 
     #[test]

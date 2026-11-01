@@ -3,6 +3,9 @@
 use super::{discovery, process};
 use std::path::Path;
 
+#[cfg(windows)]
+pub(super) const WINDOWS_AGENT_SCRIPT: &str = "if ($env:AAG_LAUNCH_CWD) { Set-Location -LiteralPath $env:AAG_LAUNCH_CWD -ErrorAction Stop }; $launch_arguments = [string[]](ConvertFrom-Json -InputObject $env:AAG_LAUNCH_ARGUMENTS); & $env:AAG_LAUNCH_PROGRAM @launch_arguments";
+
 #[cfg(unix)]
 pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -11,6 +14,7 @@ pub(super) fn shell_quote(value: &str) -> String {
 #[cfg(unix)]
 pub(super) fn unix_script(
     program: &Path,
+    arguments: &[String],
     environment: &[(String, String)],
     cwd: Option<&Path>,
 ) -> Result<String, String> {
@@ -34,7 +38,12 @@ pub(super) fn unix_script(
     for (name, value) in environment {
         lines.push(format!("export {name}={}", shell_quote(value)));
     }
-    lines.push(format!("exec {}", shell_quote(program)));
+    let mut invocation = format!("exec {}", shell_quote(program));
+    for argument in arguments {
+        invocation.push(' ');
+        invocation.push_str(&shell_quote(argument));
+    }
+    lines.push(invocation);
     Ok(lines.join("\n") + "\n")
 }
 
@@ -72,7 +81,9 @@ pub(super) fn write_script(directory: &Path, contents: &str) -> Result<std::path
 }
 
 #[cfg(unix)]
-fn retain_until_started(directory: tempfile::TempDir) -> Result<(), String> {
+fn retain_until_started(
+    directory: crate::config::private_fs::PrivateTempDir,
+) -> Result<(), String> {
     std::thread::Builder::new()
         .name("aag_terminal_cleanup".into())
         .spawn(move || {
@@ -92,11 +103,15 @@ fn retain_until_started(directory: tempfile::TempDir) -> Result<(), String> {
 
 pub(super) fn launch_terminal(
     program: &Path,
+    arguments: &[String],
     environment: &[(String, String)],
     cwd: Option<&str>,
 ) -> Result<(), String> {
     let cwd = process::working_directory(cwd)?;
     process::validate_environment(environment)?;
+    if arguments.iter().any(|argument| argument.contains('\0')) {
+        return Err("launcher_argument_invalid".into());
+    }
     if !discovery::executable(program, discovery::desktop_platform::current()) {
         return Err("launcher_executable_invalid".into());
     }
@@ -119,12 +134,17 @@ pub(super) fn launch_terminal(
         let mut command = process::background_command(
             std::path::PathBuf::from(system_root).join("System32/cmd.exe"),
         );
-        command.args(["/D", "/V:OFF", "/S", "/C"]).raw_arg(
-            "start \"\" \"%AAG_LAUNCH_POWERSHELL%\" -NoLogo -NoProfile -NoExit -Command \"if ($env:AAG_LAUNCH_CWD) { Set-Location -LiteralPath $env:AAG_LAUNCH_CWD -ErrorAction Stop }; & $env:AAG_LAUNCH_PROGRAM\"");
+        command.args(["/D", "/V:OFF", "/S", "/C"]).raw_arg(format!(
+            "start \"\" \"%AAG_LAUNCH_POWERSHELL%\" -NoLogo -NoProfile -NoExit -Command \"{WINDOWS_AGENT_SCRIPT}\""));
         command.envs(environment.iter().map(|(key, value)| (key, value)));
         command
             .env("AAG_LAUNCH_POWERSHELL", discovery::powershell()?)
             .env("AAG_LAUNCH_PROGRAM", program)
+            .env(
+                "AAG_LAUNCH_ARGUMENTS",
+                serde_json::to_string(arguments)
+                    .map_err(|_| "launcher_argument_invalid".to_string())?,
+            )
             .env_remove("AAG_LAUNCH_CWD");
         if let Some(cwd) = &cwd {
             command.current_dir(cwd).env("AAG_LAUNCH_CWD", cwd);
@@ -136,7 +156,7 @@ pub(super) fn launch_terminal(
     #[cfg(unix)]
     {
         let directory = process::private_temp_dir()?;
-        let content = unix_script(program, &environment, cwd.as_deref())?;
+        let content = unix_script(program, arguments, &environment, cwd.as_deref())?;
         let script = write_script(directory.path(), &content)?;
         #[cfg(target_os = "macos")]
         {

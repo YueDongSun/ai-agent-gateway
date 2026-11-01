@@ -16,8 +16,18 @@ gateway and CLI remain independently runnable for headless use.
 - `GET /v1/models` and `GET /health`.
 - Ordered route hops with retriable-error failover (network, 429, 5xx).
 - Per-provider `closed`, `open`, and `half-open` circuit breakers.
+- Prompt enhancement: expand a short Chinese requirement into a complete Chinese
+  brief, then into one optimized English prompt, using the models already
+  configured in the gateway.
 - Provider, vendor, route, backup, MCP, skills, sessions, and usage
   management in the desktop UI.
+- Additive supplier URL discovery: after a catalog refresh, AAG may read both
+  same-origin OpenAPI 3.x documents for each configured source context,
+  validate declared POST routes, reuse an existing API root, and append only
+  missing protocol endpoints. Repeated runs are idempotent; existing endpoints,
+  models, and admission records are unchanged.
+  The EN/CN switch also changes discovery explanations, catalog-health labels,
+  and the latest results, including reasons for skipped or excluded connections.
 - cc-switch import and coexistence detection. Claude Code chains through AAG
   via cc-switch; Codex CLI runs natively against AAG in an isolated
   `CODEX_HOME` mirror.
@@ -36,6 +46,20 @@ gateway and CLI remain independently runnable for headless use.
 
 Streaming failover is one-shot: the first chunk is probed before the router
 commits to a provider. A later stream error is returned to the client.
+
+Runtime status separates listener reachability from configured model candidates
+and live upstream verification. The desktop header identifies the responding
+runtime, missing usable models, pending listener/authentication restart and failed
+hot apply. Advertised models and configured candidates are not individually
+tested models. The CLI reports an older unidentified AAG as unknown rather than
+calling it Desktop. Set `AAG_DESKTOP_ENDPOINT` to a deliberately selected root
+HTTP(S) endpoint for a non-default desktop port; credentials, query strings and
+additional paths are rejected.
+
+The Node `aag test` command preserves partial stream output and returns a nonzero
+status for explicit errors, malformed/truncated streams, cancellation or missing
+terminal success. Copilot switching preserves unrelated JSONC settings and exact
+pre-write backup bytes; malformed existing content is left unchanged.
 
 ## Surfaces
 
@@ -133,9 +157,11 @@ Repo metadata:
 
 ## Runtime paths
 
-The Rust database is at `~/.aag/aag.db`. Provider and route edits are applied
-to the Rust proxy on the next `proxy_start`, because the router uses a startup
-snapshot. Live agent configuration writes are atomic and back up existing files.
+The Rust database is at `~/.aag/aag.db`. Provider, route, supplier, model, pin,
+and public catalog edits hot-apply to new requests; in-flight requests keep the
+snapshot they started with. Listener host/port and gateway-authentication edits
+still require a restart. Live agent configuration writes are atomic and back up
+existing files.
 
 ## Verification
 
@@ -161,10 +187,17 @@ profile and server.
 
 - [Architecture](docs/architecture.md) — module ownership, data flow,
   persistence, and compatibility boundaries.
+- [Unified suppliers](docs/unified_suppliers.md) — supplier and endpoint
+  models, per-source dual-document URL discovery, capability routing, and
+  hot-apply behavior.
 - [Development](docs/development.md) — setup, commands, verification gate,
   and release boundary.
+- [Workspace interface QA](docs/interface_qa.md) — navigation, header surface,
+  provider actions, dialogs, and the visual checklist.
 - [Project structure](docs/project_structure.md) — ownership rules, UI state
   boundaries, and test/build boundaries.
+- [Prompt enhancement](docs/prompt_enhance.md) — the two-stage pipeline, model
+  targets, limits, templates, and data handling.
 - [Desktop release](docs/desktop_release.md) — native build matrix, signing,
   notarization, manual acceptance, and rollback.
 - [Privacy-safe public snapshot](docs/public_release_privacy.md) — automated

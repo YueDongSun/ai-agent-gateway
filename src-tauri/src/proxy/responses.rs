@@ -51,6 +51,80 @@ pub struct ResponsesRequest {
     pub extra: std::collections::HashMap<String, Value>,
 }
 
+/// One named OpenAI Responses SSE frame. Data is the SSE-standard join of
+/// repeated `data:` lines; event names and ids stay out of the canonical Chat
+/// wire but can be replayed losslessly on the native Responses surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesSseEvent {
+    pub event: Option<String>,
+    pub id: Option<String>,
+    pub retry: Option<u64>,
+    pub data: String,
+}
+
+impl ResponsesSseEvent {
+    /// Format the retained frame as Responses-compatible SSE. Multiline data
+    /// is emitted as repeated `data:` fields so the consumer reconstructs the
+    /// same joined payload.
+    pub fn to_sse(&self) -> String {
+        let mut frame = String::new();
+        if let Some(event) = &self.event {
+            frame.push_str("event: ");
+            frame.push_str(event);
+            frame.push('\n');
+        }
+        if let Some(id) = &self.id {
+            frame.push_str("id: ");
+            frame.push_str(id);
+            frame.push('\n');
+        }
+        if let Some(retry) = self.retry {
+            frame.push_str("retry: ");
+            frame.push_str(&retry.to_string());
+            frame.push('\n');
+        }
+        for line in self.data.split('\n') {
+            frame.push_str("data: ");
+            frame.push_str(line);
+            frame.push('\n');
+        }
+        frame.push('\n');
+        frame
+    }
+
+    /// Responses protocol terminal frames, as distinct from a generic
+    /// transport EOF or an upstream `[DONE]` sentinel.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.event_type().as_deref(),
+            Some("response.completed")
+                | Some("response.incomplete")
+                | Some("response.failed")
+                | Some("response.cancelled")
+                | Some("error")
+        )
+    }
+
+    /// Whether the surface follows this terminal frame with the `[DONE]`
+    /// success terminator — matching the synthesized path, which terminates
+    /// completed/incomplete streams and ends failed/cancelled/error streams
+    /// bare. (The canonical layer classifies `response.cancelled` as an
+    /// error chunk, and that path never emits a success terminator.)
+    pub fn is_success_terminal(&self) -> bool {
+        matches!(
+            self.event_type().as_deref(),
+            Some("response.completed") | Some("response.incomplete")
+        )
+    }
+
+    fn event_type(&self) -> Option<String> {
+        serde_json::from_str::<Value>(&self.data)
+            .ok()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+            .or_else(|| self.event.clone())
+    }
+}
+
 /// OpenAI Responses API non-streaming response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesResponse {

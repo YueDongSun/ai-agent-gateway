@@ -80,6 +80,45 @@ pub fn display_name_for(id: &str) -> Option<&'static str> {
         .map(|m| m.display_name)
 }
 
+/// Vendor-token spellings for derived display names.
+fn pretty_token(token: &str) -> String {
+    match token {
+        "gpt" => "GPT".into(),
+        "glm" => "GLM".into(),
+        "ai" => "AI".into(),
+        "minimax" => "MiniMax".into(),
+        "deepseek" => "DeepSeek".into(),
+        "qwen" => "Qwen".into(),
+        "kimi" => "Kimi".into(),
+        "gemini" => "Gemini".into(),
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "grok" => "Grok".into(),
+        "llama" => "Llama".into(),
+        "mistral" => "Mistral".into(),
+        "openai" => "OpenAI".into(),
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// Derive a human-readable label for a model id not present in the static
+/// catalogs: `minimax-m3.1` -> "MiniMax M3.1", `gpt-6astsa` -> "GPT 6astsa".
+/// Version dots stay inside their token; ids remain the source of truth.
+pub fn pretty_display_name(id: &str) -> String {
+    crate::proxy::strip_one_m_suffix(id)
+        .split(['-', '_', '/', ' '])
+        .filter(|t| !t.is_empty())
+        .map(pretty_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +159,15 @@ mod tests {
             Some("Claude Haiku 4.5")
         );
         assert_eq!(display_name_for("gpt-4o"), None);
+    }
+
+    #[test]
+    fn pretty_display_name_keeps_versions_and_vendor_spelling() {
+        assert_eq!(pretty_display_name("minimax-m3.1"), "MiniMax M3.1");
+        assert_eq!(pretty_display_name("gpt-6astsa"), "GPT 6astsa");
+        assert_eq!(pretty_display_name("gemini-2.5-pro"), "Gemini 2.5 Pro");
+        assert_eq!(pretty_display_name("deepseek-chat"), "DeepSeek Chat");
+        assert_eq!(pretty_display_name("claude-sonnet-4-5[1m]"), "Claude Sonnet 4 5");
+        assert_eq!(pretty_display_name(""), "");
     }
 }

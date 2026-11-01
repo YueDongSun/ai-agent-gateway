@@ -43,14 +43,18 @@ export interface Market_catalog {
 
 export type Market_source_kind = 'repository' | 'commit' | 'registry' | 'collector';
 
-let pending_catalog_read: Promise<Market_catalog> | null = null;
+let pending_catalog_request: Promise<Market_catalog> | null = null;
+
+function request_catalog(command: 'dsh_market_get_catalog' | 'dsh_market_refresh'): Promise<Market_catalog> {
+  pending_catalog_request ??= invoke<Market_catalog>(command).finally(() => { pending_catalog_request = null; });
+  return pending_catalog_request;
+}
 
 export function dsh_market_get_catalog(): Promise<Market_catalog> {
-  pending_catalog_read ??= invoke<Market_catalog>('dsh_market_get_catalog').finally(() => { pending_catalog_read = null; });
-  return pending_catalog_read;
+  return request_catalog('dsh_market_get_catalog');
 }
 export function dsh_market_refresh(): Promise<Market_catalog> {
-  return invoke('dsh_market_refresh');
+  return request_catalog('dsh_market_refresh');
 }
 export function dsh_market_open_source(entry_id: string, source_kind: Market_source_kind): Promise<void> {
   return invoke('dsh_market_open_source', { entry_id, source_kind });

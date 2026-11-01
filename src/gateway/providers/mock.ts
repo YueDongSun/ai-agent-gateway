@@ -47,7 +47,10 @@ export class MockProvider extends BaseProvider {
     };
   }
 
-  async *stream(req: ChatCompletionRequest): AsyncGenerator<OAIStreamChunk> {
+  async *stream(
+    req: ChatCompletionRequest,
+    _signal?: AbortSignal,
+  ): AsyncGenerator<OAIStreamChunk> {
     const model = req.model;
     if (model === 'mock-fail') {
       // Fail before emitting anything so the gateway can failover cleanly.

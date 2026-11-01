@@ -45,6 +45,8 @@
 .mcp_dialog { background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 16px; padding: 25px; width: min(660px, 100%); max-height: calc(100dvh - 40px); overflow: auto; box-shadow: var(--shadow-pop); }
 .mcp_dialog_heading h2 { font: 400 27px Georgia, serif; margin: 0; }
 .mcp_dialog > p { font-size: 12px; }
+[data-floating-actions='visible'] .mcp_backdrop { padding-bottom: 110px; }
+[data-floating-actions='visible'] .mcp_dialog { max-height: calc(100dvh - 160px); }
 .mcp_form_grid { display: grid; grid-template-columns: 1fr 1.5fr; gap: 14px; }
 .mcp_field, .mcp_form_grid label { display: flex; flex-direction: column; gap: 7px; font-size: 12px; margin: 14px 0; }
 .mcp_field textarea { width: 100%; resize: vertical; font: 12px/1.7 ui-monospace, Consolas, monospace; }

@@ -101,9 +101,11 @@ The checks run under the same service lock as persistence and review invalidatio
    conflicting writer prevents the write and requires a fresh review.
 6. AAG obtains an exclusive `.claude.json.aag_lock`, writes a complete private
    temporary file, flushes it, and retains an exact private backup beside the
-   original as `.claude.json.aag_backup_<review_token>` before atomic replacement.
-   A second content check occurs immediately before replacement, followed by
-   read-back verification. Owned temporary/lock files are cleaned up normally.
+   original as the single latest recovery copy `.claude.json.aag_backup`
+   before atomic replacement. A second content check occurs immediately before
+   replacement, followed by read-back verification. Owned temporary/lock files
+   are cleaned up normally; under the lock AAG also prunes its own superseded
+   per-review backups and pending temporaries left by a crashed apply.
 
 Close Claude Code before applying. The lock serializes AAG writers, but another
 application does not honor that lock; there is no cross-application transaction.

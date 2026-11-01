@@ -32,6 +32,7 @@ export function create_test_repository() {
   write(root, '.gitignore', readFileSync(new URL('../../.gitignore', import.meta.url), 'utf8'));
   write(root, '.env.example', readFileSync(new URL('../../.env.example', import.meta.url), 'utf8'));
   write(root, '.npmignore', readFileSync(new URL('../../.npmignore', import.meta.url), 'utf8'));
+  write(root, 'scripts/npm_discovery.mjs', readFileSync(new URL('../../scripts/npm_discovery.mjs', import.meta.url), 'utf8'));
   write(root, 'scripts/privacy/audit_repository.mjs', readFileSync(new URL('../../scripts/privacy/audit_repository.mjs', import.meta.url), 'utf8'));
   write(root, 'scripts/privacy/export_snapshot.mjs', readFileSync(new URL('../../scripts/privacy/export_snapshot.mjs', import.meta.url), 'utf8'));
   write(root, 'scripts/privacy/git_tree.mjs', readFileSync(new URL('../../scripts/privacy/git_tree.mjs', import.meta.url), 'utf8'));

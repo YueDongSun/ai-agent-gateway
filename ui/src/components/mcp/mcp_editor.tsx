@@ -1,14 +1,16 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { mcp_error_message, mcp_save_server, type Mcp_save_input, type Mcp_server_summary } from '../../lib/api/mcp.js';
 import { Mcp_dialog } from './mcp_dialog.js';
+import { use_page_actions } from '../page_actions.js';
 
 interface Mcp_editor_props {
   server: Mcp_server_summary | null;
   on_close: () => void;
   on_saved: (server: Mcp_server_summary) => void;
+  on_remove?: () => void;
 }
 
-export function Mcp_editor({ server, on_close, on_saved }: Mcp_editor_props) {
+export function Mcp_editor({ server, on_close, on_saved, on_remove }: Mcp_editor_props) {
   const [id, set_id] = useState(server?.id ?? '');
   const [name, set_name] = useState(server?.name ?? '');
   const [description, set_description] = useState(server?.description ?? '');
@@ -18,6 +20,13 @@ export function Mcp_editor({ server, on_close, on_saved }: Mcp_editor_props) {
   const [enabled_codex, set_enabled_codex] = useState(server?.enabled_codex ?? false);
   const [busy, set_busy] = useState(false);
   const [error, set_error] = useState<string | null>(null);
+  const form_ref = useRef<HTMLFormElement>(null);
+  const dirty = !server || name !== server.name || description !== (server.description ?? '') || replace_config || enabled_claude !== server.enabled_claude || enabled_codex !== server.enabled_codex;
+  use_page_actions({
+    target: server ? `MCP ${server.name}` : 'New MCP definition', state: busy ? 'busy' : error ? 'error' : dirty ? 'dirty' : 'clean',
+    on_save: () => form_ref.current?.requestSubmit(), on_delete: server && on_remove ? on_remove : undefined,
+    save_disabled: busy || !dirty || !id.trim() || !name.trim() || (replace_config && !configuration.trim()), delete_disabled: busy,
+  }, 20);
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -39,7 +48,7 @@ export function Mcp_editor({ server, on_close, on_saved }: Mcp_editor_props) {
 
   return <Mcp_dialog title={server ? 'Edit MCP server' : 'Add an MCP server'} on_close={on_close} busy={busy} test_id="mcp_editor">
     <p className="mcp_muted">Save a definition to AAG. No server is installed, started, or connected here.</p>
-    <form onSubmit={(event) => { void save(event); }}>
+    <form ref={form_ref} onSubmit={(event) => { void save(event); }}>
       <div className="mcp_form_grid">
         <label>Server ID<input data-testid="mcp_id" required pattern="[a-z][a-z0-9_]*" title="Start with a lowercase letter; use lowercase letters, numbers, and underscores." maxLength={64} disabled={busy || Boolean(server)} value={id} onChange={(event) => set_id(event.target.value)} placeholder="my_server" autoComplete="off" /></label>
         <label>Display name<input data-testid="mcp_name" required maxLength={128} disabled={busy} value={name} onChange={(event) => set_name(event.target.value)} placeholder="My MCP server" autoComplete="off" /></label>

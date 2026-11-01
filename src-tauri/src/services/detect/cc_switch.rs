@@ -182,34 +182,41 @@ fn read_claude_anthropic_base_url(home: Option<&std::path::Path>) -> Option<Stri
         .map(String::from)
 }
 
-/// Read `~/.codex/config.toml` → `base_url` (top-level string).
-///
-/// Codex's config.toml is TOML; we only need the `base_url` line so we
-/// do a cheap regex-style scan instead of pulling in a TOML parser
-/// dependency just for this. Falls back to "no match" on any error.
-fn read_codex_base_url(home: Option<&std::path::Path>) -> Option<String> {
-    let path = home_dir(home).join(".codex").join("config.toml");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    for line in raw.lines() {
+/// Scan TOML text for a top-level `base_url = "..."` assignment and return
+/// the quoted value. Deliberately regex-free: this is the only TOML field
+/// the detector and importer need from these files, so a conservative line
+/// scan avoids a parser dependency. Lines that merely start with the
+/// prefix (e.g. `base_url_x`) or lack `=` are skipped, not matched.
+fn find_toml_base_url(text: &str) -> Option<String> {
+    for line in text.lines() {
         let trimmed = line.trim_start();
-        // match `base_url = "..."` (with or without leading whitespace)
-        if let Some(rest) = trimmed.strip_prefix("base_url") {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim();
-                if let Some(stripped) = rest.strip_prefix('"') {
-                    if let Some(end) = stripped.find('"') {
-                        return Some(stripped[..end].to_string());
-                    }
-                }
+        let Some(after_key) = trimmed.strip_prefix("base_url") else {
+            continue;
+        };
+        let Some(after_eq) = after_key.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = after_eq.trim();
+        if let Some(stripped) = value.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                return Some(stripped[..end].to_string());
             }
         }
     }
     None
 }
 
+/// Read `~/.codex/config.toml` → `base_url` (top-level string). Falls back
+/// to "no match" on any error.
+fn read_codex_base_url(home: Option<&std::path::Path>) -> Option<String> {
+    let path = home_dir(home).join(".codex").join("config.toml");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    find_toml_base_url(&raw)
+}
+
 /// Parse the host:port out of a URL and check if it matches
-/// `127.0.0.1:<cc_switch_port>`. Tolerant of trailing paths.
+/// `127.0.0.1:<cc_switch_port>`. Tolerant of trailing paths and of the
+/// bracketed IPv6 loopback spelling (`http://[::1]:<port>/...`).
 pub fn url_uses_cc_switch_port(url: &str, port: u16) -> bool {
     // Accept either a bare `http://host:port/...` URL or just `host:port`.
     let host_port = url
@@ -222,7 +229,7 @@ pub fn url_uses_cc_switch_port(url: &str, port: u16) -> bool {
     if parts.len() != 2 {
         return false;
     }
-    let host = parts[1];
+    let host = parts[1].trim_matches(['[', ']']);
     let port_str = parts[0];
     let parsed_port: u16 = match port_str.parse() {
         Ok(p) => p,
@@ -249,21 +256,7 @@ pub fn extract_target_url(app_type: &str, settings_config: &serde_json::Value) -
             .map(String::from),
         "codex" => {
             let toml_str = settings_config.get("config")?.as_str()?;
-            for line in toml_str.lines() {
-                let trimmed = line.trim_start();
-                if let Some(rest) = trimmed.strip_prefix("base_url") {
-                    let rest = rest.trim_start();
-                    if let Some(rest) = rest.strip_prefix('=') {
-                        let rest = rest.trim();
-                        if let Some(stripped) = rest.strip_prefix('"') {
-                            if let Some(end) = stripped.find('"') {
-                                return Some(stripped[..end].to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
+            find_toml_base_url(toml_str)
         }
         "copilot" => settings_config
             .get("env")?
@@ -286,11 +279,31 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// Restores the captured `AAG_HOME_DIR` on drop so a panic between
+    /// `set_var` and the manual restore cannot leak the override into other
+    /// tests that read the effective home.
+    struct HomeEnvRestore(Option<std::ffi::OsString>);
+
+    impl HomeEnvRestore {
+        fn capture() -> Self {
+            Self(std::env::var_os("AAG_HOME_DIR"))
+        }
+    }
+
+    impl Drop for HomeEnvRestore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("AAG_HOME_DIR", value),
+                None => std::env::remove_var("AAG_HOME_DIR"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn database_discovery_uses_effective_home_without_an_explicit_override() {
         let _guard = crate::config::test_env_lock().lock().await;
+        let _env_restore = HomeEnvRestore::capture();
         let root = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("AAG_HOME_DIR");
         std::env::set_var("AAG_HOME_DIR", root.path());
         let expected = root.path().join(".cc-switch/cc-switch.db");
         let discovered = cc_switch_db_path(None);
@@ -301,10 +314,6 @@ mod tests {
         std::fs::remove_dir(&expected).unwrap();
         std::fs::write(&expected, []).unwrap();
         let file_detected = probe_db_file(None);
-        match previous {
-            Some(value) => std::env::set_var("AAG_HOME_DIR", value),
-            None => std::env::remove_var("AAG_HOME_DIR"),
-        }
         assert_eq!(discovered, expected);
         assert!(!directory_detected);
         assert!(file_detected);
@@ -328,8 +337,29 @@ mod tests {
     fn url_uses_cc_switch_port_basic() {
         assert!(url_uses_cc_switch_port("http://127.0.0.1:15721/v1", 15721));
         assert!(url_uses_cc_switch_port("http://localhost:15721/v1", 15721));
+        assert!(url_uses_cc_switch_port("http://[::1]:15721/v1", 15721));
+        assert!(!url_uses_cc_switch_port(
+            "http://[2001:db8::1]:15721/v1",
+            15721
+        ));
         assert!(!url_uses_cc_switch_port("http://127.0.0.1:8989/v1", 15721));
         assert!(!url_uses_cc_switch_port("https://api.openai.com/v1", 15721));
+    }
+
+    #[test]
+    fn find_toml_base_url_scans_only_top_level_assignments() {
+        assert_eq!(
+            find_toml_base_url("model = \"gpt-5\"\n  base_url = \"http://127.0.0.1:8989/v1\"\n"),
+            Some("http://127.0.0.1:8989/v1".into())
+        );
+        // Prefix-shaped keys and missing `=` are skipped, not matched.
+        assert_eq!(
+            find_toml_base_url("base_url_x = \"a\"\nbase_url_no_eq\nbase_url=\"b\"\n"),
+            Some("b".into())
+        );
+        // Only double-quoted values are recognized.
+        assert_eq!(find_toml_base_url("base_url = 'single'\n"), None);
+        assert_eq!(find_toml_base_url("model = \"gpt-5\"\n"), None);
     }
 
     #[test]

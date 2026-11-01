@@ -4,7 +4,7 @@
 //! profile lives under `%APPDATA%\Antigravity` (Windows) with a
 //! `User/settings.json` that the app creates once its settings UI is opened.
 //! The app's model configuration is driven through the in-app model dropdown
-//! + API-key entry; the on-disk schema for custom providers is **not publicly
+//! and API-key entry; the on-disk schema for custom providers is **not publicly
 //! documented** and the app stores much of its state in Chromium LevelDB.
 //!
 //! Strategy for this iteration: **detect-only**. AAG reports whether

@@ -79,6 +79,13 @@ fn default_resolution_is_read_only_and_uses_cli_paths_on_every_host() {
         ("opencode", vec![".config/opencode/opencode.json"]),
         ("kilo_cli", vec![".config/kilo/kilo.jsonc"]),
         ("kilo_vscode", vec![".config/kilo/kilo.jsonc"]),
+        (
+            "cline_cli",
+            vec![
+                ".cline_cli/data/settings/providers.json",
+                ".cline_cli/data/settings/models.json",
+            ],
+        ),
     ] {
         let resolved = fixture.resolve(app_type, false, &[]).unwrap();
         assert_eq!(
@@ -263,6 +270,35 @@ fn portable_home_ignores_external_overrides_and_accepts_contained_fixture_paths(
 }
 
 #[test]
+fn path_failures_convert_to_stable_ipc_codes() {
+    for (code, expected) in [
+        ("not_absolute", "AAG_CLIENT_CONFIG_PATH_NOT_ABSOLUTE"),
+        (
+            "parent_traversal",
+            "AAG_CLIENT_CONFIG_PATH_PARENT_TRAVERSAL",
+        ),
+        (
+            "control_character",
+            "AAG_CLIENT_CONFIG_PATH_CONTROL_CHARACTER",
+        ),
+        (
+            "metadata_unavailable",
+            "AAG_CLIENT_CONFIG_PATH_METADATA_UNAVAILABLE",
+        ),
+        ("unsupported_app", "AAG_CLIENT_CONFIG_PATH_UNSUPPORTED_APP"),
+    ] {
+        assert_eq!(failure(code).external_message(), expected, "{code}");
+        assert_eq!(String::from(failure(code)), expected, "{code}");
+    }
+
+    let fixture = Fixture::new();
+    assert_eq!(
+        String::from(fixture.resolve("unsupported", false, &[]).unwrap_err()),
+        "AAG_CLIENT_CONFIG_PATH_UNSUPPORTED_APP"
+    );
+}
+
+#[test]
 fn invalid_explicit_paths_fail_without_silent_fallback() {
     let fixture = Fixture::new();
     for (app_type, variable) in [
@@ -275,13 +311,27 @@ fn invalid_explicit_paths_fail_without_silent_fallback() {
         ("kilo_cli", "KILO_CONFIG_DIR"),
         ("opencode", "XDG_CONFIG_HOME"),
     ] {
-        for invalid in [
-            PathBuf::from("relative"),
-            Fixture::traversal("escape"),
-            fixture.home.join("newline\npath"),
+        for (invalid, expected) in [
+            (
+                PathBuf::from("relative"),
+                "AAG_CLIENT_CONFIG_PATH_NOT_ABSOLUTE",
+            ),
+            (
+                Fixture::traversal("escape"),
+                "AAG_CLIENT_CONFIG_PATH_PARENT_TRAVERSAL",
+            ),
+            (
+                fixture.home.join("newline\npath"),
+                "AAG_CLIENT_CONFIG_PATH_CONTROL_CHARACTER",
+            ),
         ] {
             let outcome = fixture.resolve(app_type, false, &[(variable, invalid.clone())]);
-            assert!(outcome.is_err(), "expected {app_type}/{variable} invalid={invalid:?} to fail, got {outcome:?}");
+            let error = outcome.unwrap_err();
+            assert_eq!(
+                String::from(error),
+                expected,
+                "{app_type}/{variable} invalid={invalid:?}"
+            );
         }
     }
     assert_eq!(fs::read_dir(&fixture.home).unwrap().count(), 0);
@@ -309,7 +359,10 @@ fn read_only_file_validation_rejects_invalid_spelling_and_directories() {
         fixture.home.clone(),
     ] {
         let outcome = private_fs::validate_external_file_path(&invalid);
-        assert!(outcome.is_err(), "expected {invalid:?} to fail, got {outcome:?}");
+        assert!(
+            outcome.is_err(),
+            "expected {invalid:?} to fail, got {outcome:?}"
+        );
     }
     let absent = fixture.home.join("absent/config.json");
     private_fs::validate_external_file_path(&absent).unwrap();
@@ -351,5 +404,31 @@ fn linked_and_dangling_file_candidates_fail_closed() {
         fs::create_dir_all(linked.parent().unwrap()).unwrap();
         symlink(target, &linked).unwrap();
         assert!(fixture.resolve("opencode", false, &[]).is_err());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn isolated_containment_folds_path_case_on_windows() {
+    let fixture = Fixture::new();
+    for (label, inside) in [
+        (
+            "uppercase home",
+            PathBuf::from(fixture.home.to_string_lossy().to_uppercase()),
+        ),
+        (
+            "lowercase home",
+            PathBuf::from(fixture.home.to_string_lossy().to_lowercase()),
+        ),
+    ] {
+        let inside = inside.join("client home");
+        let resolved = fixture
+            .resolve("copilot", true, &[("COPILOT_HOME", inside.clone())])
+            .expect("case-spelled contained override must be accepted");
+        assert_eq!(resolved.source, "environment", "{label}");
+        assert!(
+            resolved.paths.iter().all(|path| path.starts_with(&inside)),
+            "{label}"
+        );
     }
 }

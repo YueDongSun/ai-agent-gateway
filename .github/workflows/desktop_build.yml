@@ -49,7 +49,7 @@ jobs:
       - name: install_ui_dependencies
         run: npm ci --prefix ui --ignore-scripts
       - name: verify_node_and_ui
-        run: npm run typecheck && npm test && npm run test:desktop_runner && npm run test:ui_smoke_runner && npm --prefix ui run typecheck && npm run ui:build
+        run: npm run typecheck && npm test && npm run test:adversarial && npm run test:desktop_runner && npm run test:ui_smoke_runner && npm --prefix ui run typecheck && npm run ui:build
       - name: verify_release_inputs
         run: npm run release:verify
       - name: build_desktop

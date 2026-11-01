@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { find_npm_cli } from '../npm_discovery.mjs';
 import {
   find_repository_root,
   list_commit_entries,
@@ -130,6 +131,14 @@ function synthetic_test_context(path, text, offset) {
   );
 }
 
+// These complete, publicly documented protocol ranges are not host inventory.
+// Bare peer addresses and narrower allocations still undergo the normal scan.
+const public_protocol_ranges = ['100.64.0.0/10', 'fd7a:115c:a1e0::/48'];
+function public_protocol_range_context(text, offset) {
+  return public_protocol_ranges.some(range => text.startsWith(range, offset)
+    && !/[A-Za-z0-9.:/]/.test(text[offset + range.length] ?? ''));
+}
+
 function authenticated_url_is_sensitive(value) {
   try {
     const hostname = new URL(value).hostname.toLowerCase();
@@ -221,8 +230,8 @@ export function scan_content(path_value, bytes, options = {}) {
   scan_regex(text, /(?<![^\s"'(=\[{};,])((?:\\\\\\\\|\\\\|\/\/)[A-Za-z0-9._-]+[\\/][^\r\n"'<>|\s,}\]]{1,1024})/g, 'absolute_machine_path', path, binary, findings, seen, match => !/(?:^|\/)(?:package-lock|npm-shrinkwrap)\.json$/i.test(path) && machine_path_is_sensitive(match[1]) && !synthetic_test_context(path, text, match.index));
   scan_regex(text, /(?<![A-Za-z0-9_])(\/mnt\/[a-z]\/[^\r\n"'<>|\s][^\r\n"'<>|]*)/gi, 'absolute_machine_path', path, binary, findings, seen, match => machine_path_is_sensitive(match[1]) && !synthetic_test_context(path, text, match.index));
   scan_regex(text, /\/(?:Users|home)\/([^/\s<>"']+)\/[^\r\n"']*/g, 'user_path', path, binary, findings, seen, match => !placeholder_value(match[1]) && !placeholder_path_users.has(match[1].toLowerCase()) && !synthetic_test_context(path, text, match.index));
-  scan_regex(text, /\b\d{1,3}(?:\.\d{1,3}){3}\b/g, 'private_network_address', path, binary, findings, seen, match => is_private_network(match[0]) && !is_version_context(text, match.index) && !synthetic_test_context(path, text, match.index));
-  scan_regex(text, /(?<![A-Za-z0-9])\[?(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}\]?(?![A-Za-z0-9])/g, 'private_network_address', path, binary, findings, seen, match => is_private_ipv6(match[0]) && !synthetic_test_context(path, text, match.index));
+  scan_regex(text, /\b\d{1,3}(?:\.\d{1,3}){3}\b/g, 'private_network_address', path, binary, findings, seen, match => is_private_network(match[0]) && !is_version_context(text, match.index) && !public_protocol_range_context(text, match.index) && !synthetic_test_context(path, text, match.index));
+  scan_regex(text, /(?<![A-Za-z0-9])\[?(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}\]?(?![A-Za-z0-9])/g, 'private_network_address', path, binary, findings, seen, match => is_private_ipv6(match[0]) && !public_protocol_range_context(text, match.index) && !synthetic_test_context(path, text, match.index));
   scan_regex(text, /\b(?:[a-z0-9-]+\.)+[a-z0-9-]+\.ts\.net\b/gi, 'tailnet_hostname', path, binary, findings, seen, match => !placeholder_value(match[0]) && !synthetic_test_context(path, text, match.index));
   return { binary, findings };
 }
@@ -278,11 +287,7 @@ function evaluate_package_metadata(entries, read_entry, findings, seen) {
 }
 
 export function verify_npm_pack_manifest(repository_root, policy = default_policy) {
-  const npm_cli = [
-    process.env.npm_execpath,
-    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-  ].filter(Boolean).map(candidate => resolve(candidate)).find(candidate => existsSync(candidate));
+  const npm_cli = find_npm_cli();
   if (!npm_cli) throw new privacy_error('npm_pack_unavailable');
   const result = spawnSync(process.execPath, [npm_cli, 'pack', '--dry-run', '--json', '--ignore-scripts'], {
     cwd: repository_root,
@@ -387,6 +392,11 @@ function public_manifest_has_private_provenance(value) {
   return false;
 }
 
+export function directory_mode_matches_manifest(observed_mode, listed_mode, platform = process.platform) {
+  if (platform === 'win32') return 'not_applicable';
+  return observed_mode === listed_mode;
+}
+
 function evaluate_public_snapshot_manifest(entries, read_entry, findings, seen) {
   const manifest_entry = entries.find(entry => entry.path === 'public_snapshot_manifest.json');
   if (!manifest_entry) {
@@ -399,6 +409,8 @@ function evaluate_public_snapshot_manifest(entries, read_entry, findings, seen) 
     if (manifest.schema_version !== 1
         || manifest.snapshot_type !== 'history_free_tracked_tree'
         || !Array.isArray(manifest.files)
+        || typeof manifest.policy_sha256 !== 'string'
+        || !/^[a-f0-9]{64}$/.test(manifest.policy_sha256)
         || public_manifest_has_private_provenance(manifest)) throw new Error();
   } catch {
     add_finding(findings, seen, 'public_snapshot_manifest_invalid', 'public_snapshot_manifest.json', 1);
@@ -437,9 +449,23 @@ function evaluate_public_snapshot_manifest(entries, read_entry, findings, seen) 
     } catch {
       add_finding(findings, seen, 'public_snapshot_file_unreadable', path, 0);
     }
+    if (directory_mode_matches_manifest(entry.mode, file.mode) === false) {
+      add_finding(findings, seen, 'public_snapshot_mode_mismatch', path, 0);
+    }
   }
   for (const path of actual.keys()) {
     if (!expected.has(path)) add_finding(findings, seen, 'public_snapshot_unmanifested_file', path, 0);
+  }
+  const policy_entry = actual.get('scripts/privacy/public_export_policy.json');
+  if (policy_entry) {
+    try {
+      const policy_bytes = read_entry(policy_entry);
+      if (createHash('sha256').update(policy_bytes).digest('hex') !== manifest.policy_sha256) {
+        add_finding(findings, seen, 'public_snapshot_policy_mismatch', 'scripts/privacy/public_export_policy.json', 0);
+      }
+    } catch {
+      // Unreadable policy entries already surface as public_snapshot_file_unreadable above.
+    }
   }
   const tree_hasher = createHash('sha256');
   for (const file of [...expected.values()].sort((left, right) => left.path.localeCompare(right.path, 'en'))) {

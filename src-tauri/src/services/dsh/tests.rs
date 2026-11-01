@@ -831,3 +831,143 @@ fn already_cancelled_package_work_does_not_attempt_to_spawn() {
         "dsh:cancelled"
     );
 }
+
+#[test]
+fn a_receipt_persist_failure_never_masks_the_committed_outcome() {
+    let directory = Test_directory::new();
+    let service = directory.service();
+    // The journal's parent is a regular file, so neither the atomic write nor
+    // the create_new fallback can place receipt.json beneath it.
+    let blocked = directory.0.join("blocked");
+    fs::write(&blocked, b"x").unwrap();
+    let journal = blocked.join("journal");
+    let receipt = Dsh_receipt {
+        operation_id: "op".into(),
+        action: "initialize".into(),
+        package_name: None,
+        version: None,
+        status: "succeeded".into(),
+        error_code: None,
+        started_at_ms: 1,
+        finished_at_ms: 1,
+        rollback_status: "not_needed".into(),
+        restart_required: true,
+    };
+    service.state.lock().unwrap().job = Some(Dsh_job {
+        operation_id: "op".into(),
+        action: "initialize".into(),
+        package_name: None,
+        phase: "running".into(),
+    });
+    let instance_lock = config::Instance_lock::acquire(&directory.0).unwrap();
+    let returned = plugins::finish_receipt(&journal, receipt, &service.state, instance_lock);
+    // The committed outcome survives; persistence degradation never flips it.
+    assert_eq!(returned.status, "succeeded");
+    assert!(returned.restart_required);
+    assert_eq!(returned.error_code, None);
+    // Cleanup is unconditional: a persist fault cannot wedge the instance as
+    // instance_busy or strand the lock.
+    assert!(service.state.lock().unwrap().job.is_none());
+    let _released = config::Instance_lock::acquire(&directory.0).unwrap();
+    assert!(!journal.join("receipt.json").exists());
+}
+
+#[test]
+fn persist_receipt_round_trips_through_the_atomic_path() {
+    let directory = Test_directory::new();
+    let journal = directory.0.join("operations").join("op");
+    fs::create_dir_all(&journal).unwrap();
+    let bytes = br#"{"status":"succeeded","rollback_status":"not_needed"}"#;
+    plugins::persist_receipt(&journal, bytes).unwrap();
+    assert_eq!(fs::read(journal.join("receipt.json")).unwrap(), bytes);
+}
+
+#[test]
+fn persist_receipt_fails_closed_when_the_journal_is_unwritable() {
+    let directory = Test_directory::new();
+    let blocked = directory.0.join("not_a_dir");
+    fs::write(&blocked, b"x").unwrap();
+    let journal = blocked.join("journal");
+    assert!(plugins::persist_receipt(&journal, b"{}").is_err());
+    assert!(!journal.join("receipt.json").exists());
+}
+
+#[test]
+fn write_atomic_keeps_only_the_latest_recovery_copy_and_prunes_legacy_sidecars() {
+    let directory = Test_directory::new();
+    let target = directory.0.join("managed.json");
+    let backup = directory.0.join("managed.json.aag_backup");
+    // Legacy per-operation sidecars and a leaked temporary from older builds.
+    fs::write(directory.0.join(".aag_backup_legacy1"), b"old").unwrap();
+    fs::write(directory.0.join(".aag_backup_legacy2"), b"old").unwrap();
+    fs::write(directory.0.join(".aag_write_legacy"), b"partial").unwrap();
+    fs::create_dir(directory.0.join(".aag_backup_directory")).unwrap();
+    config::write_atomic(&target, b"first").unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"first");
+    assert!(!backup.exists());
+    config::write_atomic(&target, b"second").unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"second");
+    assert_eq!(fs::read(&backup).unwrap(), b"first");
+    assert!(!directory.0.join(".aag_backup_legacy1").exists());
+    assert!(!directory.0.join(".aag_backup_legacy2").exists());
+    assert!(!directory.0.join(".aag_write_legacy").exists());
+    assert!(directory.0.join(".aag_backup_directory").is_dir());
+    config::write_atomic(&target, b"third").unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), b"second");
+    let sidecars = fs::read_dir(&directory.0)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().contains("aag_backup"))
+        .count();
+    assert_eq!(sidecars, 2, "retained copy plus the untouched directory");
+}
+
+#[test]
+fn a_failed_write_atomic_never_leaks_its_temporary() {
+    let directory = Test_directory::new();
+    let target = directory.0.join("managed.json");
+    fs::create_dir(&target).unwrap();
+    // A directory at the stable backup name cannot be removed as a file, so
+    // the write fails closed before the target is moved.
+    fs::create_dir(target.with_file_name("managed.json.aag_backup")).unwrap();
+    assert_eq!(
+        config::write_atomic(&target, b"data")
+            .unwrap_err()
+            .to_string(),
+        "dsh:backup_replace_failed"
+    );
+    assert!(target.is_dir());
+    assert!(fs::read_dir(&directory.0)
+        .unwrap()
+        .flatten()
+        .all(|entry| !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".aag_write_")));
+}
+
+#[test]
+fn recoverable_reads_use_the_latest_recovery_copy_only_when_the_target_is_absent() {
+    let directory = Test_directory::new();
+    let target = directory.0.join("aag_model_binding.json");
+    let backup = target.with_file_name("aag_model_binding.json.aag_backup");
+    assert_eq!(config::read_json_recoverable(&target).unwrap(), None);
+    fs::write(&backup, br#"{"schema":2,"committed":{},"pending":null}"#).unwrap();
+    let recovered = config::read_json_recoverable(&target).unwrap().unwrap();
+    assert_eq!(
+        recovered.get("schema").and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    fs::write(
+        &target,
+        br#"{"schema":2,"committed":{"provider_key":"aag"},"pending":null}"#,
+    )
+    .unwrap();
+    let live = config::read_json_recoverable(&target).unwrap().unwrap();
+    assert_eq!(
+        live.pointer("/committed/provider_key")
+            .and_then(serde_json::Value::as_str),
+        Some("aag"),
+        "a present target is always authoritative over its recovery copy"
+    );
+}

@@ -1,8 +1,11 @@
 import type { ChatCompletionRequest } from '../../config/schema.js';
 import type { OAIChatResponse, OAIStreamChunk } from '../canonical.js';
 import { BaseProvider, makeProviderError } from './base.js';
+import { upstream_http_error } from './error_body.js';
+import { makeStreamErrorChunk } from '../canonical.js';
 import { logger, safeLogRef } from '../../util/log.js';
 import { endpointUrl, modelsUrls } from './endpoint.js';
+import { read_sse_lines } from '../sse_lines.js';
 
 /**
  * OpenAI-compatible provider.
@@ -17,7 +20,7 @@ export class OpenAIProvider extends BaseProvider {
     return endpointUrl(this.config.baseURL, 'openai');
   }
 
-  async complete(req: ChatCompletionRequest): Promise<OAIChatResponse> {
+  async complete(req: ChatCompletionRequest, signal?: AbortSignal): Promise<OAIChatResponse> {
     const url = this.endpoint();
     let res: Response;
     try {
@@ -25,26 +28,28 @@ export class OpenAIProvider extends BaseProvider {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify({ ...req, stream: false }),
-        signal: this.timeoutSignal(),
+        signal: signal ? AbortSignal.any([signal, this.timeoutSignal()]) : this.timeoutSignal(),
       });
-    } catch {
+    } catch (e) {
+      // A client abort must reach the router as an abort, not as a retriable
+      // transport failure: the router settles it as a cancellation and never
+      // fails over for it. Provider timeouts keep the transport_error wrap.
+      if (signal?.aborted && e instanceof Error && e.name === 'AbortError') throw e;
       throw makeProviderError('upstream_transport_error', {
         retriable: true,
         stage: 'request_send',
       });
     }
     if (!res.ok) {
-      const responseBytes = await responseByteLength(res);
-      throw makeProviderError('upstream_http_error', {
-        status: res.status,
-        retriable: res.status >= 500 || res.status === 429,
-        stage: 'response_status',
-        responseBytes,
-      });
+      throw await upstream_http_error(res, 'response_status');
     }
     try {
       return (await res.json()) as OAIChatResponse;
-    } catch {
+    } catch (e) {
+      // Decode path follows the same client-abort rule as request_send: an
+      // AbortError from the body read is a client disconnect, not a provider
+      // fault, and must not trigger failover or count against the breaker.
+      if (signal?.aborted && e instanceof Error && e.name === 'AbortError') throw e;
       throw makeProviderError('upstream_decode_error', {
         status: 502,
         retriable: true,
@@ -53,32 +58,41 @@ export class OpenAIProvider extends BaseProvider {
     }
   }
 
-  async *stream(req: ChatCompletionRequest): AsyncGenerator<OAIStreamChunk> {
+  async *stream(
+    req: ChatCompletionRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<OAIStreamChunk> {
     const url = this.endpoint();
-    let res: Response;
+    // Header-phase timeout only: cancel once the fetch settles so a healthy
+    // long stream is never truncated mid-body (Rust proxy parity; the router
+    // bounds time-to-first-chunk instead). The outer signal stays armed for
+    // the whole stream so the router can abort an abandoned hop's body
+    // read; dispose() detaches it when the stream ends.
+    const attempt = this.headerTimeoutController(signal);
     try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({ ...req, stream: true }),
-        signal: this.timeoutSignal(),
-      });
-    } catch {
-      throw makeProviderError('upstream_transport_error', {
-        retriable: true,
-        stage: 'stream_connect',
-      });
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: this.headers(),
+          body: JSON.stringify({ ...req, stream: true }),
+          signal: attempt.signal,
+        });
+      } catch {
+        throw makeProviderError('upstream_transport_error', {
+          retriable: true,
+          stage: 'stream_connect',
+        });
+      } finally {
+        attempt.cancel();
+      }
+      if (!res.ok || !res.body) {
+        throw await upstream_http_error(res, 'stream_status', 502);
+      }
+      yield* parseSSE<OAIStreamChunk>(res.body, this.id);
+    } finally {
+      attempt.dispose();
     }
-    if (!res.ok || !res.body) {
-      const responseBytes = await responseByteLength(res);
-      throw makeProviderError('upstream_http_error', {
-        status: res.status || 502,
-        retriable: res.status >= 500 || res.status === 429,
-        stage: 'stream_status',
-        responseBytes,
-      });
-    }
-    yield* parseSSE<OAIStreamChunk>(res.body, this.id);
   }
 
   private headers(): Record<string, string> {
@@ -108,41 +122,26 @@ export class OpenAIProvider extends BaseProvider {
   }
 }
 
-/** Parse a Server-Sent-Events stream into JSON objects, one per `data:` line. */
+/** Malformed data lines terminate explicitly rather than looking like clean completion. */
 export async function* parseSSE<T>(
   body: ReadableStream<Uint8Array>,
   tag: string,
 ): AsyncGenerator<T> {
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for await (const chunk of body as any) {
-    buffer += decoder.decode(chunk as Uint8Array, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      let line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      line = line.replace(/\r$/, '');
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') return;
-      if (!data) continue;
-      try {
-        yield JSON.parse(data) as T;
-      } catch {
-        logger.debug('openai', 'sse_parse_failed', {
-          provider_ref: safeLogRef(tag),
-          data_bytes: new TextEncoder().encode(data).byteLength,
-          stage: 'stream_decode',
-        });
-      }
+  for await (const line of read_sse_lines(body)) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') return;
+    if (!data) continue;
+    try {
+      yield JSON.parse(data) as T;
+    } catch {
+      logger.debug('openai', 'sse_parse_failed', {
+        provider_ref: safeLogRef(tag),
+        data_bytes: Buffer.byteLength(data),
+        stage: 'stream_decode',
+      });
+      yield makeStreamErrorChunk(502, 'proxy_stream_error') as unknown as T;
+      return;
     }
-  }
-}
-
-async function responseByteLength(response: Response): Promise<number> {
-  try {
-    return (await response.arrayBuffer()).byteLength;
-  } catch {
-    return 0;
   }
 }

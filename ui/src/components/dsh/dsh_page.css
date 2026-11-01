@@ -83,6 +83,8 @@
 .dsh_acknowledgement { display: flex; align-items: flex-start; gap: 9px; margin: 20px 0; font-size: 12px; cursor: pointer; }
 .dsh_acknowledgement input { margin-top: 4px; }
 .dsh_preview_dialog .dsh_actions { justify-content: flex-end; }
+[data-floating-actions='visible'] .dsh_modal_backdrop { padding-bottom: 110px; }
+[data-floating-actions='visible'] .dsh_preview_dialog { max-height: calc(100dvh - 160px); }
 @media (max-width: 720px) {
   .dsh_card { padding: 18px; }
   .dsh_settings_grid, .dsh_plugin_grid { grid-template-columns: minmax(0, 1fr); }

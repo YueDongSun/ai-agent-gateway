@@ -6,10 +6,12 @@
 //! Unified schema covers both S3 and WebDAV (cc-switch keeps them as separate
 //! `S3Settings` / `WebDAVSettings` structs in `services/s3.rs:23` and
 //! `services/webdav.rs`). Field mapping:
-//! - S3:     `access_key` = access_key_id, `secret_key` = secret_access_key,
-//!           `bucket` = bucket, `region` = region, `endpoint` = custom host.
+//! - S3: `access_key` = access_key_id, `secret_key` = secret_access_key,
+//!   `bucket` = bucket, `region` = region, `endpoint` = custom host.
 //! - WebDAV: `access_key` = username, `secret_key` = password,
-//!           `remote_path` = remote directory, `endpoint` = full URL.
+//!   `remote_path` = remote directory, `endpoint` = full URL.
+
+use std::str::FromStr;
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -31,8 +33,12 @@ impl SyncTarget {
             Self::Webdav => "webdav",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, AppError> {
+impl FromStr for SyncTarget {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, AppError> {
         match s {
             "s3" => Ok(Self::S3),
             "webdav" => Ok(Self::Webdav),
@@ -156,7 +162,6 @@ impl Database {
     /// Record the result of a sync attempt: stamp `last_sync_at` to now and
     /// store the error (or clear it on success). Called by the sync service
     /// (Phase 8 later step) after each run.
-    #[allow(dead_code)]
     pub fn record_sync_result(
         &self,
         target: SyncTarget,
@@ -169,10 +174,7 @@ impl Database {
             params![now, error, target.as_str()],
         )?;
         if updated == 0 {
-            return Err(AppError::InvalidInput(format!(
-                "sync config for \"{}\" not found",
-                target.as_str()
-            )));
+            return Err(AppError::InvalidInput("AAG_SYNC_CONFIG_NOT_FOUND".into()));
         }
         Ok(())
     }
@@ -290,7 +292,9 @@ mod tests {
         let s3 = db.get_sync_config(SyncTarget::S3).unwrap().unwrap();
         assert!(s3.last_error.is_none());
 
-        // Unknown target -> error
-        assert!(db.record_sync_result(SyncTarget::Webdav, None).is_err());
+        // Unknown target -> stable code, no target/provider text in the detail
+        let error = db.record_sync_result(SyncTarget::Webdav, None).unwrap_err();
+        assert_eq!(error.external_message(), "AAG_SYNC_CONFIG_NOT_FOUND");
+        assert!(!error.to_string().contains("webdav"));
     }
 }

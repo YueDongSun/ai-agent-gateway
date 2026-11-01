@@ -1,0 +1,82 @@
+.client_management_section {
+  max-width: 1080px;
+  margin: 0 auto 48px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.client_management_toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 64px;
+  border: 0;
+  border-radius: inherit;
+  padding: 16px 20px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.client_management_toggle > span:first-child { display: grid; gap: 5px; }
+.client_management_toggle strong { font-size: 14px; font-weight: 600; }
+.client_management_toggle > span:first-child > span { font-size: 12px; color: var(--fg-muted); }
+.client_management_indicator { font-size: 20px; flex-shrink: 0; color: var(--fg-muted); }
+.client_management_toggle[aria-expanded='true'] { border-radius: var(--radius) var(--radius) 0 0; }
+.client_management_body { padding: 20px; border-top: 1px solid var(--border); min-width: 0; }
+.client_management_body[hidden] { display: none; }
+
+.client_management_switcher {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px;
+  margin: -4px -4px 24px;
+  overscroll-behavior-inline: contain;
+}
+
+.client_management_switcher button {
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  min-height: 40px;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms;
+}
+
+.client_management_switcher button:hover { color: var(--fg); background: var(--bg-elevated-2); }
+.client_management_switcher button.active { color: var(--accent-text); background: var(--accent-bg); border-color: var(--border); font-weight: 600; }
+.client_management_body > .page { min-width: 0; }
+
+@media (max-width: 520px) {
+  .client_management_toggle { padding: 16px; }
+  .client_management_body { padding: 16px; }
+  .client_management_switcher button { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .client_management_switcher button { transition: none; }
+}
+
+.client_management_apply_all {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.client_management_apply_all_summary {
+  color: var(--fg-muted);
+  font-size: 12px;
+}

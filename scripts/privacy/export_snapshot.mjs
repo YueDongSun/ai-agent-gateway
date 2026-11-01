@@ -33,6 +33,7 @@ import {
 } from './git_tree.mjs';
 
 const bound_tool_paths = [
+  'scripts/npm_discovery.mjs',
   'scripts/privacy/audit_repository.mjs',
   'scripts/privacy/export_snapshot.mjs',
   'scripts/privacy/git_tree.mjs',
@@ -96,7 +97,7 @@ function assert_source_tooling_bound(entries, read_entry) {
   for (const path of bound_tool_paths) {
     const entry = entries.find(candidate => candidate.path === path);
     if (!entry) throw new privacy_error('source_tooling_missing');
-    const local_path = fileURLToPath(new URL('./' + basename(path), import.meta.url));
+    const local_path = fileURLToPath(new URL('../../' + path, import.meta.url));
     if (
       sha256(normalize_text_line_endings(read_entry(entry))) !==
       sha256(normalize_text_line_endings(readFileSync(local_path)))
@@ -130,6 +131,27 @@ function link_fingerprint(path, line) {
   return createHash('sha256').update(`aag_public_link_v1\0${path}\0${line}`).digest('hex').slice(0, 20);
 }
 
+// Shared normalization for inline-link and reference-definition targets:
+// anchors, schemed, and protocol-relative targets are not snapshot-local;
+// the remainder is percent-decoded, stripped of fragment then query, joined
+// against the snapshot root (rooted targets) or the containing file's
+// directory, and rejected when it escapes the snapshot or carries a
+// backslash. Returns a snapshot-root-relative posix path or null.
+function normalize_local_link_target(raw_target, file_path) {
+  if (!raw_target || raw_target.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(raw_target) || raw_target.startsWith('//')) return null;
+  let target;
+  try { target = decodeURIComponent(raw_target).split('#', 1)[0].split('?', 1)[0]; }
+  catch { target = null; }
+  let normalized = null;
+  if (target) {
+    const joined = target.startsWith('/')
+      ? posix.normalize(target.slice(1))
+      : posix.normalize(posix.join(posix.dirname(file_path), target));
+    if (joined !== '..' && !joined.startsWith('../') && !joined.includes('\\')) normalized = joined.replace(/\/$/, '');
+  }
+  return normalized;
+}
+
 export function verify_snapshot_links(snapshot_root, exported_files, policy = local_policy) {
   const files = new Set(exported_files.map(file => file.path));
   const directories = new Set();
@@ -154,24 +176,22 @@ export function verify_snapshot_links(snapshot_root, exported_files, policy = lo
   const findings = [];
   for (const file of exported_files.filter(candidate => candidate.path.toLowerCase().endsWith('.md'))) {
     const text = readFileSync(destination_path(snapshot_root, file.path), 'utf8');
-    const pattern = /!?\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\s*\)/g;
-    for (const match of text.matchAll(pattern)) {
-      const raw_target = match[1] ?? match[2];
-      if (!raw_target || raw_target.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(raw_target) || raw_target.startsWith('//')) continue;
-      let target;
-      try { target = decodeURIComponent(raw_target).split('#', 1)[0].split('?', 1)[0]; }
-      catch { target = null; }
-      let normalized = null;
-      if (target) {
-        const joined = target.startsWith('/')
-          ? posix.normalize(target.slice(1))
-          : posix.normalize(posix.join(posix.dirname(file.path), target));
-        if (joined !== '..' && !joined.startsWith('../') && !joined.includes('\\')) normalized = joined.replace(/\/$/, '');
-      }
+    const inline_pattern = /!?\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\s*\)/g;
+    // Reference-style definitions: up to three leading spaces, [label]:,
+    // an <angle> or bare non-whitespace target, an optional single-line
+    // title in double quotes, single quotes, or parentheses, end of line.
+    // Usages such as [text][label] and shortcut [label] carry no target
+    // here and stay silent.
+    const definition_pattern = /^[ ]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/gm;
+    const candidates = [];
+    for (const match of text.matchAll(inline_pattern)) candidates.push({ raw_target: match[1] ?? match[2], index: match.index });
+    for (const match of text.matchAll(definition_pattern)) candidates.push({ raw_target: match[2] ?? match[3], index: match.index });
+    for (const candidate of candidates) {
+      const normalized = normalize_local_link_target(candidate.raw_target, file.path);
       if (!normalized) continue;
       if (files.has(normalized) || directories.has(normalized)) continue;
       if (exempt_targets.has(normalized)) continue;
-      const line = markdown_line(text, match.index);
+      const line = markdown_line(text, candidate.index);
       findings.push({
         severity: 'blocker',
         category: 'broken_local_link',

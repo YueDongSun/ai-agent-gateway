@@ -59,7 +59,13 @@ update fails.
   `$PI_CODING_AGENT_DIR/settings.json` (default `~/.pi/agent`). The `settings_config` JSON blob carries
   `baseUrl`, `apiKey`, `api` (openai-completions | anthropic-messages),
   and a list of model entries.
-- [`antigravity.rs`](antigravity.rs) — Antigravity adapter.
+- [`cline.rs`](cline.rs) — Cline CLI adapter. Writes the documented provider
+  settings envelope and model registry only under AAG's `~/.cline_cli/data`.
+  The launcher selects that private store through `CLINE_DATA_DIR` and
+  `CLINE_PROVIDER_SETTINGS_PATH`, passes provider/model as literal arguments,
+  and requires tool approval. Native Cline state remains separate. Provider
+  activation uses the existing private, atomic, backup-preserving batch writer.
+- [`antigravity.rs`](antigravity.rs) — Antigravity desktop adapter.
   **Detect-only.** The on-disk schema for custom providers is not
   publicly documented and much of the state lives in Chromium LevelDB,
   so `write_live` returns an error guiding the user to configure

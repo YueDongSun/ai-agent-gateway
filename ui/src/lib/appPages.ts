@@ -1,8 +1,9 @@
-/// Per-app UI configuration for the unified provider-chain page
+/// Supplier-owned client management forms and retained configuration contracts
 /// (Phase 17, cc-switch style). Every app gets the same card list —
 /// drag-reorder, CURRENT badge, per-card failover toggle, Enable/In-Use —
 /// with app-specific form fields and endpoint/launcher slots.
 import type { AppType, Provider } from './api/types';
+import { client_label, client_page_order } from './client_apps.js';
 
 export type FieldType = 'text' | 'password' | 'select';
 
@@ -34,8 +35,8 @@ export interface AppPageConfig {
   ccSwitchUpstream: boolean;
   /** Show the gateway status card. */
   showGatewayCard: boolean;
-  /** Show the launcher buttons (Codex / Claude / Copilot / VS Code page). */
-  launchers: 'codex' | 'claude' | 'copilot' | 'vscode' | 'none';
+  /** Show this app's supported terminal or desktop launcher. */
+  launchers: 'codex' | 'claude' | 'copilot' | 'gemini' | 'vscode' | 'managed_cli' | 'none';
   /** Model options for the model select. */
   models?: string[];
   /** Hidden from the AppSwitcher (code kept, tab disabled). */
@@ -65,13 +66,42 @@ const CLAUDE_MODELS = [
 ];
 const COPILOT_MODELS = ['claude-sonnet-5', 'claude-sonnet-4-6', 'gpt-5', 'gpt-4o'];
 
+const PRETTY_TOKENS: Record<string, string> = {
+  gpt: 'GPT',
+  glm: 'GLM',
+  ai: 'AI',
+  minimax: 'MiniMax',
+  deepseek: 'DeepSeek',
+  qwen: 'Qwen',
+  kimi: 'Kimi',
+  gemini: 'Gemini',
+  claude: 'Claude',
+  codex: 'Codex',
+  grok: 'Grok',
+  llama: 'Llama',
+  mistral: 'Mistral',
+  openai: 'OpenAI',
+};
+
+/// Human-readable label for a model id (`minimax-m3.1` -> "MiniMax M3.1").
+/// Mirrors Rust `proxy::models::pretty_display_name`; ids stay the source
+/// of truth — this is only for display.
+export function prettyModelName(id: string): string {
+  return id
+    .replace(/\[1m\]$/i, '')
+    .split(/[-_/ ]+/)
+    .filter((t) => t.length > 0)
+    .map((t) => PRETTY_TOKENS[t] ?? t.charAt(0).toUpperCase() + t.slice(1))
+    .join(' ');
+}
+
 const envOf = (cfg: Record<string, unknown>): Record<string, unknown> =>
   (cfg.env as Record<string, unknown>) ?? {};
 
 /// claude_code: `{ env: { ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN }, model }`
 const claudeCfg: AppPageConfig = {
   appType: 'claude_code',
-  label: 'Claude',
+  label: client_label('claude_code'),
   fields: [
     { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'https://api.anthropic.com' },
     { key: 'apiKey', label: 'apiKey', type: 'password' },
@@ -101,12 +131,10 @@ const claudeCfg: AppPageConfig = {
 };
 
 /// codex: flat `{ baseUrl, apiKey, auth, config }` (mirror-write shape).
-/// The `model` field is removed — model selection is handled entirely by the
-/// model catalog editor. The default model is derived from the first catalog
-/// entry (in handleSave).
+/// Model and effort selectors use the backend's generated Codex catalog.
 const codexCfg: AppPageConfig = {
   appType: 'codex',
-  label: 'Codex',
+  label: client_label('codex'),
   fields: [
     { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'http://127.0.0.1:8989' },
     { key: 'apiKey', label: 'apiKey', type: 'password' },
@@ -125,16 +153,18 @@ const codexCfg: AppPageConfig = {
       ?.split('=')
       .slice(1)
       .join('=')
-      .trim()
       .trim();
     return {
       baseUrl: String(cfg.baseUrl ?? tomlBase ?? ''),
       apiKey: String(cfg.apiKey ?? authVal ?? ''),
+      model: String(cfg.model ?? ''),
+      model_reasoning_effort: String(cfg.model_reasoning_effort ?? ''),
     };
   },
   buildConfig: (_id, v) => {
-    // model is set later from the first modelCatalog entry (in handleSave).
     const toml = [
+      ...(v.model ? [`model = ${JSON.stringify(v.model)}`] : []),
+      ...(v.model_reasoning_effort ? [`model_reasoning_effort = ${JSON.stringify(v.model_reasoning_effort)}`] : []),
       '',
       '[model_providers.aag]',
       'name = "AAG Gateway"',
@@ -145,6 +175,8 @@ const codexCfg: AppPageConfig = {
     return {
       baseUrl: v.baseUrl,
       apiKey: v.apiKey,
+      ...(v.model ? { model: v.model } : {}),
+      ...(v.model_reasoning_effort ? { model_reasoning_effort: v.model_reasoning_effort } : {}),
       auth: v.apiKey
         ? { tokens: { value: v.apiKey, source: 'aag' } }
         : { OPENAI_API_KEY: null },
@@ -165,7 +197,7 @@ const codexCfg: AppPageConfig = {
 /// copilot: `{ model, env: { COPILOT_PROVIDER_BASE_URL/_API_KEY/_TYPE } }`
 const copilotCfg: AppPageConfig = {
   appType: 'copilot',
-  label: 'Copilot CLI',
+  label: client_label('copilot'),
   fields: [
     { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'http://127.0.0.1:8989/v1' },
     { key: 'apiKey', label: 'apiKey', type: 'password' },
@@ -195,42 +227,54 @@ const copilotCfg: AppPageConfig = {
   launchers: 'copilot',
 };
 
+/// Shared OpenCode-family projection: `{ npm, options, models }` — the
+/// same settings shape consumed by OpenCode, the Kilo CLI, and the Kilo
+/// VS Code extension (whose `globalFiles()` reads the Kilo JSONC). The
+/// pages differ only in identity, label, and launcher.
+function opencode_projection_config(
+  app_type: AppType,
+  label: string,
+  launchers: AppPageConfig['launchers'],
+): AppPageConfig {
+  return {
+    appType: app_type,
+    label,
+    fields: [
+      { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'https://api.example.com/v1' },
+      { key: 'apiKey', label: 'apiKey', type: 'password' },
+      { key: 'model', label: 'model', type: 'text', placeholder: 'model-id' },
+    ],
+    extractForm: (p) => {
+      const cfg = p.settingsConfig as Record<string, unknown>;
+      const options = (cfg.options as Record<string, unknown> | undefined) ?? {};
+      const models = cfg.models as Record<string, unknown> | undefined;
+      return {
+        baseUrl: String(options.baseURL ?? ''),
+        apiKey: String(options.apiKey ?? ''),
+        model: String(Object.keys(models ?? {})[0] ?? ''),
+      };
+    },
+    buildConfig: (id, v) => ({
+      npm: '@ai-sdk/openai-compatible',
+      name: id,
+      options: { baseURL: v.baseUrl, ...(v.apiKey ? { apiKey: v.apiKey } : {}) },
+      models: v.model ? { [v.model]: { name: v.model } } : {},
+    }),
+    cardUrl: (cfg) => String((cfg.options as Record<string, unknown> | undefined)?.baseURL ?? ''),
+    cardMeta: (cfg) => String(Object.keys((cfg.models as Record<string, unknown> | undefined) ?? {})[0] ?? ''),
+    surface: 'chat',
+    ccSwitchUpstream: false,
+    showGatewayCard: true,
+    launchers,
+  };
+}
+
 /// opencode: OpenCode/Kilo provider entry `{ npm, options, models }`.
-const opencodeCfg: AppPageConfig = {
-  appType: 'opencode',
-  label: 'OpenCode',
-  fields: [
-    { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'https://api.example.com/v1' },
-    { key: 'apiKey', label: 'apiKey', type: 'password' },
-    { key: 'model', label: 'model', type: 'text', placeholder: 'model-id' },
-  ],
-  extractForm: (p) => {
-    const cfg = p.settingsConfig as Record<string, unknown>;
-    const options = (cfg.options as Record<string, unknown> | undefined) ?? {};
-    const models = cfg.models as Record<string, unknown> | undefined;
-    return {
-      baseUrl: String(options.baseURL ?? ''),
-      apiKey: String(options.apiKey ?? ''),
-      model: String(Object.keys(models ?? {})[0] ?? ''),
-    };
-  },
-  buildConfig: (id, v) => ({
-    npm: '@ai-sdk/openai-compatible',
-    name: id,
-    options: { baseURL: v.baseUrl, ...(v.apiKey ? { apiKey: v.apiKey } : {}) },
-    models: v.model ? { [v.model]: { name: v.model } } : {},
-  }),
-  cardUrl: (cfg) => String((cfg.options as Record<string, unknown> | undefined)?.baseURL ?? ''),
-  cardMeta: (cfg) => String(Object.keys((cfg.models as Record<string, unknown> | undefined) ?? {})[0] ?? ''),
-  surface: 'chat',
-  ccSwitchUpstream: false,
-  showGatewayCard: true,
-  launchers: 'none',
-};
+const opencodeCfg = opencode_projection_config('opencode', client_label('opencode'), 'none');
 /// pi: flat `{ providerId, baseUrl, apiKey, model }`
 const piCfg: AppPageConfig = {
   appType: 'pi',
-  label: 'pi',
+  label: client_label('pi'),
   fields: [
     { key: 'providerId', label: 'providerId', type: 'text', placeholder: 'aag' },
     { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'http://127.0.0.1:8989/v1' },
@@ -268,36 +312,32 @@ const piCfg: AppPageConfig = {
 /// `KiloAdapter` (src/agents/adapters.ts:48-60, 250-297). Same field shape
 /// as opencodeCfg; AAG writes the merged payload into the first existing of
 /// `~/.config/kilo/{kilo,opencode}.json(c)` or `~/.kilo/config.json`.
-const kiloCfg: AppPageConfig = {
-  appType: 'kilo_cli',
-  label: 'Kilo CLI',
+const kiloCfg = opencode_projection_config('kilo_cli', client_label('kilo_cli'), 'managed_cli');
+
+const cline_cfg: AppPageConfig = {
+  appType: 'cline_cli',
+  label: client_label('cline_cli'),
   fields: [
-    { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'https://api.example.com/v1' },
+    { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'http://127.0.0.1:8989/v1' },
     { key: 'apiKey', label: 'apiKey', type: 'password' },
     { key: 'model', label: 'model', type: 'text', placeholder: 'model-id' },
   ],
   extractForm: (p) => {
     const cfg = p.settingsConfig as Record<string, unknown>;
-    const options = (cfg.options as Record<string, unknown> | undefined) ?? {};
-    const models = cfg.models as Record<string, unknown> | undefined;
-    return {
-      baseUrl: String(options.baseURL ?? ''),
-      apiKey: String(options.apiKey ?? ''),
-      model: String(Object.keys(models ?? {})[0] ?? ''),
-    };
+    return { baseUrl: String(cfg.baseUrl ?? ''), apiKey: String(cfg.apiKey ?? ''), model: String(cfg.model ?? '') };
   },
-  buildConfig: (id, v) => ({
-    npm: '@ai-sdk/openai-compatible',
-    name: id,
-    options: { baseURL: v.baseUrl, ...(v.apiKey ? { apiKey: v.apiKey } : {}) },
-    models: v.model ? { [v.model]: { name: v.model } } : {},
+  buildConfig: (_id, v) => ({
+    protocol: 'openai',
+    baseUrl: v.baseUrl,
+    ...(v.apiKey ? { apiKey: v.apiKey } : {}),
+    model: v.model,
   }),
-  cardUrl: (cfg) => String((cfg.options as Record<string, unknown> | undefined)?.baseURL ?? ''),
-  cardMeta: (cfg) => String(Object.keys((cfg.models as Record<string, unknown> | undefined) ?? {})[0] ?? ''),
+  cardUrl: (cfg) => String(cfg.baseUrl ?? ''),
+  cardMeta: (cfg) => String(cfg.model ?? ''),
   surface: 'chat',
   ccSwitchUpstream: false,
   showGatewayCard: true,
-  launchers: 'none',
+  launchers: 'managed_cli',
 };
 
 /// claude_vscode: Claude Code VS Code extension. AAG is the unified
@@ -306,7 +346,7 @@ const kiloCfg: AppPageConfig = {
 /// rows carry the same env shape as claude_code.
 const claudeVscodeCfg: AppPageConfig = {
   appType: 'claude_vscode',
-  label: 'Claude Code (VS Code)',
+  label: client_label('claude_vscode'),
   fields: [
     { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'http://127.0.0.1:8989' },
     { key: 'apiKey', label: 'apiKey', type: 'password' },
@@ -340,37 +380,7 @@ const claudeVscodeCfg: AppPageConfig = {
 /// CLI (~/.config/kilo/kilo.jsonc …), so switching delegates to the
 /// kilo adapter; the launcher additionally injects KILO_CONFIG pointing
 /// at that file.
-const kiloVscodeCfg: AppPageConfig = {
-  appType: 'kilo_vscode',
-  label: 'Kilo Code (VS Code)',
-  fields: [
-    { key: 'baseUrl', label: 'baseUrl', type: 'text', placeholder: 'https://api.example.com/v1' },
-    { key: 'apiKey', label: 'apiKey', type: 'password' },
-    { key: 'model', label: 'model', type: 'text', placeholder: 'model-id' },
-  ],
-  extractForm: (p) => {
-    const cfg = p.settingsConfig as Record<string, unknown>;
-    const options = (cfg.options as Record<string, unknown> | undefined) ?? {};
-    const models = cfg.models as Record<string, unknown> | undefined;
-    return {
-      baseUrl: String(options.baseURL ?? ''),
-      apiKey: String(options.apiKey ?? ''),
-      model: String(Object.keys(models ?? {})[0] ?? ''),
-    };
-  },
-  buildConfig: (id, v) => ({
-    npm: '@ai-sdk/openai-compatible',
-    name: id,
-    options: { baseURL: v.baseUrl, ...(v.apiKey ? { apiKey: v.apiKey } : {}) },
-    models: v.model ? { [v.model]: { name: v.model } } : {},
-  }),
-  cardUrl: (cfg) => String((cfg.options as Record<string, unknown> | undefined)?.baseURL ?? ''),
-  cardMeta: (cfg) => String(Object.keys((cfg.models as Record<string, unknown> | undefined) ?? {})[0] ?? ''),
-  surface: 'chat',
-  ccSwitchUpstream: false,
-  showGatewayCard: true,
-  launchers: 'vscode',
-};
+const kiloVscodeCfg = opencode_projection_config('kilo_vscode', client_label('kilo_vscode'), 'vscode');
 
 /// gemini: `{ env: { GOOGLE_GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL }, api, config }`
 /// The provider's own upstream drives the SURFACE_GEMINI failover chain.
@@ -378,7 +388,7 @@ const kiloVscodeCfg: AppPageConfig = {
 /// its unified upstream (mirror contract, like Codex).
 const geminiCfg: AppPageConfig = {
   appType: 'gemini',
-  label: 'Gemini CLI',
+  label: client_label('gemini'),
   fields: [
     {
       key: 'baseUrl',
@@ -422,7 +432,7 @@ const geminiCfg: AppPageConfig = {
   surface: 'gemini',
   ccSwitchUpstream: true,
   showGatewayCard: true,
-  launchers: 'none',
+  launchers: 'gemini',
 };
 
 export const APP_PAGES: Record<string, AppPageConfig> = {
@@ -433,12 +443,11 @@ export const APP_PAGES: Record<string, AppPageConfig> = {
   opencode: opencodeCfg,
   pi: piCfg,
   kilo_cli: kiloCfg,
+  cline_cli: cline_cfg,
   claude_vscode: claudeVscodeCfg,
   kilo_vscode: kiloVscodeCfg,
 };
 
-export const APP_PAGE_ORDER: AppType[] = (
-  ['claude_code', 'codex', 'copilot', 'gemini', 'opencode', 'pi', 'kilo_cli', 'claude_vscode', 'kilo_vscode'] as AppType[]
-).filter((at) => APP_PAGES[at].enabled !== false);
+export const APP_PAGE_ORDER: AppType[] = client_page_order;
 
 export { CODEX_MODELS, CLAUDE_MODELS, CODEX_DISPLAY };

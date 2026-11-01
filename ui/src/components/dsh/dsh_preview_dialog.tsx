@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Dsh_translate } from './dsh_i18n.js';
+import { use_page_actions } from '../page_actions.js';
 
 export interface Dsh_confirmation {
   title: string;
@@ -8,6 +9,7 @@ export interface Dsh_confirmation {
   expires_at_ms?: number;
   blockers?: string[];
   can_confirm?: boolean;
+  floating_action?: 'save' | 'delete';
 }
 
 interface Dsh_preview_dialog_props {
@@ -24,6 +26,13 @@ export function Dsh_preview_dialog({ preview, t, on_cancel, on_confirm, return_f
   const [acknowledged, set_acknowledged] = useState(false);
   const [now, set_now] = useState(Date.now());
   const expired = preview.expires_at_ms !== undefined && preview.expires_at_ms <= now;
+  const can_confirm = acknowledged && !expired && preview.can_confirm !== false && !preview.blockers?.length;
+  const confirm = () => { if (can_confirm) on_confirm(); };
+  use_page_actions({ target: `${preview.title} review`, state: expired || Boolean(preview.blockers?.length) ? 'error' : preview.floating_action ? 'dirty' : 'idle',
+    on_save: preview.floating_action === 'save' ? confirm : undefined,
+    on_delete: preview.floating_action === 'delete' ? confirm : undefined,
+    save_disabled: !can_confirm, delete_disabled: !can_confirm,
+  }, 30);
 
   useEffect(() => {
     const previous_focus = return_focus ?? document.activeElement;
@@ -79,7 +88,7 @@ export function Dsh_preview_dialog({ preview, t, on_cancel, on_confirm, return_f
         </label>
         <div className="dsh_actions">
           <button type="button" className="btn" onClick={on_cancel} data-testid="dsh_cancel_preview">{t('cancel_preview')}</button>
-          <button type="button" className="btn primary" onClick={on_confirm} disabled={!acknowledged || expired || preview.can_confirm === false || Boolean(preview.blockers?.length)} data-testid="dsh_confirm">{t('confirm')}</button>
+          <button type="button" className="btn primary" onClick={confirm} disabled={!can_confirm} data-testid="dsh_confirm">{t('confirm')}</button>
         </div>
       </section>
     </div>

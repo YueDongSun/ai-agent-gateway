@@ -1,7 +1,7 @@
 use super::*;
 use std::{collections::BTreeMap, fs};
 
-fn fixture() -> tempfile::TempDir {
+fn fixture() -> crate::config::private_fs::PrivateTempDir {
     super::super::process::private_temp_dir().unwrap()
 }
 
@@ -357,4 +357,210 @@ fn manager_shims_can_resolve_their_manager_with_a_gui_path() {
                 .unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), expected);
     }
+}
+
+#[test]
+fn newest_versioned_executable_prefers_the_numerically_newest_directory() {
+    let root = fixture();
+    for version in ["app-1.9.0", "app-1.10.0", "app-0.2.0"] {
+        let directory = make_directory(root.path(), version);
+        fs::write(directory.join("claude.exe"), "fixture executable").unwrap();
+    }
+    assert_eq!(
+        newest_versioned_executable(
+            root.path(),
+            "app-",
+            "claude.exe",
+            desktop_platform::windows,
+            128,
+        ),
+        Some(root.path().join("app-1.10.0").join("claude.exe"))
+    );
+}
+
+#[test]
+fn newest_versioned_executable_falls_back_to_lexicographic_only_for_unparsed_names() {
+    let root = fixture();
+    for name in ["build_abc", "build_xyz", "build_mno"] {
+        let directory = make_directory(root.path(), name);
+        fs::write(directory.join("codex.exe"), "fixture executable").unwrap();
+    }
+    assert_eq!(
+        newest_versioned_executable(root.path(), "", "codex.exe", desktop_platform::windows, 128,),
+        Some(root.path().join("build_xyz").join("codex.exe"))
+    );
+    // A parseable version always wins over unparsed names regardless of
+    // lexicographic order.
+    let versioned = make_directory(root.path(), "0.9.0");
+    fs::write(versioned.join("codex.exe"), "fixture executable").unwrap();
+    assert_eq!(
+        newest_versioned_executable(root.path(), "", "codex.exe", desktop_platform::windows, 128,),
+        Some(versioned.join("codex.exe"))
+    );
+}
+
+#[test]
+fn newest_versioned_executable_ignores_oversized_unreadable_and_relative_roots() {
+    let root = fixture();
+    let oversized = make_directory(root.path(), "oversized");
+    for index in 0..4 {
+        let directory = make_directory(&oversized, &format!("app-1.0.{index}"));
+        fs::write(directory.join("claude.exe"), "fixture executable").unwrap();
+    }
+    assert_eq!(
+        newest_versioned_executable(
+            &oversized,
+            "app-",
+            "claude.exe",
+            desktop_platform::windows,
+            3,
+        ),
+        None
+    );
+    assert_eq!(
+        newest_versioned_executable(
+            &oversized.join("missing"),
+            "app-",
+            "claude.exe",
+            desktop_platform::windows,
+            3,
+        ),
+        None
+    );
+    assert_eq!(
+        newest_versioned_executable(
+            Path::new("relative/root"),
+            "app-",
+            "claude.exe",
+            desktop_platform::windows,
+            3,
+        ),
+        None
+    );
+}
+
+fn appx_fixture(name: &str, version: &str, install_dir: &str) -> appx_package {
+    appx_package {
+        name: name.to_string(),
+        version: padded_version(version),
+        install_dir: PathBuf::from(install_dir),
+    }
+}
+
+#[test]
+fn parse_appx_packages_keeps_only_well_formed_absolute_rows() {
+    let fixture = super::super::process::private_temp_dir().unwrap();
+    let codex = fixture.path().join("OpenAI.Codex");
+    let claude = fixture.path().join("Claude");
+    let output = format!(
+        "OpenAI.Codex|26.1016.8622.0|{}\n  Claude|3.6556.2.0|{}\r\nbroken-line-without-fields\n|1.0.0|{}\nNoName|1.0.0|relative/path\nEmptyLocation|1.0.0|",
+        codex.display(), claude.display(), fixture.path().display()
+    );
+    let packages = parse_appx_packages(&output);
+    assert_eq!(packages.len(), 2);
+    assert_eq!(packages[0].name, "OpenAI.Codex");
+    assert_eq!(packages[0].version, Some([26, 1016, 8622, 0]));
+    assert_eq!(packages[1].name, "Claude");
+    assert_eq!(packages[1].version, Some([3, 6556, 2, 0]));
+    // An unparsable version keeps the row usable but ranks it lowest.
+    let unparsable = parse_appx_packages(&format!("Odd|pre-release|{}", fixture.path().display()));
+    assert_eq!(unparsable.len(), 1);
+    assert_eq!(unparsable[0].version, None);
+}
+
+#[test]
+fn select_appx_package_prefers_exact_name_over_newer_companions() {
+    let runtime = appx_fixture(
+        "OpenAI.CodexPrimaryRuntime",
+        "27.0.0.0",
+        "C:\\store\\runtime",
+    );
+    let app_old = appx_fixture("OpenAI.Codex", "26.1015.0.0", "C:\\store\\old");
+    let app_new = appx_fixture("OpenAI.Codex", "26.1016.8622.0", "C:\\store\\new");
+    let packages = [runtime, app_old, app_new];
+    let selected = select_appx_package(&packages, "OpenAI.Codex").unwrap();
+    assert_eq!(selected.name, "OpenAI.Codex");
+    assert_eq!(selected.version, Some([26, 1016, 8622, 0]));
+    assert_eq!(selected.install_dir, PathBuf::from("C:\\store\\new"));
+    assert!(select_appx_package(&packages[..1], "OpenAI.Codex").is_none());
+    assert!(select_appx_package(&packages, "Claude").is_none());
+    assert!(select_appx_package(&[], "OpenAI.Codex").is_none());
+}
+
+#[test]
+fn appx_desktop_requires_the_real_binary_in_the_exact_package() {
+    let fixture = super::super::process::private_temp_dir().unwrap();
+    let root = fixture.path();
+    let companion_dir = root.join("runtime/app");
+    let desktop_dir = root.join("desktop/app");
+    std::fs::create_dir_all(&companion_dir).unwrap();
+    std::fs::create_dir_all(&desktop_dir).unwrap();
+    // Even a matching filename cannot turn a runtime companion into the app.
+    std::fs::write(companion_dir.join("ChatGPT.exe"), "fixture companion").unwrap();
+    std::fs::write(desktop_dir.join("Codex.exe"), "fixture activation stub").unwrap();
+    let packages = [
+        appx_package {
+            name: "OpenAI.CodexPrimaryRuntime".into(),
+            version: Some([27, 0, 0, 0]),
+            install_dir: root.join("runtime"),
+        },
+        appx_package {
+            name: "OpenAI.Codex".into(),
+            version: Some([26, 1016, 8622, 0]),
+            install_dir: root.join("desktop"),
+        },
+    ];
+    assert!(
+        select_appx_desktop_executable(&packages[..1], "OpenAI.Codex", &["app/ChatGPT.exe"])
+            .is_none()
+    );
+    assert!(
+        select_appx_desktop_executable(&packages, "OpenAI.Codex", &["app/ChatGPT.exe"]).is_none()
+    );
+    let binary = desktop_dir.join("ChatGPT.exe");
+    std::fs::write(&binary, "fixture desktop").unwrap();
+    assert_eq!(
+        select_appx_desktop_executable(&packages, "OpenAI.Codex", &["app/ChatGPT.exe"]),
+        Some((binary, Some([26, 1016, 8622, 0])))
+    );
+}
+
+#[test]
+fn claude_appx_executable_uses_the_registered_desktop_identity() {
+    let fixture = super::super::process::private_temp_dir().unwrap();
+    let root = fixture.path();
+    for name in ["ClaudeRuntime", "Claude"] {
+        let directory = root.join(name).join("app");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("Claude.exe"), "fixture desktop").unwrap();
+    }
+    let packages = [
+        appx_package {
+            name: "ClaudeRuntime".into(),
+            version: Some([99, 0, 0, 0]),
+            install_dir: root.join("ClaudeRuntime"),
+        },
+        appx_package {
+            name: "Claude".into(),
+            version: Some([3, 6556, 2, 0]),
+            install_dir: root.join("Claude"),
+        },
+    ];
+    assert_eq!(
+        select_appx_desktop_executable(&packages, "Claude", &["app/Claude.exe", "Claude.exe"]),
+        Some((root.join("Claude/app/Claude.exe"), Some([3, 6556, 2, 0])))
+    );
+}
+
+#[test]
+fn version_supersedes_requires_a_known_strictly_newer_store_version() {
+    let store = Some([3, 6556, 2, 0]);
+    assert!(version_supersedes(store, Some([1, 46388, 4, 0])));
+    assert!(!version_supersedes(Some([1, 0, 0, 0]), Some([2, 0, 0, 0])));
+    assert!(!version_supersedes(Some([1, 0, 0, 0]), Some([1, 0, 0, 0])));
+    // A local install without a readable version is the stale-shim shape a
+    // store migration leaves behind, so any known store version wins.
+    assert!(version_supersedes(Some([0, 0, 1, 0]), None));
+    assert!(!version_supersedes(None, Some([1, 0, 0, 0])));
+    assert!(!version_supersedes(None, None));
 }

@@ -1,6 +1,8 @@
 import type { Dsh_settings, Dsh_upstream } from '../../lib/api/dsh.js';
 import type { Dsh_translate } from './dsh_i18n.js';
 import { Dsh_protocol_hint } from './dsh_protocol_hint.js';
+import { useRef } from 'react';
+import { use_page_actions } from '../page_actions.js';
 
 interface Dsh_settings_form_props {
   settings: Dsh_settings;
@@ -21,6 +23,10 @@ export function Dsh_settings_form({ settings, upstreams, locked, dirty, stale, t
   const selected_upstream = upstreams.find((upstream) => upstream.id === settings.upstream_id);
   const unavailable_selection = Boolean(settings.upstream_id && (!selected_upstream || !selected_upstream.available));
   const update_field = <K extends keyof Dsh_settings>(key: K, value: Dsh_settings[K]) => on_change({ ...settings, [key]: value });
+  const form_ref = useRef<HTMLFormElement>(null);
+  use_page_actions({ target: 'DSH settings', state: locked ? 'busy' : stale ? 'error' : dirty ? 'dirty' : 'clean',
+    on_save: () => form_ref.current?.requestSubmit(), save_disabled: locked || !dirty || stale || unavailable_selection,
+  }, 5);
 
   return (
     <section className="dsh_card" aria-labelledby="dsh_settings_heading">
@@ -28,7 +34,7 @@ export function Dsh_settings_form({ settings, upstreams, locked, dirty, stale, t
         <div><h2 id="dsh_settings_heading">{t('settings')}</h2><p>{t('settings_note')}</p></div>
         {dirty && <span className="dsh_badge dsh_warning_text" data-testid="dsh_settings_dirty">{t('unsaved')}</span>}
       </div>
-      <form onSubmit={(event) => { event.preventDefault(); on_review(); }}>
+      <form ref={form_ref} onSubmit={(event) => { event.preventDefault(); on_review(); }}>
         <fieldset disabled={locked} className="dsh_form_fields">
           <div className="dsh_settings_grid">
             <label className="dsh_field">

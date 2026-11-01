@@ -78,7 +78,7 @@ shapes.
 - Restricted DSH runtime and marketplace windows: `src-tauri/src/dsh_window.rs`,
   `src-tauri/src/dsh_market_window.rs`
 - Shared app page: `ui/src/components/app/AppPage.tsx`
-- UI pool state: `ui/src/components/app/proxy_pool_state.tsx`
+- UI pool state: `ui/src/components/app/providers_state.tsx`
 - UI route state: `ui/src/components/app/routes_state.tsx`
 - DSH manager UI: `ui/src/components/dsh/`
 - DSH marketplace UI: `ui/src/components/dsh_market/`
@@ -164,8 +164,9 @@ installs missing dependencies. Companion and DSH transport checks live under
 
 ## Known behavior
 
-- Rust routing uses a snapshot taken at `proxy_start`; restart after route or
-  provider changes.
+- Rust routing hot-applies supplier, provider, model, route, pin, and catalog
+  changes to new requests; in-flight requests keep their admitted snapshot.
+  Listener and gateway-auth changes still require a restart.
 - Streaming failover probes the first chunk only; it does not transparently
   recover a stream that fails after commitment.
 - Browser demo IPC is synthetic and must refuse real mutations.

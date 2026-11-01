@@ -13,12 +13,14 @@
 //! just enough to round-trip the SQLite file.
 
 use crate::config::get_db_path;
+use crate::database::dao::sync_config::SyncTarget;
 use crate::database::Database;
 use crate::error::AppError;
 use reqwest::StatusCode;
 use std::time::Duration;
 
 const HTTP_TIMEOUT_SECS: u64 = 60;
+const TRANSFER_TIMEOUT_SECS: u64 = 300;
 
 /// Result of an upload or download attempt. Returned to the UI so it can
 /// surface timing + byte counts.
@@ -29,11 +31,13 @@ pub struct WebDavResult {
     pub bytes: u64,
 }
 
-/// Build a reqwest client configured with a generous body timeout for big
-/// `aag.db` uploads. Connection pool reuses TLS handshakes across calls.
-fn build_client() -> Result<reqwest::Client, AppError> {
+/// Build a reqwest client. Connection checks pass `HTTP_TIMEOUT_SECS`;
+/// upload/download pass `TRANSFER_TIMEOUT_SECS` so large `aag.db` bodies
+/// get a generous window (mirrors the S3 transport). Connection pool
+/// reuses TLS handshakes across calls.
+fn build_client(timeout_secs: u64) -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|_| AppError::Message("webdav_client_build_failed".into()))
 }
@@ -116,7 +120,7 @@ pub async fn check_connection(
     remote_path: Option<&str>,
 ) -> Result<(), AppError> {
     let url = remote_db_url(endpoint, remote_path)?;
-    let client = build_client()?;
+    let client = build_client(HTTP_TIMEOUT_SECS)?;
     let mut req = client.head(url);
     if !username.is_empty() {
         req = req.basic_auth(username, Some(password));
@@ -155,7 +159,7 @@ pub async fn upload(
     let bytes = std::fs::read(&local_path).map_err(|e| AppError::io(&local_path, e))?;
     let size = bytes.len() as u64;
 
-    let client = build_client()?;
+    let client = build_client(TRANSFER_TIMEOUT_SECS)?;
     let mut req = client.put(url).body(bytes);
     if !username.is_empty() {
         req = req.basic_auth(username, Some(password));
@@ -187,7 +191,7 @@ pub async fn download(
 ) -> Result<WebDavResult, AppError> {
     require_encrypted_payload()?;
     let url = remote_db_url(endpoint, remote_path)?;
-    let client = build_client()?;
+    let client = build_client(TRANSFER_TIMEOUT_SECS)?;
     let mut req = client.get(url);
     if !username.is_empty() {
         req = req.basic_auth(username, Some(password));
@@ -238,7 +242,7 @@ pub async fn upload_and_stamp(
     remote_path: Option<&str>,
 ) -> Result<WebDavResult, AppError> {
     let result = upload(endpoint, username, password, remote_path).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::Webdav, "webdav", &result);
     result
 }
 
@@ -250,7 +254,7 @@ pub async fn download_and_stamp(
     remote_path: Option<&str>,
 ) -> Result<WebDavResult, AppError> {
     let result = download(endpoint, username, password, remote_path).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::Webdav, "webdav", &result);
     result
 }
 
@@ -262,17 +266,8 @@ pub async fn check_and_stamp(
     remote_path: Option<&str>,
 ) -> Result<(), AppError> {
     let result = check_connection(endpoint, username, password, remote_path).await;
-    stamp_outcome(db, &result).await;
+    super::stamp_sync_outcome(db, SyncTarget::Webdav, "webdav", &result);
     result
-}
-
-async fn stamp_outcome<T, E>(db: &Database, result: &Result<T, E>) {
-    let target = crate::database::dao::sync_config::SyncTarget::Webdav;
-    let err_msg = result.as_ref().err().map(|_| "sync_operation_failed");
-    if let Err(stamp_err) = db.record_sync_result(target, err_msg.as_deref()) {
-        let _ = stamp_err;
-        log::warn!("webdav: sync result stamp failed code=database_error");
-    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────

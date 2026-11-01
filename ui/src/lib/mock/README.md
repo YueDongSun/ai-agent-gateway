@@ -17,7 +17,11 @@ runtime.
   Exports `isTauri` and `isDemo` for downstream code that needs to
   branch on the runtime. Also exposes `window.__aagDemoSetError(cmd)`
   and `window.__aagDemoSetError(null)` debug hooks for forcing a command
-  to reject in the browser console.
+  to reject in the browser console, plus
+  `window.__aagDemoSeedRequestTimeline()` to re-install the synthetic
+  `demo_req_*` timeline fixture after a scenario has exercised
+  `diagnostics_clear_request_timeline` (fixture setup only — never real
+  request evidence).
 
 ## Key contracts
 

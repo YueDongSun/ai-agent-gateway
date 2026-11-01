@@ -10,6 +10,7 @@ import { read_cdp_endpoint } from './cdp_endpoint.mjs';
 import {
   find_browser,
   format_error,
+  owned_browser_arguments,
   read_cdp_origin,
   stop_owned_browser,
   terminate_windows_profile_processes,
@@ -22,24 +23,41 @@ import {
 const io_error = (code) => Object.assign(new Error('fixture_' + code), { code });
 
 test('browser discovery uses only candidates for the requested operating system', () => {
+  // Empty home/path/browser_path keep the run independent of the host
+  // environment: only the static per-platform candidate table is probed.
+  const overrides = { home: '', path: '', browser_path: '' };
   for (const [platform, expected] of [
     ['win32', 'C:/Program Files/Google/Chrome/Application/chrome.exe'],
     ['darwin', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'],
     ['linux', '/usr/bin/chromium'],
   ]) {
-    assert.equal(find_browser(platform, (candidate) => candidate === expected), expected);
-    assert.equal(find_browser(platform, () => false), null);
+    assert.equal(find_browser(platform, (candidate) => candidate === expected, overrides), expected);
+    assert.equal(find_browser(platform, () => false, overrides), null);
   }
-  assert.equal(find_browser('unsupported', () => true), null);
+  assert.equal(find_browser('unsupported', () => true, overrides), null);
+});
+
+test('the owned browser cannot load host extensions or reuse an external profile', () => {
+  // A host extension's content script injects into this disposable profile and
+  // its unhandled rejections are then attributed to the application under test.
+  const arguments_owned = owned_browser_arguments('owned_profile_fixture');
+  assert.ok(arguments_owned.includes('--disable-extensions'));
+  assert.ok(arguments_owned.includes('--disable-component-extensions-with-background-pages'));
+  assert.ok(arguments_owned.includes('--user-data-dir=owned_profile_fixture'));
+  assert.ok(arguments_owned.includes('--headless=new'));
+  assert.equal(arguments_owned.includes('--no-default-browser-check'), true);
+  assert.equal(arguments_owned.at(-1), 'about:blank');
 });
 
 test('mac browser discovery includes user Applications and absolute PATH entries', () => {
   const home = '/fixture/home';
-  const expected = home + '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  // Candidates are built with the host path module, so expectations must be
+  // built the same way to stay identical on every host.
+  const expected = join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
   assert.equal(find_browser('darwin', (candidate) => candidate === expected, { home, path: '', browser_path: '' }), expected);
-  assert.equal(find_browser('darwin', (candidate) => candidate === '/fixture/bin/chromium', {
+  assert.equal(find_browser('darwin', (candidate) => candidate === join('/fixture/bin', 'chromium'), {
     home, path: '.:relative:/fixture/bin', browser_path: '',
-  }), '/fixture/bin/chromium');
+  }), join('/fixture/bin', 'chromium'));
   assert.equal(find_browser('darwin', (candidate) => candidate.startsWith('relative'), {
     home, path: '.:relative', browser_path: '',
   }), null);

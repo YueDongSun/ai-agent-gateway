@@ -170,9 +170,7 @@ impl Database {
             params![enabled, id],
         )?;
         if updated == 0 {
-            return Err(AppError::InvalidInput(format!(
-                "mcp server \"{id}\" not found"
-            )));
+            return Err(AppError::InvalidInput("mcp:server_not_found".into()));
         }
         Ok(())
     }
@@ -240,7 +238,10 @@ mod tests {
         assert!(fetched.enabled_codex);
         // Unknown app name -> error
         assert!(db.toggle_mcp_app("test", "bogus", true).is_err());
-        // Unknown id -> error
-        assert!(db.toggle_mcp_app("nope", "claude", true).is_err());
+        // Unknown id -> the same stable code the MCP service emits for this
+        // condition (services/mcp/mod.rs pre-checks with failure()).
+        let error = db.toggle_mcp_app("nope", "claude", true).unwrap_err();
+        assert_eq!(error.external_message(), "mcp:server_not_found");
+        assert!(!error.to_string().contains("nope"));
     }
 }

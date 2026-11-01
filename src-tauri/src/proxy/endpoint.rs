@@ -26,6 +26,8 @@ pub enum Protocol {
     Anthropic,
     /// OpenAI Chat Completions API — leaf `/chat/completions`.
     Openai,
+    /// OpenAI Responses API — leaf `/responses`.
+    Responses,
     /// Google Generative Language API — `models/{model}:generateContent`
     /// method calls under `/v1beta` (or `/v1`). Unlike the other two, the
     /// request URL embeds the model id, so URL building happens per request
@@ -73,6 +75,7 @@ impl Protocol {
         match self {
             Protocol::Anthropic => &["messages"],
             Protocol::Openai => &["chat", "completions"],
+            Protocol::Responses => &["responses"],
             // Gemini request URLs embed the model id — see `gemini_method_url`.
             Protocol::Gemini => &[],
         }
@@ -82,6 +85,7 @@ impl Protocol {
         match self {
             Protocol::Anthropic => "/v1/messages",
             Protocol::Openai => "/v1/chat/completions",
+            Protocol::Responses => "/v1/responses",
             Protocol::Gemini => "/v1beta/models",
         }
     }
@@ -90,6 +94,7 @@ impl Protocol {
         match self {
             Protocol::Anthropic => "/messages",
             Protocol::Openai => "/chat/completions",
+            Protocol::Responses => "/responses",
             Protocol::Gemini => "/models",
         }
     }
@@ -160,6 +165,21 @@ pub fn endpoint_url(base_url: &str, protocol: Protocol) -> Result<String, Endpoi
     Ok(render(url))
 }
 
+/// Derive the Anthropic `count_tokens` endpoint from an already-resolved
+/// Messages endpoint: the terminal `messages` leaf becomes
+/// `messages/count_tokens`, preserving any query string. Used by the
+/// `/v1/messages/count_tokens` local-forwarding surface.
+pub fn anthropic_count_tokens_url(messages_endpoint: &str) -> Result<String, Endpoint_error> {
+    let mut url = parse_base(messages_endpoint)?;
+    let mut segments = path_segments(&url);
+    if segments.last() != Some(&"messages") {
+        return Err(invalid("not_a_messages_endpoint"));
+    }
+    segments.push("count_tokens");
+    url.set_path(&format!("/{}", segments.join("/")));
+    Ok(render(url))
+}
+
 /// Reduce a Gemini base URL to its version root: the origin plus an optional
 /// `/v1beta` (or `/v1` / `/v1alpha`) prefix. Stored bases may be bare roots
 /// (`https://generativelanguage.googleapis.com`), versioned roots
@@ -201,15 +221,24 @@ pub fn gemini_method_url(
     model: &str,
     method: &str,
 ) -> Result<String, Endpoint_error> {
+    gemini_method_target(base_url, model, method).map(|(url, _)| url)
+}
+
+/// Metadata comes from the same normalized value embedded in the actual URL.
+pub fn gemini_method_target(
+    base_url: &str,
+    model: &str,
+    method: &str,
+) -> Result<(String, String), Endpoint_error> {
     let root = gemini_api_root(base_url)?;
     let model = crate::proxy::gemini::normalize_gemini_model_id(model);
     if model.is_empty() {
         return Err(invalid("empty_model"));
     }
     if is_gemini_version_root(&root) {
-        Ok(format!("{root}/models/{model}:{method}"))
+        Ok((format!("{root}/models/{model}:{method}"), model.to_owned()))
     } else {
-        Ok(format!("{root}/v1beta/models/{model}:{method}"))
+        Ok((format!("{root}/v1beta/models/{model}:{method}"), model.to_owned()))
     }
 }
 
@@ -230,7 +259,14 @@ pub fn sdk_base_url(base_url: &str, protocol: Protocol) -> Result<String, Endpoi
         return Err(invalid("query_or_fragment"));
     }
     let mut segments: Vec<String> = path_segments(&url).iter().map(|s| s.to_string()).collect();
-    if ends_with_segments(
+    if protocol == Protocol::Gemini {
+        if let Some(position) = segments
+            .iter()
+            .position(|segment| segment == "models" || segment.contains(':'))
+        {
+            segments.truncate(position);
+        }
+    } else if ends_with_segments(
         &segments.iter().map(String::as_str).collect::<Vec<_>>(),
         protocol.endpoint_tail(),
     ) {
@@ -254,14 +290,21 @@ pub fn models_urls(base_url: &str, protocol: Protocol) -> Vec<String> {
         return Vec::new();
     };
     let mut segments: Vec<String> = path_segments(&url).iter().map(|s| s.to_string()).collect();
-    if ends_with_segments(
+    if protocol == Protocol::Gemini {
+        if let Some(position) = segments.iter().position(|segment| segment == "models" || segment.contains(':')) {
+            segments.truncate(position);
+        }
+    } else if ends_with_segments(
         &segments.iter().map(String::as_str).collect::<Vec<_>>(),
         protocol.endpoint_tail(),
     ) {
         let tail_len = protocol.endpoint_tail().len();
         segments.truncate(segments.len() - tail_len);
     }
-    let has_version = segments.last().is_some_and(|s| is_version_segment(s));
+    let has_version = segments.last().is_some_and(|segment| {
+        is_version_segment(segment)
+            || (protocol == Protocol::Gemini && matches!(segment.as_str(), "v1beta" | "v1alpha"))
+    });
     let prefix = render_prefix(&url);
     let prefix = prefix.trim_end_matches('/');
     let root = segments.join("/");
@@ -314,6 +357,48 @@ fn render_prefix(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_catalog_urls_normalize_responses_and_gemini_endpoints() {
+        assert_eq!(
+            models_urls("https://example.invalid/api/v1/responses", Protocol::Responses),
+            ["https://example.invalid/api/v1/models", "https://example.invalid/api/models"]
+        );
+        for suffix in ["/v1beta", "/v1beta/models", "/v1beta/models/gemini-pro:generateContent"] {
+            assert_eq!(
+                models_urls(&format!("https://example.invalid{suffix}"), Protocol::Gemini),
+                ["https://example.invalid/v1beta/models", "https://example.invalid/models"]
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_count_tokens_url_derives_from_every_endpoint_spelling() {
+        for (messages_endpoint, expected) in [
+            (
+                "https://api.anthropic.com/v1/messages",
+                "https://api.anthropic.com/v1/messages/count_tokens",
+            ),
+            (
+                "https://relay.example.invalid/api/anthropic/v1/messages",
+                "https://relay.example.invalid/api/anthropic/v1/messages/count_tokens",
+            ),
+            (
+                "https://azure.example.invalid/anthropic/v1/messages?api-version=2023-06-01",
+                "https://azure.example.invalid/anthropic/v1/messages/count_tokens?api-version=2023-06-01",
+            ),
+        ] {
+            assert_eq!(
+                anthropic_count_tokens_url(messages_endpoint).as_deref(),
+                Ok(expected)
+            );
+        }
+        // Only a resolved Messages endpoint is accepted — anything else
+        // (a bare root, an OpenAI leaf) is refused instead of guessed.
+        assert!(anthropic_count_tokens_url("https://api.anthropic.com").is_err());
+        assert!(anthropic_count_tokens_url("https://api.anthropic.com/v1").is_err());
+        assert!(anthropic_count_tokens_url("https://host/v1/chat/completions").is_err());
+    }
 
     #[test]
     fn anthropic_endpoint_never_doubles_messages() {
@@ -387,6 +472,31 @@ mod tests {
             assert_eq!(
                 endpoint_url(base, Protocol::Openai).unwrap(),
                 want,
+                "base={base}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_endpoint_never_doubles_and_supplies_v1() {
+        for (base, expected) in [
+            (
+                "https://api.openai.com/v1",
+                "https://api.openai.com/v1/responses",
+            ),
+            (
+                "https://host.test/v1/responses/",
+                "https://host.test/v1/responses",
+            ),
+            (
+                "https://host.test/apps/openai/v1/responses?tenant=abc",
+                "https://host.test/apps/openai/v1/responses?tenant=abc",
+            ),
+            ("https://api.openai.com", "https://api.openai.com/v1/responses"),
+        ] {
+            assert_eq!(
+                endpoint_url(base, Protocol::Responses).unwrap(),
+                expected,
                 "base={base}"
             );
         }

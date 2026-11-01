@@ -3,8 +3,10 @@
 The Rust local proxy. Hosts the same HTTP surface as the Node gateway
 (`/health`, `/v1/models`, `/v1/chat/completions`, `/v1/messages`,
 `/v1/responses`) but uses axum 0.7 and is embedded inside the Tauri
-process. It is built once at `proxy_start` from a snapshot of providers and
-routes, so the runtime is immutable until the next restart.
+process. Initial state is built at `proxy_start`, and subsequent supplier,
+provider, model, route, pin, and catalog changes hot-apply to new requests;
+in-flight requests retain their admitted snapshot. Listener host/port and
+gateway-auth changes require a restart.
 
 ## Anchor files
 
@@ -20,7 +22,7 @@ routes, so the runtime is immutable until the next restart.
   per-surface failover queues (`claude` / `codex` / `chat`) and executes
   hops with each provider's circuit breaker. Tracks `last_used` so
   `persist_failover_winner` can mirror cc-switch's hot-switch behavior.
-- [`converter.rs`](converter.rs) — bidirectional OpenAI ↔ Anthropic
+- [`converter/`](converter/) — bidirectional OpenAI ↔ Anthropic
   conversion at the HTTP edge and at the Anthropic provider boundary.
   Also converts between Chat Completions and the OpenAI Responses API
   shape used by Codex CLI.

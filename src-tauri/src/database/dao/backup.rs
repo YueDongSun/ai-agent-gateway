@@ -1,11 +1,12 @@
 //! Backups DAO (backups table).
 //!
-//! Stores serialized snapshots of all user-data tables so the UI can offer
+//! Stores serialized snapshots of user-data tables so the UI can offer
 //! "Create backup / Restore from backup" actions. The `data` column holds a
-//! JSON document containing rows for: providers, proxy_providers, routes,
-//! proxy_config, mcp_servers, prompts, skills. Ephemeral tables
-//! (proxy_request_logs, stream_check_logs, provider_health, usage_daily_rollups)
-//! are intentionally excluded.
+//! JSON document (see `BackupPayload`) with rows for four tables: providers,
+//! proxy_providers, routes, and proxy_config. MCP servers, prompts, and
+//! skills are not captured yet; ephemeral tables (proxy_request_logs,
+//! stream_check_logs, provider_health, usage_daily_rollups) are intentionally
+//! excluded.
 
 use crate::database::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
@@ -36,8 +37,6 @@ pub struct BackupPayload {
     pub proxy_config: Vec<serde_json::Value>,
 }
 
-/// Tables included in a backup (in insertion-order).
-const INCLUDED_TABLES: &[&str] = &["providers", "proxy_providers", "routes", "proxy_config"];
 /// Bound the number of plaintext credential snapshots retained in SQLite.
 const DEFAULT_BACKUP_RETENTION: i64 = 10;
 
@@ -120,26 +119,6 @@ impl Database {
         Ok(out)
     }
 
-    /// Read a backup's raw payload (used by restore).
-    #[allow(dead_code)]
-    pub fn get_backup_payload(&self, id: &str) -> Result<BackupPayload, AppError> {
-        let conn = lock_conn!(self.conn);
-        let bytes: Vec<u8> = conn
-            .query_row(
-                "SELECT data FROM backups WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    AppError::InvalidInput(format!("backup \"{id}\" not found"))
-                }
-                other => AppError::Database(other.to_string()),
-            })?;
-        let payload: BackupPayload = serde_json::from_slice(&bytes)?;
-        Ok(payload)
-    }
-
     /// Delete a single backup by id.
     #[allow(dead_code)]
     pub fn delete_backup(&self, id: &str) -> Result<(), AppError> {
@@ -149,7 +128,8 @@ impl Database {
     }
 
     /// Auto-rotate: keep only the `keep` most recent backups. Returns the ids
-    /// of backups that were deleted.
+    /// of backups that were deleted. Runs in one transaction so a mid-rotate
+    /// failure cannot leave a partially rotated set.
     #[allow(dead_code)]
     pub fn cleanup_rotated(&self, keep: u32) -> Result<Vec<String>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -159,9 +139,12 @@ impl Database {
             .query_map(params![keep as i64], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())
             .collect();
+        drop(stmt);
+        let transaction = conn.unchecked_transaction()?;
         for id in &to_delete {
-            conn.execute("DELETE FROM backups WHERE id = ?1", params![id])?;
+            transaction.execute("DELETE FROM backups WHERE id = ?1", params![id])?;
         }
+        transaction.commit()?;
         Ok(to_delete)
     }
 
@@ -198,12 +181,6 @@ impl Database {
             routes: dump_table("routes")?,
             proxy_config: dump_table("proxy_config")?,
         })
-    }
-
-    // Suppress unused warning for INCLUDED_TABLES - kept for future schema additions.
-    #[allow(dead_code)]
-    fn _included_tables_marker() -> &'static [&'static str] {
-        INCLUDED_TABLES
     }
 }
 

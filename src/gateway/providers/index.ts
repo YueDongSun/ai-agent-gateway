@@ -11,9 +11,11 @@ export function createProvider(cfg: ProviderConfig): BaseProvider {
     case 'anthropic':
       return new AnthropicProvider(cfg);
     case 'openai':
-    case 'gemini':
-    default:
       return new OpenAIProvider(cfg);
+    default:
+      // The schema rejects `gemini` at config load; this guard keeps a
+      // programmatically-built row from silently riding the OpenAI wire.
+      throw new Error(`provider type '${(cfg as { type: string }).type}' has no Node gateway provider`);
   }
 }
 

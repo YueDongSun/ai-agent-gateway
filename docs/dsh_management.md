@@ -168,6 +168,13 @@ to the settings digest used for upstream resolution. Child processes have
 bounded execution and explicit descendant cleanup; desktop exit cancels an
 active job before stopping the runtime.
 
+Hard AAG exit is platform-asymmetric. Windows assigns child processes to a job
+object the operating system tears down when AAG exits, while Unix teardown
+relies on AAG's own cleanup handler. A crashed or force-killed AAG on Unix can
+therefore leave the DSH process group orphaned, still holding its loopback
+port, until it is stopped manually; no parent-death signal is installed for
+the Unix group.
+
 Errors use stable dsh-prefixed codes, including settings_changed,
 profile_changed, instance_busy, exact_version_required, package_not_allowlisted,
 credential_store_conflict, runtime_exited, startup_timed_out, cancelled and

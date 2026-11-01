@@ -30,9 +30,33 @@ server or browser profile.
   unknown states, delayed-health cancellation, masked / revealed /
   copied keys, route table column alignment, theme contrast, and layout
   containment at 1200 / 900 / 420 px viewport widths.
+- [`workspace_checks.mjs`](workspace_checks.mjs) — standalone focused run for
+  the workspace shell: header containment, glass alpha and text/icon contrast
+  across twelve viewports in both themes, route restoration through Back /
+  Forward / reload, scroll and focus reset, dialog semantics, reduced motion,
+  idle-surface sampling, and a scroll long-task observation. Run directly
+  (`node scripts/ui_smoke/workspace_checks.mjs`, optional `--built-demo` and
+  `--screenshots <dir>`); it is not part of `npm run ui:smoke`.
+- [`provider_interaction_checks.mjs`](provider_interaction_checks.mjs) —
+  standalone focused run for provider search (name, endpoint, no-results,
+  Escape), reorder locking while filtered, the `More` / `Less` action
+  disclosure, and Escape focus return. Run directly
+  (`node scripts/ui_smoke/provider_interaction_checks.mjs`); its checks also run
+  inside `npm run ui:smoke` against Suppliers client management.
+- [`cli_display_checks.mjs`](cli_display_checks.mjs) — checks all nine model-only
+  client destinations, selected configuration reads, empty/error/stale states,
+  and provider exclusion. Runs standalone or inside `npm run ui:smoke`.
+- [`client_management_navigation.mjs`](client_management_navigation.mjs) —
+  navigates through the real Suppliers disclosure and client buttons so retained
+  management assertions run at their current owner.
 - [`phase_23_regressions.mjs`](phase_23_regressions.mjs) — targeted
   scenarios for the Phase 23 state-lifetime repairs (route save with
   the gateway stopped, pin / unpin, batch deletion, drag reorder).
+- [`supplier_checks.mjs`](supplier_checks.mjs) — suppliers workspace
+  coverage: navigation, supplier CRUD with write-only secrets (keep /
+  replace / explicit clear), endpoint + model inventories, cc-switch
+  import preview -> apply, saved/active generation banner, four client
+  snippets, routing preview, request trace, and catalog status.
 
 ## Key contracts
 

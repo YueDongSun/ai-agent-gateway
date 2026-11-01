@@ -7,7 +7,9 @@ inputs.
 
 ## Required gates
 
-From a clean, reviewed private checkout:
+From a clean, reviewed private checkout, run tests with disposable private
+`AAG_CONFIG_DIR` and `AAG_HOME_DIR` values and leave `AAG_TEST_CCSWITCH_DB` unset
+so optional real-database and real-provider probes do not run:
 
 ```text
 npm ci --ignore-scripts
@@ -31,15 +33,16 @@ npm run privacy:export_snapshot -- \
 
 The exporter reruns the commit-bound privacy audit, rejects symlinks and
 submodules, excludes private historical receipts and release binaries, checks
-all local Markdown links, verifies the npm package allowlist, and writes a
-`public_snapshot_manifest.json`. The selected commit is accepted only when its
-auditor, exporter, Git helper, and export policy exactly match the running
-tools. The public manifest contains the selected policy hash, export-tree
-digest, per-file hashes/modes/sizes, and redacted gate summaries. It contains
-no private commit, Git tree, or commit timestamp. The command response reports
-private source provenance only to the caller; do not redirect that response
-into the snapshot. The exporter never copies `.git`, ignored files, or
-worktree-only state.
+supported inline and reference-definition local Markdown links subject to
+policy-declared exemptions, verifies the npm package allowlist, and writes a
+`public_snapshot_manifest.json`. The selected commit is accepted
+only when its auditor, exporter, Git helper, and export policy match the running
+tools after text line-ending normalization. The public manifest contains the
+selected policy hash, export-tree digest, per-file hashes/modes/sizes, and
+redacted gate summaries. It contains no private commit, Git tree, or commit
+timestamp. The command response reports private source provenance only to the
+caller; do not redirect that response into the snapshot. The exporter never
+copies `.git`, ignored files, or worktree-only state.
 
 Before initializing Git, audit the exported directory directly:
 
@@ -48,13 +51,32 @@ cd <absolute-new-directory>
 npm run privacy:audit
 ~~~
 
-This no-Git mode verifies the manifest against every exported file, rejects
-unmanifested files, symlinks, tampering, and Git metadata, and repeats content
-and npm package-surface checks.
+This no-Git mode checks the exported file set, byte counts, and content hashes
+against the manifest and checks its recorded tree digest. It rejects missing or
+unmanifested files, symlinks, and root Git metadata, and repeats content and npm
+package-surface checks. On platforms that expose POSIX executable bits it also
+compares each observed mode with the manifest's listed mode; a Windows checkout
+cannot observe that bit, so run this comparison on macOS or Linux before
+publishing. It re-hashes the exported policy and rejects a manifest whose
+`policy_sha256` disagrees. These are internal consistency checks; the audit
+still does not authenticate or sign the manifest.
+
+## Publication authority
+
+Local checks, snapshot preparation, and private Git delivery do not authorize
+public publication. The existing `privacy:sync_public` command is a mutating
+release workflow, not a read-only check or dry run: it replaces files in the
+separate public checkout, applies release shaping, may refresh lockfiles, then
+commits, tags, and pushes. It validates the configured public destination and
+release tag, but those checks do not grant publication authority. Use it only
+for an explicitly authorized destination and release. Never connect the private
+and public repositories through cross-repository remotes, fetches, pulls, pushes,
+or merges.
 
 ## New repository procedure
 
-1. Review the manifest and complete the no-Git audit shown above.
+1. Review the manifest, executable modes, and policy identity, then complete the
+   no-Git audit shown above.
 2. Initialize a brand-new Git repository in the export directory.
 3. Configure an intentionally public author identity, preferably a GitHub
    noreply address, before the first commit.
@@ -81,9 +103,11 @@ cache, fork, or reflog reachability.
 - The public application identifier is `org.aagateway.desktop`. It is a new
   package identity and is not an in-place upgrade of private preview builds
   that used a personalized identifier.
-- Marketplace descriptions are PII-scrubbed at both Node collection and native
-  refresh boundaries. Repository/author attribution and source provenance stay
-  visible; that metadata is not a plugin security audit.
+- Marketplace descriptions and license fields scrub recognized authenticated
+  URLs, email addresses, user-home paths, and private-network forms at both Node
+  collection and native refresh boundaries. Pattern replacement does not prove
+  arbitrary prose is nonconfidential. Repository/author attribution and source
+  provenance stay visible; that metadata is not a plugin security audit.
 
 ## Release assets
 

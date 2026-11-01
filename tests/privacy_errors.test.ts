@@ -107,7 +107,9 @@ describe('content-free Node error boundary', () => {
     const body = await response.json() as Record<string, any>;
     expect(response.status).toBe(404);
     expect(body.type).toBe('error');
-    expect(body.error.type).toBe('invalid_request_error');
+    // Rust parity: router failures on the Anthropic surface always carry
+    // api_error regardless of status.
+    expect(body.error.type).toBe('api_error');
     expect(body.error.message).toBeTypeOf('string');
     expect(body.error.error).toBeUndefined();
     assert_private_canaries_absent(JSON.stringify(body));
@@ -123,9 +125,15 @@ describe('content-free Node error boundary', () => {
       }),
     });
     const stream_body = await stream_response.text();
-    expect(stream_body).toContain('event: error');
-    expect(stream_body).toContain('"type":"error"');
+    // Pre-commit probe: a stream setup failure is the JSON error envelope
+    // with the real status (Rust parity), not a committed 200 SSE stream
+    // that only carries an error event.
+    expect(stream_response.status).toBe(404);
+    expect(stream_body).not.toContain('event: error');
     expect(stream_body).not.toContain('data: [DONE]');
+    const stream_error = JSON.parse(stream_body) as Record<string, any>;
+    expect(stream_error.type).toBe('error');
+    expect(stream_error.error.type).toBe('api_error');
     assert_private_canaries_absent(stream_body);
   });
 

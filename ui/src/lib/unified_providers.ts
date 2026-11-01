@@ -47,12 +47,18 @@ export interface UnifiedCard {
   /** 1-based failover position among in-queue presets in list order;
    *  null when out of the queue or not a preset. */
   priority: number | null;
+  /** True when the upstream row is referenced by a supplier endpoint
+   *  projection: supplier saves own its contents, so direct edit/delete is
+   *  hidden (the backend also refuses direct deletion). */
+  supplierManaged: boolean;
   kind: 'preset' | 'standalone';
 }
 
 export interface MergeProviderCardsOptions {
   /** Render standalone upstreams after the presets (routing pages only). */
   includeStandalone: boolean;
+  /** Proxy-provider ids referenced by supplier endpoint projections. */
+  supplierMappedIds?: ReadonlySet<string>;
 }
 
 /** Build the unified card list: presets first in `provider_list` order
@@ -78,6 +84,9 @@ export function mergeProviderCards(
       upstream,
       proxyId: upstream?.id ?? null,
       priority: inQueue ? priority : null,
+      supplierManaged: upstream
+        ? (opts.supplierMappedIds?.has(upstream.id) ?? false)
+        : false,
       kind: 'preset' as const,
     };
   });
@@ -92,6 +101,7 @@ export function mergeProviderCards(
       upstream: u,
       proxyId: u.id,
       priority: null,
+      supplierManaged: opts.supplierMappedIds?.has(u.id) ?? false,
       kind: 'standalone' as const,
     }));
   return [...presetCards, ...standaloneCards];

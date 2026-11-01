@@ -47,21 +47,28 @@ impl Database {
              FROM vendors ORDER BY name ASC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let protocols_str: String = row.get(4)?;
-            let endpoints_str: String = row.get(5)?;
-            Ok(Vendor {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                base_url: row.get(2)?,
-                api_key: row.get(3)?,
-                protocols: serde_json::from_str(&protocols_str).unwrap_or_default(),
-                endpoints: serde_json::from_str(&endpoints_str).unwrap_or_default(),
-                created_at: row.get(6)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row?);
+            let (id, name, base_url, api_key, protocols_str, endpoints_str, created_at) = row?;
+            out.push(Vendor {
+                id,
+                name,
+                base_url,
+                api_key,
+                protocols: serde_json::from_str(&protocols_str)?,
+                endpoints: serde_json::from_str(&endpoints_str)?,
+                created_at,
+            });
         }
         Ok(out)
     }
@@ -150,5 +157,20 @@ mod tests {
 
         db.delete_vendor("acme").unwrap();
         assert!(db.get_all_vendors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_vendor_json_is_reported_instead_of_defaulted() {
+        let db = test_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO vendors (id, name, base_url, api_key, protocols, endpoints)
+                 VALUES ('broken', 'Broken', '', '', 'not-json', '{}')",
+                [],
+            )
+            .unwrap();
+        assert!(db.get_all_vendors().is_err());
     }
 }

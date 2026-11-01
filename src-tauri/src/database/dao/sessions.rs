@@ -39,31 +39,38 @@ pub struct SessionMeta {
     pub last_active_at: Option<i64>,
 }
 
+/// Column list shared by every session SELECT, so the three query sites and
+/// the row mapper cannot drift apart when a column is added.
+const SESSION_COLUMNS: &str = "id, app_id, session_id, title, summary, project_dir, source_path,
+        resume_command, message_count, started_at, last_active_at";
+
+fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
+    Ok(SessionMeta {
+        id: row.get(0)?,
+        app_id: row.get(1)?,
+        session_id: row.get(2)?,
+        title: row.get(3)?,
+        summary: row.get(4)?,
+        project_dir: row.get(5)?,
+        source_path: row.get(6)?,
+        resume_command: row.get(7)?,
+        message_count: row.get(8)?,
+        started_at: row.get(9)?,
+        last_active_at: row.get(10)?,
+    })
+}
+
 impl Database {
     /// List all sessions, newest activity first.
     #[allow(dead_code)]
     pub fn get_all_sessions(&self) -> Result<Vec<SessionMeta>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id, app_id, session_id, title, summary, project_dir, source_path,
-                    resume_command, message_count, started_at, last_active_at
-             FROM sessions ORDER BY COALESCE(last_active_at, started_at, 0) DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionMeta {
-                id: row.get(0)?,
-                app_id: row.get(1)?,
-                session_id: row.get(2)?,
-                title: row.get(3)?,
-                summary: row.get(4)?,
-                project_dir: row.get(5)?,
-                source_path: row.get(6)?,
-                resume_command: row.get(7)?,
-                message_count: row.get(8)?,
-                started_at: row.get(9)?,
-                last_active_at: row.get(10)?,
-            })
-        })?;
+        let sql = format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions ORDER BY COALESCE(last_active_at, started_at, 0) DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_session_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -75,27 +82,8 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_session(&self, id: &str) -> Result<Option<SessionMeta>, AppError> {
         let conn = lock_conn!(self.conn);
-        let result = conn.query_row(
-            "SELECT id, app_id, session_id, title, summary, project_dir, source_path,
-                    resume_command, message_count, started_at, last_active_at
-             FROM sessions WHERE id = ?1",
-            params![id],
-            |row| {
-                Ok(SessionMeta {
-                    id: row.get(0)?,
-                    app_id: row.get(1)?,
-                    session_id: row.get(2)?,
-                    title: row.get(3)?,
-                    summary: row.get(4)?,
-                    project_dir: row.get(5)?,
-                    source_path: row.get(6)?,
-                    resume_command: row.get(7)?,
-                    message_count: row.get(8)?,
-                    started_at: row.get(9)?,
-                    last_active_at: row.get(10)?,
-                })
-            },
-        );
+        let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1");
+        let result = conn.query_row(&sql, params![id], map_session_row);
         match result {
             Ok(s) => Ok(Some(s)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -147,27 +135,13 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_sessions_by_app(&self, app_id: &str) -> Result<Vec<SessionMeta>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id, app_id, session_id, title, summary, project_dir, source_path,
-                    resume_command, message_count, started_at, last_active_at
+        let sql = format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE app_id = ?1
-             ORDER BY COALESCE(last_active_at, started_at, 0) DESC",
-        )?;
-        let rows = stmt.query_map(params![app_id], |row| {
-            Ok(SessionMeta {
-                id: row.get(0)?,
-                app_id: row.get(1)?,
-                session_id: row.get(2)?,
-                title: row.get(3)?,
-                summary: row.get(4)?,
-                project_dir: row.get(5)?,
-                source_path: row.get(6)?,
-                resume_command: row.get(7)?,
-                message_count: row.get(8)?,
-                started_at: row.get(9)?,
-                last_active_at: row.get(10)?,
-            })
-        })?;
+             ORDER BY COALESCE(last_active_at, started_at, 0) DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![app_id], map_session_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

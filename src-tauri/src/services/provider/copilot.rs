@@ -57,65 +57,50 @@ pub fn read_live() -> Result<Option<Value>, AppError> {
         .paths
         .first()
         .ok_or_else(|| AppError::Config("AAG_CLIENT_CONFIG_PATHS_INVALID".into()))?;
-    read_live_at(path)
+    read_live_at(path).map(|existing| existing.map(|(_, value)| value))
 }
 
-fn read_live_at(path: &Path) -> Result<Option<Value>, AppError> {
+/// Read the current settings value together with the raw text (when the
+/// file exists), so the JSONC patcher can preserve the user's comments and
+/// formatting on rewrite.
+fn read_live_at(path: &Path) -> Result<Option<(String, Value)>, AppError> {
     crate::config::private_fs::validate_external_file_path(path)?;
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
     let stripped = strip_jsonc_comments(&raw);
     match serde_json::from_str(&stripped) {
-        Ok(v) => Ok(Some(v)),
+        Ok(v) => Ok(Some((raw, v))),
         Err(e) => Err(AppError::Json(e)),
     }
 }
 
-/// Naively strip `//` line comments and `/* */` block comments from a JSONC
-/// string. Good enough for Copilot settings.json (comments appear on their own
-/// lines or after a value, never inside a string literal in practice).
+/// Strip JSONC comments before parsing (delegates to the shared stripper in
+/// [`super::config_editor`], which also handles escaped quotes inside string
+/// literals).
 fn strip_jsonc_comments(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    let mut in_string = false;
-    while let Some(c) = chars.next() {
-        if in_string {
-            out.push(c);
-            if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                // line comment -> skip to end of line
-                chars.next();
-                for ch in chars.by_ref() {
-                    if ch == '\n' {
-                        break;
-                    }
-                }
-                out.push('\n');
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
+    super::config_editor::strip_jsonc_comments(raw)
+}
+
+/// Apply the `model` and `env` edits to the raw document, then verify the
+/// patched text against `merged`.
+fn patch_jsonc(
+    raw: &str,
+    settings: &serde_json::Map<String, Value>,
+    merged: &Value,
+) -> Result<String, AppError> {
+    let mut editor = super::jsonc_edit::JsoncEditor::new(raw)?;
+    if let Some(model) = settings.get("model") {
+        editor.set_top_level("model", model)?;
     }
-    out
+    if let Some(env) = settings.get("env") {
+        let env = env
+            .as_object()
+            .ok_or_else(|| AppError::Config("Copilot provider env must be a JSON object".into()))?;
+        editor.merge_object("env", env)?;
+    }
+    editor.finish(merged)
 }
 
 /// Write `provider.settings_config` to `~/.copilot/settings.json`, merging with
@@ -137,7 +122,11 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
     })?;
 
     // Start from the existing settings (if any) so we don't clobber user keys.
-    let mut merged = read_live_at(path)?.unwrap_or_else(|| json!({}));
+    let existing = read_live_at(path)?;
+    let mut merged = existing
+        .as_ref()
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| json!({}));
     let merged_obj = merged
         .as_object_mut()
         .ok_or_else(|| AppError::Config("~/.copilot/settings.json must be a JSON object".into()))?;
@@ -162,7 +151,15 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
         }
     }
 
-    let serialized = serde_json::to_vec_pretty(&merged)?;
+    let serialized = match existing.as_ref() {
+        Some((raw, _)) => match patch_jsonc(raw, obj, &merged) {
+            Ok(text) => text.into_bytes(),
+            // The patcher refuses documents it cannot splice safely; fall
+            // back to the full rewrite exactly as before.
+            Err(_) => serde_json::to_vec_pretty(&merged)?,
+        },
+        None => serde_json::to_vec_pretty(&merged)?,
+    };
     let (written, backups) =
         super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
             path,
@@ -181,6 +178,7 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::provider::test_support::isolated_home;
 
     #[test]
     fn strip_jsonc_removes_line_and_block_comments() {
@@ -202,5 +200,79 @@ mod tests {
         let stripped = strip_jsonc_comments(raw);
         let v: Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(v["url"], "https://example.com/v1");
+    }
+
+    #[test]
+    fn strip_jsonc_treats_escaped_quotes_as_string_contents() {
+        // An escaped quote must not end the string: after `"say \"` the
+        // scanner is still inside the string, so the `//` in the URL value
+        // and the following property survive.
+        let raw = r#"{
+            // user setting
+            "note": "say \" hi",
+            "url": "https://example.com//relay"
+        }"#;
+        let stripped = strip_jsonc_comments(raw);
+        let v: Value = serde_json::from_str(&stripped).expect("valid JSON after strip");
+        assert_eq!(v["note"], "say \" hi");
+        assert_eq!(v["url"], "https://example.com//relay");
+    }
+
+    #[test]
+    fn strip_jsonc_survives_backslash_run_before_quote() {
+        // A literal backslash before the closing quote is itself escaped.
+        let raw = r#"{ "path": "C:\\dir\\", "url": "https://x//y" }"#;
+        let stripped = strip_jsonc_comments(raw);
+        let v: Value = serde_json::from_str(&stripped).expect("valid JSON after strip");
+        assert_eq!(v["path"], "C:\\dir\\");
+        assert_eq!(v["url"], "https://x//y");
+    }
+
+    #[test]
+    fn write_live_preserves_jsonc_comments_and_merges_env() {
+        let home = isolated_home("copilot-jsonc");
+        let path = home.root.join(".copilot").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\n",
+                "  // keep this comment\n",
+                "  \"theme\": \"auto\", /* inline */\n",
+                "  \"env\": {\n",
+                "    \"COPILOT_PROVIDER_BASE_URL\": \"https://old.invalid\" // old endpoint\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        let provider = Provider::new(
+            "copilot-aag".into(),
+            "Copilot".into(),
+            json!({
+                "model": "claude-sonnet-4",
+                "env": {
+                    "COPILOT_PROVIDER_BASE_URL": "https://example.invalid/v1",
+                    "COPILOT_PROVIDER_API_KEY": "sk-secret"
+                }
+            }),
+        );
+        write_live(&provider).expect("Copilot write");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            concat!(
+                "{\n",
+                "  // keep this comment\n",
+                "  \"theme\": \"auto\", /* inline */\n",
+                "  \"env\": {\n",
+                "    \"COPILOT_PROVIDER_API_KEY\": \"sk-secret\",\n",
+                "    \"COPILOT_PROVIDER_BASE_URL\": \"https://example.invalid/v1\" // old endpoint\n",
+                "  },\n",
+                "  \"model\": \"claude-sonnet-4\"\n",
+                "}\n",
+            )
+        );
+        drop(home);
     }
 }

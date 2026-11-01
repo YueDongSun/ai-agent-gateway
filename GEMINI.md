@@ -27,8 +27,9 @@ gateway: `npm run gateway`.
   `/v1/chat/completions`, `/v1/messages`, and `/v1/responses` are the client
   surfaces.
 - Failover advances for network, 429, and 5xx errors; 4xx errors propagate.
-- The Rust router snapshots providers and routes at `proxy_start`; restart
-  after configuration changes.
+- The Rust proxy hot-applies provider, route, supplier, model, pin, and catalog
+  changes to new requests; in-flight requests retain their admitted snapshot.
+  Listener host/port and gateway-auth changes still require a restart.
 - SQLite at `~/.aag/aag.db`, overridable with `AAG_CONFIG_DIR`. Live agent
   writes are atomic and back up existing files first.
 - Use `snake_case` for new project-controlled identifiers and filenames.

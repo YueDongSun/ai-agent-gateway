@@ -5,17 +5,41 @@
 //! circuit breakers. Ported from the Node `src/gateway/` layer.
 
 pub mod canonical;
+pub mod admission;
 pub mod circuit_breaker;
+pub(crate) mod claude_desktop;
 pub mod converter;
 pub mod cot;
 pub mod endpoint;
 pub mod gemini;
 pub mod models;
+pub(crate) mod model_health;
+pub mod planner;
+pub(crate) mod prompt_budget;
 pub mod providers;
+pub(crate) mod publication;
+#[cfg(windows)]
+pub(crate) mod session_gateway;
 pub mod responses;
+pub(crate) mod request_timeline;
+pub(crate) mod request_status;
 pub mod router;
+pub mod routing_receipts;
+pub mod self_loop;
 pub mod server;
+pub mod session_affinity;
 pub mod thinking_compat;
+pub mod usage_recorder;
+
+#[cfg(test)]
+mod protocol_matrix_tests;
+
+#[cfg(test)]
+mod routing_receipt_tests;
+#[cfg(test)]
+mod routing_receipt_protocol_tests;
+#[cfg(test)]
+mod routing_admission_tests;
 
 use std::sync::Arc;
 use tokio::task::JoinHandle;

@@ -1,9 +1,14 @@
 //! Exact owner/group/DACL preservation before writing credential-bearing bytes.
 //! No privilege elevation, ownership takeover, or permissive fallback is used.
-use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::Path, ptr};
+use std::{ffi::c_void, path::Path, ptr};
 
 use super::failure;
+use crate::config::private_fs::windows_path::encode_native_path;
 use crate::error::AppError;
+
+fn native_name(path: &Path) -> Result<Vec<u16>, AppError> {
+    encode_native_path(path).map_err(|_| failure("client_path_unsupported"))
+}
 
 const OWNER_GROUP_DACL: u32 = 0x1 | 0x2 | 0x4;
 const SE_FILE_OBJECT: u32 = 1;
@@ -70,7 +75,7 @@ impl Drop for Windows_permissions {
 
 impl Windows_permissions {
     pub(super) fn read(path: &Path) -> Result<Self, AppError> {
-        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let name: Vec<u16> = native_name(path)?;
         let mut permissions = Self {
             descriptor: ptr::null_mut(),
             owner: ptr::null_mut(),
@@ -121,7 +126,7 @@ impl Windows_permissions {
     }
 
     pub(super) fn apply(&self, path: &Path) -> Result<(), AppError> {
-        let mut name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut name: Vec<u16> = native_name(path)?;
         let target = Self::read(path)?;
         // Setting an unchanged owner/group can still require WRITE_OWNER on
         // Windows. Verify the creator inherited the exact identities first,
@@ -192,9 +197,9 @@ pub(super) fn restrict_to_owner(path: &Path) -> Result<(), AppError> {
     let permissions = Windows_permissions::read(path)?;
     // SAFETY: owner SID was validated; aligned u32 storage holds a Windows ACL.
     let acl_size = unsafe { 8 + 8 + GetLengthSid(permissions.owner) };
-    let mut acl = vec![0u32; ((acl_size + 3) / 4) as usize];
+    let mut acl = vec![0u32; acl_size.div_ceil(4) as usize];
     let acl_pointer = acl.as_mut_ptr() as *mut c_void;
-    let mut name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut name: Vec<u16> = native_name(path)?;
     // SAFETY: the buffer is large enough for one ACCESS_ALLOWED_ACE and SID;
     // only the new transaction file's DACL is changed, preserving owner/group.
     let ok = unsafe {

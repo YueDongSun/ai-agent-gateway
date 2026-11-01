@@ -9,6 +9,44 @@ use crate::database::Database;
 use crate::error::AppError;
 
 use super::{AppType, LiveWriteResult};
+use std::sync::{Arc, Mutex};
+
+/// Shared by client-configuration commands across windows. The guard spans
+/// mirror preparation and Desktop dispatch as well as provider selection.
+#[derive(Clone, Default)]
+#[allow(non_camel_case_types)]
+pub struct Provider_switch_service {
+    operation_lock: Arc<Mutex<()>>,
+}
+
+impl Provider_switch_service {
+    /// Run one synchronous client mutation under the same admission guard as
+    /// provider switching. Callers finish asynchronous runtime preparation
+    /// first; keeping its original error type preserves operation context.
+    pub(crate) fn with_client_write<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<AppError>,
+    {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| AppError::Message("AAG_PROVIDER_SWITCH_LOCK_FAILED".into()))
+            .map_err(E::from)?;
+        operation()
+    }
+
+    pub fn switch_provider(
+        &self,
+        db: &Database,
+        id: &str,
+        app_type: &str,
+    ) -> Result<LiveWriteResult, AppError> {
+        self.with_client_write(|| switch_provider(db, id, app_type))
+    }
+}
 
 pub fn switch_provider(
     db: &Database,
@@ -24,6 +62,9 @@ pub fn switch_provider(
         return Err(AppError::InvalidInput(
             "AAG_PROVIDER_SWITCH_UNSUPPORTED".into(),
         ));
+    }
+    if app == AppType::Codex {
+        super::codex::require_unmanaged_codex(db)?;
     }
     let provider = db
         .get_provider_by_id(id, app_type)?
@@ -44,6 +85,7 @@ pub fn switch_provider(
             )?
         }
         AppType::Gemini => super::gemini::switch_gemini_mirror_for_provider(db, &provider)?,
+        AppType::ClineCli => super::cline::write_live(&provider)?,
         AppType::Copilot
         | AppType::Pi
         | AppType::OpenCode
@@ -82,74 +124,16 @@ pub fn switch_provider(
 mod tests {
     use super::*;
     use crate::provider::Provider;
+    use crate::services::provider::test_support::isolated_home;
     use serde_json::{json, Value};
-    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-
-    struct Fixture {
-        root: PathBuf,
-        environment: Vec<(&'static str, Option<OsString>)>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let root = fs::canonicalize(std::env::temp_dir())
-                .unwrap()
-                .join(format!(
-                    "aag_provider_switch_{}_{}",
-                    std::process::id(),
-                    NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
-                ));
-            fs::create_dir(&root).unwrap();
-            crate::config::private_fs::prepare_managed_private_dir(&root).unwrap();
-            let fixture = Self {
-                root,
-                environment: [
-                    "AAG_HOME_DIR",
-                    "AAG_CONFIG_DIR",
-                    "COPILOT_HOME",
-                    "PI_CODING_AGENT_DIR",
-                    "GEMINI_CLI_HOME",
-                    "OPENCODE_CONFIG",
-                    "OPENCODE_CONFIG_DIR",
-                    "KILO_CONFIG",
-                    "KILO_CONFIG_DIR",
-                    "XDG_CONFIG_HOME",
-                ]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect(),
-            };
-            for (key, _) in &fixture.environment {
-                std::env::remove_var(key);
-            }
-            std::env::set_var("AAG_HOME_DIR", &fixture.root);
-            std::env::set_var("AAG_CONFIG_DIR", fixture.root.join("aag_state"));
-            fixture
-        }
-
-        fn write(&self, relative: &str, content: &str) -> PathBuf {
-            let path = self.root.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, content).unwrap();
-            path
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            for (key, value) in &self.environment {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-            let _ = fs::remove_dir_all(&self.root);
-        }
+    fn write(root: &Path, relative: &str, content: &str) -> PathBuf {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        path
     }
 
     fn providers(app_type: &str, old: Value, new: Value) -> Database {
@@ -170,8 +154,159 @@ mod tests {
     }
 
     #[test]
+    fn managed_authority_blocks_legacy_codex_selection_without_file_changes() {
+        let home = isolated_home("managed-legacy-switch");
+        let db = providers(
+            "codex",
+            json!({"model":"old-model"}),
+            json!({"model":"new-model"}),
+        );
+        db.set_setting("codex_session_authority_enabled", "1")
+            .unwrap();
+        let error = switch_provider(&db, "new", "codex").unwrap_err();
+        assert_eq!(String::from(error), "session_client_authority_unavailable");
+        assert_current(&db, "codex", "old");
+        assert!(!home.root.join(".codex-cli").exists());
+    }
+
+    #[test]
+    fn cloned_services_wait_for_the_same_switch_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let service = Provider_switch_service::default();
+        let worker_service = service.clone();
+        let guard = service.operation_lock.lock().unwrap();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let db = Database::memory().unwrap();
+            ready_sender.send(()).unwrap();
+            let result = worker_service.switch_provider(&db, "missing", "unknown");
+            result_sender.send(result.map_err(String::from)).unwrap();
+        });
+        ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let blocked_result = result_receiver.recv_timeout(Duration::from_millis(100));
+        drop(guard);
+        worker.join().unwrap();
+        assert!(matches!(
+            blocked_result,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let result = result_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(result.unwrap_err(), "AAG_UNKNOWN_APP_TYPE");
+    }
+
+    #[test]
+    fn competing_mirror_writes_wait_until_desktop_dispatch_releases_the_guard() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let home = isolated_home("serialized-mirror-writes");
+        let mirror_config = write(&home.root, "mirror/config.toml", "original");
+        let service = Provider_switch_service::default();
+        let desktop_service = service.clone();
+        let desktop_config = mirror_config.clone();
+        let (prepared_sender, prepared_receiver) = mpsc::channel();
+        let (dispatch_sender, dispatch_receiver) = mpsc::channel();
+        let desktop = std::thread::spawn(move || {
+            desktop_service.with_client_write(|| {
+                fs::write(&desktop_config, "aag prepared")?;
+                prepared_sender.send(()).unwrap();
+                dispatch_receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                assert_eq!(fs::read_to_string(desktop_config)?, "aag prepared");
+                Ok::<_, AppError>(())
+            })
+        });
+        prepared_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let mode_service = service.clone();
+        let mode_config = mirror_config.clone();
+        let (waiting_sender, waiting_receiver) = mpsc::channel();
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let mode_change = std::thread::spawn(move || {
+            waiting_sender.send(()).unwrap();
+            mode_service.with_client_write(|| {
+                entered_sender.send(()).unwrap();
+                fs::write(mode_config, "coexist applied")?;
+                Ok::<_, AppError>(())
+            })
+        });
+        waiting_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let before_dispatch = entered_receiver.recv_timeout(Duration::from_millis(100));
+        let prepared_config = fs::read_to_string(&mirror_config).unwrap();
+        dispatch_sender.send(()).unwrap();
+        desktop.join().unwrap().unwrap();
+        mode_change.join().unwrap().unwrap();
+        assert!(matches!(
+            before_dispatch,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(prepared_config, "aag prepared");
+        entered_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(mirror_config).unwrap(),
+            "coexist applied"
+        );
+    }
+
+    #[test]
+    fn guarded_client_write_preserves_error_context_and_releases_the_guard() {
+        let service = Provider_switch_service::default();
+        let result = service.with_client_write(|| {
+            Err::<(), _>(AppError::io(
+                "fixture-config.toml",
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture original context",
+                ),
+            ))
+        });
+        match result.unwrap_err() {
+            AppError::Io { path, source } => {
+                assert_eq!(path, "fixture-config.toml");
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+                assert_eq!(source.to_string(), "fixture original context");
+            }
+            error => panic!("original error was replaced: {error:?}"),
+        }
+        assert_eq!(
+            service
+                .with_client_write(|| Ok::<_, String>("next write"))
+                .unwrap(),
+            "next write"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_switch_lock_fails_closed() {
+        let service = Provider_switch_service::default();
+        let worker_service = service.clone();
+        let interrupted = std::thread::spawn(move || {
+            let _guard = worker_service.operation_lock.lock().unwrap();
+            panic!("fixture switch interruption");
+        });
+        assert!(interrupted.join().is_err());
+        let db = providers("copilot", json!({}), json!({}));
+        let result = service.switch_provider(&db, "new", "copilot");
+        assert_eq!(
+            String::from(result.unwrap_err()),
+            "AAG_PROVIDER_SWITCH_LOCK_FAILED"
+        );
+        assert_current(&db, "copilot", "old");
+    }
+
+    #[test]
     fn failed_writes_preserve_current_provider_and_existing_files() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
         for (app_type, blocked_path, config) in [
             ("codex", ".codex-cli", json!({"model": "new-model"})),
             (
@@ -189,9 +324,14 @@ mod tests {
                 ".pi/agent/models.json",
                 json!({"baseUrl": "https://example.invalid/v1", "model": "new-model"}),
             ),
+            (
+                "cline_cli",
+                ".cline_cli/data/settings/providers.json",
+                json!({"baseUrl":"http://127.0.0.1:8989/v1","apiKey":"fixture_key","model":"new-model"}),
+            ),
         ] {
-            let fixture = Fixture::new();
-            let blocked = fixture.write(blocked_path, "invalid_client_config");
+            let home = isolated_home("switch-failed-write");
+            let blocked = write(&home.root, blocked_path, "invalid_client_config");
             let db = providers(app_type, json!({}), config);
             assert!(switch_provider(&db, "new", app_type).is_err(), "{app_type}");
             assert_current(&db, app_type, "old");
@@ -204,22 +344,43 @@ mod tests {
 
     #[test]
     fn selected_codex_model_is_written_before_selection_changes() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
-        let fixture = Fixture::new();
-        let native = fixture.write(".codex/config.toml", "native_configuration");
-        let auth = fixture.write(".codex-cli/auth.json", r#"{"session":"fixture_session"}"#);
+        let home = isolated_home("switch-codex-model");
+        let native = write(&home.root, ".codex/config.toml", "native_configuration");
+        let auth = write(
+            &home.root,
+            ".codex-cli/auth.json",
+            r#"{"session":"fixture_session"}"#,
+        );
         let db = providers(
             "codex",
             json!({"model": "old-model"}),
             json!({"model": "new-model"}),
         );
+        // The catalog is authoritative: a selected model is written only
+        // when an enabled upstream actually offers it.
+        let upstream = serde_json::from_value(json!({
+            "id": "switch_model_fixture",
+            "name": "Switch model fixture",
+            "type": "openai",
+            "baseURL": "https://example.invalid/v1",
+            "apiKey": "fixture_key",
+            "models": ["old-model", "new-model"],
+            "enabled": true,
+            "autoTrackModels": false
+        }))
+        .unwrap();
+        db.save_proxy_provider(&upstream).unwrap();
         let result = switch_provider(&db, "new", "codex").unwrap();
         assert_current(&db, "codex", "new");
         assert_eq!(result.provider_id, "new");
         assert_eq!(result.written.len(), 1);
         let config = fs::read_to_string(&result.written[0]).unwrap();
-        assert!(config.contains("model = \"new-model\""));
-        assert!(!config.contains("old-model"));
+        let config = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(config["model"].as_str(), Some("new-model"));
+        assert_eq!(
+            config["profiles"]["aag"]["model"].as_str(),
+            Some("new-model")
+        );
         assert_eq!(fs::read_to_string(native).unwrap(), "native_configuration");
         assert_eq!(
             fs::read_to_string(auth).unwrap(),
@@ -229,7 +390,6 @@ mod tests {
 
     #[test]
     fn discovered_custom_paths_are_the_exact_switch_targets() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
         for (app_type, variable, override_path, expected_paths, config) in [
             (
                 "copilot",
@@ -267,12 +427,12 @@ mod tests {
                 json!({"options": {"baseURL": "https://example.invalid/v1"}, "model": "new-model"}),
             ),
         ] {
-            let fixture = Fixture::new();
+            let home = isolated_home("switch-custom-paths");
             let expected: Vec<PathBuf> = expected_paths
                 .iter()
-                .map(|path| fixture.write(path, r#"{"theme":"fixture_theme"}"#))
+                .map(|path| write(&home.root, path, r#"{"theme":"fixture_theme"}"#))
                 .collect();
-            std::env::set_var(variable, fixture.root.join(override_path));
+            std::env::set_var(variable, home.root.join(override_path));
             let resolved = super::super::config_paths::resolve(app_type).unwrap();
             assert_eq!(resolved.paths, expected, "{app_type}");
             let db = providers(app_type, json!({}), config);
@@ -299,10 +459,9 @@ mod tests {
 
     #[test]
     fn pi_invalid_settings_does_not_modify_models_or_selection() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
-        let fixture = Fixture::new();
-        let models = fixture.write(".pi/agent/models.json", r#"{"providers":{}}"#);
-        fixture.write(".pi/agent/settings.json", "[]");
+        let home = isolated_home("switch-pi-settings");
+        let models = write(&home.root, ".pi/agent/models.json", r#"{"providers":{}}"#);
+        write(&home.root, ".pi/agent/settings.json", "[]");
         let db = providers(
             "pi",
             json!({}),
@@ -315,8 +474,7 @@ mod tests {
 
     #[test]
     fn selected_gemini_model_and_settings_are_written_before_selection_changes() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
-        let fixture = Fixture::new();
+        let home = isolated_home("switch-gemini");
         let db = providers(
             "gemini",
             json!({"env": {"GEMINI_MODEL": "old-model"}}),
@@ -325,11 +483,11 @@ mod tests {
         let result = switch_provider(&db, "new", "gemini").unwrap();
         assert_current(&db, "gemini", "new");
         assert_eq!(result.provider_id, "new");
-        let env = fs::read_to_string(fixture.root.join(".gemini/.env")).unwrap();
+        let env = fs::read_to_string(home.root.join(".gemini/.env")).unwrap();
         assert!(env.contains("GEMINI_MODEL=new-model"));
         assert!(!env.contains("old-model"));
         let settings: Value = serde_json::from_str(
-            &fs::read_to_string(fixture.root.join(".gemini/settings.json")).unwrap(),
+            &fs::read_to_string(home.root.join(".gemini/settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(settings["theme"], "fixture_theme");
@@ -337,11 +495,14 @@ mod tests {
 
     #[test]
     fn claude_switch_updates_only_the_isolated_mirror() {
-        let _lock = crate::config::test_env_lock().blocking_lock();
         for app_type in ["claude_code", "claude_desktop"] {
-            let fixture = Fixture::new();
-            let native = fixture.write(".claude/settings.json", "native_configuration");
-            let mirror = fixture.write(".claude-cli/settings.json", r#"{"theme":"fixture_theme"}"#);
+            let home = isolated_home("switch-claude-mirror");
+            let native = write(&home.root, ".claude/settings.json", "native_configuration");
+            let mirror = write(
+                &home.root,
+                ".claude-cli/settings.json",
+                r#"{"theme":"fixture_theme"}"#,
+            );
             let db = providers(app_type, json!({}), json!({}));
             let result = switch_provider(&db, "new", app_type).unwrap();
             assert_current(&db, app_type, "new");

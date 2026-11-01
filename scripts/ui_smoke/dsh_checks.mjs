@@ -295,7 +295,7 @@ export async function run_dsh_checks({ cdp, check_in_page, check, sleep }) {
         const settled = await api.snapshot();
         await api.invoke('dsh_save_settings', { settings: api.initial_snapshot.settings, expected_digest: settled.settings_digest });
         api.element('dsh_cancel_preview')?.click();
-        [...document.querySelectorAll('.app-switcher button')].find((button) => button.textContent.trim() === 'Claude')?.click();
+        await window.__aag_open_client_management('claude_code');
         await api.wait_for(() => document.querySelector('.page-header h2')?.textContent === 'Claude');
         return true;
       } finally { api.restore(); }

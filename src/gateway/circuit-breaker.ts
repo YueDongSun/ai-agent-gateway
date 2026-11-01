@@ -37,13 +37,14 @@ export type CircuitState = 'closed' | 'open' | 'half-open';
  *   successThreshold: 2
  * });
  * 
- * if (breaker.allow()) {
+ * const admission = breaker.acquire();
+ * if (admission) {
  *   try {
  *     const result = await callProvider();
- *     breaker.recordSuccess();
+ *     admission.settle('success');
  *     return result;
  *   } catch (error) {
- *     breaker.recordFailure();
+ *     admission.settle('failure');
  *     throw error;
  *   }
  * }
@@ -82,6 +83,13 @@ export class CircuitBreaker {
    * Limits concurrent trial requests during recovery probing
    */
   private halfOpenInFlight = 0;
+
+  /**
+   * Increments on every state transition, so each admission can be checked
+   * against the state it was admitted under. A settle arriving after a
+   * transition belongs to a retired generation and must be ignored.
+   */
+  private generation = 0;
   
   /**
    * Circuit breaker configuration parameters
@@ -126,59 +134,100 @@ export class CircuitBreaker {
   }
 
   /**
-   * Determines whether a request is currently allowed to pass through the circuit breaker.
-   * 
-   * This method implements the core circuit breaker logic, checking the current state
-   * and deciding whether to allow or reject requests based on the breaker configuration.
-   * 
+   * Admits one attempt through the circuit breaker.
+   *
+   * This method implements the core circuit breaker logic, checking the current
+   * state and deciding whether to admit or reject requests based on the breaker
+   * configuration. It mirrors the Rust breaker's `acquire`: admission and slot
+   * consumption are one synchronous step, and the returned handle is stamped
+   * with the breaker generation so a late settle can never act on a state the
+   * attempt no longer belongs to.
+   *
    * ### State-Based Logic
-   * 
-   * **Closed State**: Always returns true, allowing normal request flow
-   * **Open State**: Returns false during cooldown period, transitions to half-open when cooldown expires
-   * **Half-Open State**: Returns true only if under the concurrent request limit
-   * 
+   *
+   * **Closed State**: Always admits, without consuming a probe slot
+   * **Open State**: Rejects during cooldown; transitions to half-open when cooldown expires
+   * **Half-Open State**: Admits only under the `halfOpenRetries` concurrent limit
+   *
+   * ### Admission Ownership
+   *
+   * The caller must settle the returned admission exactly once with
+   * `settle('success')`, `settle('failure')`, or `settle('cancelled')`. An
+   * admission never settled leaks its probe slot; settling twice is a no-op.
+   *
    * ### Lazy State Transitions
-   * 
+   *
    * When in open state and cooldown period expires, this method automatically
-   * transitions to half-open state and re-evaluates the request allowance.
-   * This ensures state transitions happen at the right time without requiring
-   * separate polling mechanisms.
-   * 
-   * @returns {boolean} True if the request is allowed to pass, false if rejected
-   * 
+   * transitions to half-open state and re-evaluates admission.
+   *
+   * @returns {CircuitAdmission | null} The admission to settle, or null when rejected
+   *
    * @example
    * ```typescript
-   * if (breaker.allow()) {
-   *   // Proceed with provider call
-   *   const result = await callProvider();
-   * } else {
-   *   // Circuit is open, use alternative provider
-   *   const result = await callFallbackProvider();
+   * const admission = breaker.acquire();
+   * if (admission) {
+   *   try {
+   *     const result = await callProvider();
+   *     admission.settle('success');
+   *     return result;
+   *   } catch (error) {
+   *     admission.settle('failure');
+   *     throw error;
+   *   }
    * }
    * ```
    */
-  allow(): boolean {
+  acquire(): CircuitAdmission | null {
     switch (this.state) {
       case 'closed':
-        // Circuit is healthy, allow all requests to pass through
-        return true;
-        
+        // Circuit is healthy, admit all attempts without consuming a probe slot
+        return new CircuitAdmission(this, this.generation);
+
       case 'open': {
         // Circuit is open, check if cooldown period has expired
         const elapsed = Date.now() - this.openedAt;
         if (elapsed >= this.cfg.cooldownMs) {
           // Cooldown expired, transition to half-open for recovery testing
           this.toHalfOpen();
-          // Recursively check allowance after state transition
-          return this.allow();
+          // Re-evaluate admission after the state transition
+          return this.acquire();
         }
         // Still in cooldown, reject the request
-        return false;
+        return null;
       }
-        
+
       case 'half-open':
-        // Allow requests only if under the concurrent limit for recovery probing
-        return this.halfOpenInFlight < this.cfg.halfOpenRetries;
+        // Admission consumes a slot: check and increment are one synchronous
+        // step, so `halfOpenRetries` bounds concurrent recovery probes exactly
+        // as the Rust breaker does. Every admission must then be settled,
+        // otherwise the slot leaks and the breaker can never admit again.
+        if (this.halfOpenInFlight >= this.cfg.halfOpenRetries) return null;
+        this.halfOpenInFlight += 1;
+        return new CircuitAdmission(this, this.generation);
+    }
+  }
+
+  /**
+   * Applies an admission's settled outcome. Stale admissions are no-ops.
+   *
+   * A state transition (open, half-open, closed, reset) retires every
+   * outstanding admission of the previous generation: an attempt that settles
+   * after its breaker state changed must not release a probe slot belonging to
+   * a newer cycle, judge the provider from an older cycle, or count toward a
+   * recovery it did not participate in. This mirrors the Rust breaker's
+   * `permit.generation != inner.generation` guard.
+   *
+   * @internal Invoked by {@link CircuitAdmission.settle}; not part of the
+   * caller-facing API.
+   */
+  settle_admission(generation: number, outcome: CircuitOutcome): void {
+    if (generation !== this.generation) return;
+    if (outcome === 'cancelled') {
+      this.recordCancelled();
+    } else if (outcome === 'success') {
+      this.recordSuccess();
+    } else {
+      this.recordFailure();
     }
   }
 
@@ -287,6 +336,25 @@ export class CircuitBreaker {
   }
 
   /**
+   * Releases an admitted half-open slot without judging provider health.
+   *
+   * An attempt that ends for reasons unrelated to upstream health — a terminal
+   * client or credential error, an abandoned stream, a client that stops
+   * consuming the generator — must still give its slot back. Counting those as
+   * failures would penalize a recovering provider for traffic it never served,
+   * and dropping them silently would leak the slot. This mirrors the Rust
+   * breaker's `Circuit_outcome::Cancelled`: release the slot, change no state.
+   *
+   * Calling this for an attempt that was never admitted is harmless, because
+   * the counter is clamped at zero.
+   */
+  recordCancelled(): void {
+    if (this.state === 'half-open') {
+      this.halfOpenInFlight = Math.max(0, this.halfOpenInFlight - 1);
+    }
+  }
+
+  /**
    * Creates a snapshot of the current circuit breaker state for health monitoring and reporting.
    * 
    * This method provides a comprehensive view of the breaker's current status,
@@ -317,6 +385,7 @@ export class CircuitBreaker {
       successes: this.successes,
       openedAt: this.openedAt || undefined,
       cooldownMs: this.cfg.cooldownMs,
+      halfOpenInFlight: this.halfOpenInFlight,
     };
   }
 
@@ -386,6 +455,7 @@ export class CircuitBreaker {
     this.openedAt = Date.now();
     this.successes = 0;
     this.halfOpenInFlight = 0;
+    this.generation += 1;
     logger.warn('circuit', `breaker OPENED (after ${this.failures} failures)`);
   }
 
@@ -419,6 +489,7 @@ export class CircuitBreaker {
     this.state = 'half-open';
     this.halfOpenInFlight = 0;
     this.successes = 0;
+    this.generation += 1;
     logger.info('circuit', 'breaker -> half-open (probing)');
   }
 
@@ -452,7 +523,43 @@ export class CircuitBreaker {
     this.failures = 0;
     this.successes = 0;
     this.halfOpenInFlight = 0;
+    this.generation += 1;
     logger.info('circuit', 'breaker CLOSED (recovered)');
+  }
+}
+
+/**
+ * Settled outcome of an admitted attempt, mirroring the Rust breaker's
+ * `Circuit_outcome`.
+ *
+ * - `success` — the upstream served the attempt; counts toward recovery.
+ * - `failure` — the upstream failed the attempt; counts against health.
+ * - `cancelled` — the attempt ended for reasons unrelated to upstream health
+ *   (terminal client error, abandoned stream, shutdown); releases its probe
+ *   slot without judging the provider.
+ */
+export type CircuitOutcome = 'success' | 'failure' | 'cancelled';
+
+/**
+ * Handle for one admitted attempt. The caller settles it exactly once.
+ *
+ * Settlement is idempotent (a second call is a no-op) and generation-guarded:
+ * if the breaker changed state since admission, the settle is ignored so a
+ * late result cannot act on a recovery cycle it no longer belongs to.
+ */
+export class CircuitAdmission {
+  private settled = false;
+
+  /** @internal Constructed by CircuitBreaker.acquire */
+  constructor(
+    private readonly breaker: CircuitBreaker,
+    readonly generation: number,
+  ) {}
+
+  settle(outcome: CircuitOutcome): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.breaker.settle_admission(this.generation, outcome);
   }
 }
 
@@ -478,4 +585,11 @@ export interface CircuitBreakerSnapshot {
   
   /** Cooldown period duration in milliseconds */
   cooldownMs: number;
+
+  /**
+   * Recovery probes currently admitted but not yet settled (half-open only).
+   * A value that stays above zero with no attempt in flight means an admission
+   * leaked its slot.
+   */
+  halfOpenInFlight: number;
 }

@@ -74,6 +74,30 @@ pub const KEY_CLAUDE_CLI_HOME: &str = "claude_cli_home";
 /// AAG verbatim (relayed by `anthropic_passthrough` pool rows). Cleared
 /// by setting to empty string.
 pub const KEY_CLAUDE_MIRROR_MODE: &str = "claude_mirror_mode";
+/// Well-known setting key: unix epoch seconds of the last model-discovery
+/// refresh run (all triggers). Written by `model_discovery::run_refresh`.
+pub const KEY_MODEL_DISCOVERY_LAST_RUN: &str = "model_discovery_last_run_epoch";
+/// Well-known setting key: JSON-encoded `RefreshReport` of the last
+/// model-discovery refresh, surfaced to the frontend via
+/// `model_discovery_report`.
+pub const KEY_MODEL_DISCOVERY_LAST_REPORT: &str = "model_discovery_last_report_json";
+/// Well-known setting key: minimum hours between periodic model-discovery
+/// refreshes. Absent or unparsable = 24; `0` disables the periodic trigger
+/// (manual and startup refreshes still run).
+pub const KEY_MODEL_DISCOVERY_INTERVAL_HOURS: &str = "model_discovery_interval_hours";
+/// Well-known setting key: when `"1"`, the last model-discovery refresh
+/// changed routing state while the proxy was running, so the new models
+/// are pending until the next proxy restart. Cleared by `proxy_start`.
+pub const KEY_MODEL_DISCOVERY_PENDING_RESTART: &str = "model_discovery_pending_restart";
+/// Well-known setting key: how the failover queues order their candidate
+/// hops. `"order"` (absent/unknown — default) keeps the configured order;
+/// `"rotate"` round-robins the chain's starting position per request;
+/// `"weight"` spreads first attempts over the chain by each provider's
+/// `proxy_providers.weight` with smooth weighted round-robin (0 = standby
+/// only, still present as failover). Explicit per-model routes and
+/// planner-assessed alias candidates keep their order in every mode.
+/// Part of the routing fingerprint, so writes hot-apply to new requests.
+pub const KEY_ROUTING_MODE: &str = "routing_mode";
 
 impl Database {
     /// Read a setting value. Returns `Ok(None)` if the key is absent.

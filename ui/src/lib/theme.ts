@@ -2,7 +2,7 @@
 /// in localStorage, and auto-detects system preference when no explicit
 /// override exists.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 
 export type Theme = 'light' | 'dark' | 'auto';
 
@@ -42,7 +42,7 @@ export function useTheme() {
   );
 
   // Apply on mount and when resolved changes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     applyTheme(resolved);
   }, [resolved]);
 
@@ -51,7 +51,9 @@ export function useTheme() {
     if (override !== 'auto') return;
     const mq = window.matchMedia('(prefers-color-scheme: light)');
     const handler = (e: MediaQueryListEvent) => {
-      setResolved(e.matches ? 'light' : 'dark');
+      const next = e.matches ? 'light' : 'dark';
+      applyTheme(next);
+      setResolved(next);
     };
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
@@ -60,6 +62,7 @@ export function useTheme() {
   const setOverride = useCallback((next: Theme) => {
     setOverrideState(next);
     const resolved = next === 'auto' ? detectSystem() : next;
+    applyTheme(resolved);
     setResolved(resolved);
     try {
       window.localStorage.setItem(STORAGE_KEY, next);

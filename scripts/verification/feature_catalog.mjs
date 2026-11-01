@@ -1,10 +1,13 @@
 /** Shared, pure command catalog. The companion can plan but never execute it. */
 export const feature_scopes = ['node', 'ui', 'mcp', 'dsh', 'all'];
 const checks = [
+  { id: 'workflow_facade_tests', command: 'npm run test:workflow', runtime: 'node', args: ['--test', 'scripts/workflow/workflow_facade.test.mjs'], cwd: '.', scopes: ['mcp'] },
+  { id: 'mcp_browser_regression', command: 'node --test scripts/ui_smoke/mcp_checks.test.mjs', runtime: 'node', args: ['--test', 'scripts/ui_smoke/mcp_checks.test.mjs'], cwd: '.', scopes: ['mcp', 'ui'] },
   { id: 'node_typecheck', command: 'npm run typecheck', runtime: 'node', args: ['node_modules/typescript/bin/tsc', '--noEmit'], cwd: '.', scopes: ['node', 'mcp', 'dsh'] },
   { id: 'node_tests', command: 'npm test', runtime: 'node', args: ['node_modules/vitest/vitest.mjs', 'run'], cwd: '.', scopes: ['node', 'mcp', 'dsh'] },
-  { id: 'automation_tests', command: 'npm run test:automation', runtime: 'node', args: ['--test', 'scripts/verification/feature_catalog.test.mjs', 'scripts/verification/runner.test.mjs', 'scripts/mcp/aag_mcp.test.mjs', 'scripts/ui_smoke/smoke_runtime.test.mjs'], cwd: '.', scopes: ['node', 'ui', 'mcp', 'dsh'] },
-  { id: 'desktop_runner', command: 'npm run test:desktop_runner', runtime: 'node', args: ['--test', 'scripts/tauri_dev_config.test.mjs', 'scripts/ui_build_config.test.mjs', 'scripts/desktop_environment.test.mjs'], cwd: '.', scopes: ['ui', 'mcp', 'dsh'] },
+  { id: 'automation_tests', command: 'npm run test:automation', runtime: 'node', args: ['--test', 'scripts/verification/feature_catalog.test.mjs', 'scripts/verification/runner.test.mjs', 'scripts/mcp/aag_mcp.test.mjs', 'scripts/ui_smoke/smoke_runtime.test.mjs', 'scripts/release_preflight.test.mjs', 'scripts/npm_discovery.test.mjs'], cwd: '.', scopes: ['node', 'ui', 'mcp', 'dsh'] },
+  { id: 'rust_profile_runner', command: 'npm run test:rust_acceptance', runtime: 'node', args: ['--test', 'scripts/verification/rust_qualification_catalog.test.mjs', 'scripts/verification/rust_test_check.test.mjs', 'scripts/verification/rust_acceptance.test.mjs'], cwd: '.', scopes: ['node', 'ui', 'mcp', 'dsh'] },
+  { id: 'desktop_runner', command: 'npm run test:desktop_runner', runtime: 'node', args: ['--test', 'scripts/tauri_dev_config.test.mjs', 'scripts/tauri_build_config.test.mjs', 'scripts/tauri_build.test.mjs', 'scripts/ui_build_config.test.mjs', 'scripts/desktop_environment.test.mjs', 'scripts/desktop_native/pe_image.test.mjs', 'scripts/desktop_native/native_smoke.test.mjs'], cwd: '.', scopes: ['ui', 'mcp', 'dsh'] },
   { id: 'dsh_transport', command: 'npm run test:dsh_transport', runtime: 'node', args: ['--test', 'scripts/test_dsh_transport.mjs'], cwd: '.', scopes: ['dsh'] },
   { id: 'dsh_market', command: 'npm run test:dsh_market_catalog', runtime: 'node', args: ['--test', 'scripts/dsh_market/catalog_core.test.mjs'], cwd: '.', scopes: ['dsh'] },
   { id: 'ui_typecheck', command: 'npx tsc -b (ui)', runtime: 'node', args: ['node_modules/typescript/bin/tsc', '-b'], cwd: 'ui', scopes: ['ui', 'mcp', 'dsh'] },

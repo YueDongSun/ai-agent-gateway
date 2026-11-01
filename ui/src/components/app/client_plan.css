@@ -1,0 +1,3 @@
+.client_plan_models { display: grid; gap: 12px; list-style: none; padding: 0; margin: 0; }
+.client_plan_models li { display: grid; gap: 6px; padding: 16px; background: var(--bg-elevated-2); border-radius: var(--radius-sm); }
+.client_plan_models code { color: var(--fg); overflow-wrap: anywhere; font-size: 14px; }

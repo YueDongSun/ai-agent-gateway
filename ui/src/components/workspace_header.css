@@ -1,0 +1,105 @@
+/* The surface borrows existing page colors. Identity tokens stay in styles.css. */
+.aag-header.workspace_header {
+  --status_rgb: 36, 35, 31;
+  --status_opacity: .92;
+  --status_progress: 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  isolation: isolate;
+  background-color: rgba(var(--status_rgb), var(--status_opacity));
+  border-bottom-color: transparent;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: background-color 180ms ease;
+}
+
+:root[data-theme='light'] .workspace_header { --status_rgb: 250, 249, 245; }
+.aag-header.workspace_header[data-surface-settling] { transition: none; }
+
+/* A feathered extension removes the hard bar/content join. Only this shallow
+   region blurs; the long page never becomes an animated compositing layer. */
+.workspace_header::after {
+  content: '';
+  position: absolute;
+  inset: calc(100% - 1px) 0 auto;
+  height: 22px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(var(--status_rgb), var(--status_opacity)), rgba(var(--status_rgb), 0));
+  mask-image: linear-gradient(#000, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.aag-header.workspace_header .workspace_context,
+.aag-header.workspace_header .workspace_context_divider,
+.aag-header.workspace_header .header-controls > button,
+.aag-header.workspace_header .gw-status { color: var(--fg); }
+.aag-header.workspace_header .gw-status { background: transparent; }
+.aag-header.workspace_header .gw-status .gw-status-dot { opacity: 1; }
+.workspace_header .gw-status.running .gw-status-dot { color: var(--success); }
+.workspace_header .gateway_runtime_detail {
+  display: block;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .8em;
+  font-weight: 400;
+}
+.workspace_header .gw-status.degraded .gw-status-dot,
+.workspace_header .gw-status.unknown .gw-status-dot { color: var(--warn-text); }
+
+.workspace_destination { display: flex; min-width: 0; }
+.workspace_destination select {
+  font: inherit;
+  font-weight: 550;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+  max-width: 200px;
+  padding: 6px 5px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.workspace_destination select:hover { background: var(--bg-elevated-2); }
+.workspace_destination option, .workspace_destination optgroup { background: var(--bg); color: var(--fg); }
+.workspace_header .header-controls > button { min-height: 36px; }
+.sr_only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+.workspace_page { animation: workspace_arrive 160ms ease-out; }
+@keyframes workspace_arrive { from { opacity: .7; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 900px) {
+  .aag-header.workspace_header { position: sticky; top: 0; align-self: stretch; }
+  .workspace_header .workspace_context { display: flex; }
+}
+@media (max-width: 680px) {
+  .aag-header.workspace_header { flex-wrap: wrap; gap: 4px; padding-top: max(6px, env(safe-area-inset-top)); }
+  .workspace_header .workspace_context { width: 100%; }
+  .workspace_destination { flex: 1; }
+  .workspace_destination select { min-height: 44px; max-width: none; width: 100%; }
+  .workspace_header .header-controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
+  .workspace_header .header-controls > button { min-height: 44px; min-width: 44px; }
+  .workspace_header .theme-btn span { display: none; }
+  .workspace_header .gw-status { flex: 1; min-width: 0; white-space: normal; padding-inline: 2px; letter-spacing: 0; }
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .aag-header.workspace_header { background-color: var(--bg); }
+  .workspace_header::after { background: linear-gradient(var(--bg), transparent); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .aag-header.workspace_header { background: var(--bg); backdrop-filter: none; }
+  .workspace_header::after { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace_page { animation: none; }
+  .aag-header.workspace_header { transition: none; }
+}
+@media (forced-colors: active) {
+  .aag-header.workspace_header { background: Canvas; color: CanvasText; backdrop-filter: none; border-bottom: 1px solid CanvasText; }
+  .workspace_header::after { display: none; }
+  .workspace_header .gw-status-dot { forced-color-adjust: auto; }
+}

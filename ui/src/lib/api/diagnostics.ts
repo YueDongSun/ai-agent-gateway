@@ -8,6 +8,26 @@ export interface Diagnostics_state {
   retained_file_count: number;
 }
 
+export interface Request_event {
+  requestId: string;
+  surface: string;
+  modelRef: string;
+  timestampMs: number;
+  status: number;
+  durationMs: number;
+  streamed: boolean;
+  failedOver: boolean | null;
+  /** Capability-routing decision (`precise` / `alias`), when the planner resolved the request. */
+  planKind: string | null;
+  planTier: number | null;
+  planDowngraded: boolean | null;
+  /** Stable snake_case codes only. */
+  planBasis: string | null;
+  planReason: string | null;
+  /** Routing snapshot generation the request was admitted under. */
+  configGeneration: number | null;
+}
+
 export async function diagnostics_get(): Promise<Diagnostics_state> {
   return invoke<Diagnostics_state>('diagnostics_get');
 }
@@ -40,4 +60,12 @@ export async function diagnostics_record_frontend_error(
     stackChars: stack_chars,
     correlationId: correlation_id,
   });
+}
+
+export async function diagnostics_request_timeline(): Promise<Request_event[]> {
+  return invoke<Request_event[]>('diagnostics_request_timeline');
+}
+
+export async function diagnostics_clear_request_timeline(): Promise<void> {
+  return invoke('diagnostics_clear_request_timeline');
 }

@@ -49,6 +49,27 @@ function configBackupFile(): string {
   return join(configDir(), 'config.json.backup');
 }
 
+/**
+ * The desktop runtime's SQLite database path (Rust `get_app_config_dir` +
+ * `aag.db`): the `AAG_CONFIG_DIR` override, else `~/.aag/aag.db`. Both
+ * runtimes honor the same override, so a shared override points each at
+ * its own store inside one tree.
+ */
+export function desktop_database_path(): string {
+  const override = process.env.AAG_CONFIG_DIR?.trim();
+  return override ? join(override, 'aag.db') : join(homedir(), '.aag', 'aag.db');
+}
+
+/**
+ * Whether the desktop runtime's SQLite store exists alongside the Node
+ * JSON config. The runtimes keep independent provider/route stores — a
+ * switch applied in the desktop app never reaches the Node gateway and
+ * vice versa — so gateway startup warns instead of splitting silently.
+ */
+export function desktop_database_exists(): boolean {
+  return existsSync(desktop_database_path());
+}
+
 export function getConfigDir(): string {
   return configDir();
 }
@@ -274,6 +295,10 @@ try {
 }
 `;
 
+// The encoded command is a constant of the script above; encoding it once at
+// module scope keeps every ACL invocation from re-allocating the encoding.
+const WINDOWS_ACL_SCRIPT_B64 = Buffer.from(WINDOWS_ACL_SCRIPT, 'utf16le').toString('base64');
+
 function windowsPowerShellPath(): string {
   const systemRoot = process.env.SystemRoot;
   if (!systemRoot) throw storageError('WINDOWS_ADAPTER_UNAVAILABLE');
@@ -294,7 +319,6 @@ function runWindowsAcl(
   kind: 'file' | 'directory',
   source?: string,
 ): void {
-  const encodedScript = Buffer.from(WINDOWS_ACL_SCRIPT, 'utf16le').toString('base64');
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) {
     // AAG can be launched from PowerShell 7. Its PSModulePath is incompatible
@@ -303,7 +327,7 @@ function runWindowsAcl(
   }
   const result = spawnSync(
     windowsPowerShellPath(),
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_ACL_SCRIPT_B64],
     {
       shell: false,
       windowsHide: true,

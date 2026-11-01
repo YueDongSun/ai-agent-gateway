@@ -8,7 +8,7 @@
  *   - Antigravity: detect-only; build* must throw (disabled).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,7 +18,8 @@ import {
   AntigravityAdapter,
   defaultAgentTargets,
 } from '../src/agents/adapters.js';
-import type { AgentTarget } from '../src/config/schema.js';
+import { Switcher } from '../src/agents/switcher.js';
+import type { AgentTarget, AppConfig } from '../src/config/schema.js';
 
 let tmp: string;
 
@@ -37,6 +38,58 @@ function targetFor(id: string): AgentTarget {
 }
 
 describe('Copilot CLI adapter', () => {
+  it('preserves nested user environment across gateway/direct switches and exact backups', () => {
+    const adapter = new CopilotAdapter(targetFor('copilot'));
+    const path = adapter.resolveConfigPath()!;
+    const original = '{\r\n  "theme": "dark", "env": {"HTTPS_PROXY": "http://proxy.invalid", "CUSTOM": "keep"}\r\n}\r\n';
+    writeFileSync(path, original);
+    adapter.write(adapter.buildGatewayConfig('http://127.0.0.1:8787', 'fixture', 'exact-model'));
+    expect(readFileSync(`${path}.bak`, 'utf8')).toBe(original);
+    expect(JSON.parse(adapter.read()!).env).toMatchObject({ HTTPS_PROXY: 'http://proxy.invalid', CUSTOM: 'keep' });
+    const gateway_bytes = readFileSync(path, 'utf8');
+    adapter.write(adapter.buildDirectConfig('https://direct.invalid/v1', 'direct', 'exact-model'));
+    expect(readFileSync(`${path}.bak`, 'utf8')).toBe(gateway_bytes);
+    expect(JSON.parse(adapter.read()!).env).toMatchObject({ HTTPS_PROXY: 'http://proxy.invalid', CUSTOM: 'keep', COPILOT_PROVIDER_API_KEY: 'direct' });
+    const direct_bytes = readFileSync(path, 'utf8');
+    adapter.write(adapter.buildDirectConfig('https://direct.invalid/v1', 'direct', 'exact-model'));
+    expect(readFileSync(path, 'utf8')).toBe(direct_bytes);
+    // The retained bytes are sufficient to restore the last pre-write state.
+    writeFileSync(path, readFileSync(`${path}.bak`));
+    expect(readFileSync(path, 'utf8')).toBe(direct_bytes);
+  });
+
+  it('supports inline JSONC comments/trailing commas while preserving comment-like strings', () => {
+    const adapter = new CopilotAdapter(targetFor('copilot'));
+    const path = adapter.resolveConfigPath()!;
+    writeFileSync(path, '{ "url": "https://example.invalid/a//b", "text": "/* literal */", // inline\n "env": { "CUSTOM": "quoted \\\" // value", }, /* block */ }');
+    adapter.write(adapter.buildGatewayConfig('http://127.0.0.1:8787', '', 'm'));
+    expect(JSON.parse(adapter.read()!)).toMatchObject({ url: 'https://example.invalid/a//b', text: '/* literal */', env: { CUSTOM: 'quoted " // value' } });
+  });
+
+  it.each(['{bad', '{"secret":"fixture-secret", /* unfinished', '[]', '{"env":null}', '{"env":["custom"]}', '{"env":{,}}'])('rejects unsupported existing content without any write: %s', (original) => {
+    const adapter = new CopilotAdapter(targetFor('copilot'));
+    const path = adapter.resolveConfigPath()!;
+    writeFileSync(path, original);
+    expect(() => adapter.write(adapter.buildGatewayConfig('http://127.0.0.1:8787', 'fixture', 'm'))).toThrow(/Copilot config/);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(existsSync(`${path}.bak`)).toBe(false);
+    expect(existsSync(`${path}.aag-tmp`)).toBe(false);
+  });
+
+  it('reports failed switching without changing the target state or exposing malformed content', () => {
+    const target = targetFor('copilot');
+    const original = '{"credential":"fixture-private-value",broken}';
+    writeFileSync(target.configPaths[0], original);
+    const cfg: AppConfig = { version: 1, gateway: { host: '127.0.0.1', port: 8787, authToken: '', logLevel: 'info' }, providers: [], routes: [], profiles: [], agents: [target] };
+    const result = new Switcher(cfg).pointToGateway('copilot', 'exact-model');
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('Copilot config');
+    expect(result.message).not.toContain('fixture-private-value');
+    expect(target.pointedAtGateway).toBe(false);
+    expect(readFileSync(target.configPaths[0], 'utf8')).toBe(original);
+    expect(new CopilotAdapter(target).detectCurrentBaseURL()).toBeUndefined();
+  });
+
   it('buildGatewayConfig emits model + COPILOT_PROVIDER_* env block', () => {
     const a = new CopilotAdapter(targetFor('copilot'));
     const out = JSON.parse(a.buildGatewayConfig('http://127.0.0.1:8787', 'tok', 'claude-sonnet-4'));
@@ -140,6 +193,86 @@ describe('pi adapter', () => {
       providers: { aag: { baseUrl: 'http://127.0.0.1:9999/v1', api: 'openai-completions' } },
     }), 'utf8');
     expect(a.detectCurrentBaseURL()).toBe('http://127.0.0.1:9999/v1');
+  });
+});
+
+describe('atomic write with rolling backup', () => {
+  it('CopilotAdapter.write backs up the previous content and leaves no staging file', () => {
+    const a = new CopilotAdapter(targetFor('copilot'));
+    const p = a.resolveConfigPath()!;
+    writeFileSync(p, JSON.stringify({ theme: 'dark' }), 'utf8');
+
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8787', 'tok', 'gpt-4o'));
+    expect(JSON.parse(readFileSync(`${p}.bak`, 'utf8')).theme).toBe('dark');
+    expect(JSON.parse(readFileSync(p, 'utf8')).model).toBe('gpt-4o');
+    expect(existsSync(`${p}.aag-tmp`)).toBe(false);
+
+    // A second switch rolls the backup to the most recent previous state.
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8989', 'tok', 'gpt-4o'));
+    expect(JSON.parse(readFileSync(`${p}.bak`, 'utf8')).env.COPILOT_PROVIDER_BASE_URL)
+      .toBe('http://127.0.0.1:8787/v1');
+  });
+
+  it('KiloAdapter.write backs up the previous content', () => {
+    const a = new KiloAdapter(targetFor('kilo'));
+    const p = a.resolveConfigPath()!;
+    writeFileSync(p, JSON.stringify({ theme: 'dark' }), 'utf8');
+
+    a.write(a.buildGatewayConfig('http://127.0.0.1:8787', 'secret', 'gpt-5'));
+    expect(JSON.parse(readFileSync(`${p}.bak`, 'utf8')).theme).toBe('dark');
+    expect(existsSync(`${p}.aag-tmp`)).toBe(false);
+  });
+
+  it('the base JsonAgentAdapter.write backs up the previous content', () => {
+    const a = new PiAdapter(targetFor('pi'));
+    const p = a.resolveConfigPath()!;
+    writeFileSync(p, JSON.stringify({ providers: { other: { baseUrl: 'https://direct.invalid' } } }), 'utf8');
+
+    a.write(a.buildDirectConfig('https://direct.invalid', 'secret', 'claude-sonnet-4'));
+    expect(JSON.parse(readFileSync(`${p}.bak`, 'utf8')).providers.other.baseUrl).toBe('https://direct.invalid');
+    expect(existsSync(`${p}.aag-tmp`)).toBe(false);
+  });
+});
+
+describe('Switcher status', () => {
+  const switcher_config = (kilo_path: string): AppConfig => ({
+    version: 1,
+    gateway: { host: '127.0.0.1', port: 8787, authToken: '', logLevel: 'info' },
+    providers: [],
+    routes: [],
+    profiles: [],
+    agents: [{
+      id: 'kilo',
+      name: 'Kilo Code',
+      format: 'openai',
+      configPaths: [kilo_path, join(kilo_path, '..', 'missing.json')],
+      pointedAtGateway: false,
+      activeProfileId: '',
+    }],
+  });
+
+  it('reports the existing config path, base URL, and gateway flag across a switch', () => {
+    const kilo_path = join(tmp, 'kilo.json');
+    writeFileSync(kilo_path, JSON.stringify({
+      provider: { aag: { options: { baseURL: 'https://old.invalid/v1' } } },
+    }), 'utf8');
+
+    const sw = new Switcher(switcher_config(kilo_path));
+    const before = sw.status('kilo');
+    expect(before.path).toBe(kilo_path);
+    expect(before.baseURL).toBe('https://old.invalid/v1');
+    expect(before.pointedAtGateway).toBe(false);
+
+    const result = sw.pointToGateway('kilo', 'gpt-5');
+    expect(result.ok).toBe(true);
+
+    const after = sw.status('kilo');
+    expect(after.path).toBe(kilo_path);
+    expect(after.pointedAtGateway).toBe(true);
+    expect(after.baseURL).toBe('http://127.0.0.1:8787/v1');
+    // The switch left a backup of the pre-switch state.
+    expect(JSON.parse(readFileSync(`${kilo_path}.bak`, 'utf8')).provider.aag.options.baseURL)
+      .toBe('https://old.invalid/v1');
   });
 });
 

@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { constants, existsSync } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
+import { find_npm_cli } from './npm_discovery.mjs';
 import { find_browser } from './ui_smoke/smoke_runtime.mjs';
 
 const probe_timeout_ms = 5_000;
@@ -66,9 +67,16 @@ export async function inspect_desktop_environment({
     add(id, passed, passed ? version.join('.') : `requires >= ${minimum.join('.')} (${reason})`, remediation);
   };
   add('node', version_satisfies(version_from(node_version), minimum_node_version), node_version, 'Install Node.js 20 or newer.');
-  const npm_entry = env.npm_execpath || join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-  const npm_is_script = /\.[cm]?js$/.test(npm_entry) && path_exists(npm_entry);
-  await check_version('npm', npm_is_script ? process.execPath : 'npm', npm_is_script ? [npm_entry, '--version'] : ['--version'], [1, 0, 0], 'Install npm with Node.js and make it available on PATH.');
+  // Bare `npm` is only probed on POSIX shells: Windows npm is a .cmd shim that
+  // execFile(shell:false) cannot launch.
+  const npm_entry = find_npm_cli({ env, platform, path_exists });
+  if (npm_entry) {
+    await check_version('npm', process.execPath, [npm_entry, '--version'], [1, 0, 0], 'Install npm with Node.js and make it available on PATH.');
+  } else if (platform !== 'win32') {
+    await check_version('npm', 'npm', ['--version'], [1, 0, 0], 'Install npm with Node.js and make it available on PATH.');
+  } else {
+    add('npm', false, 'requires >= 1.0.0 (unavailable)', 'Install npm with Node.js and make it available on PATH.');
+  }
   if (scope !== 'ui') {
     add_file('node_typescript', 'node_modules/typescript/bin/tsc', 'Run npm ci --ignore-scripts.');
     add_file('node_vitest', 'node_modules/vitest/vitest.mjs', 'Run npm ci --ignore-scripts.');

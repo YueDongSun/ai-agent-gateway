@@ -109,6 +109,35 @@ test('bounded probes handle missing programs, timeout and excessive output witho
   assert.equal(JSON.stringify(failure).includes('private fixture message'), false);
 });
 
+test('npm discovery probes script entries before falling back to PATH shims', async () => {
+  const calls = [];
+  const probe = async (executable, args) => { calls.push([executable, args]); return { status: 'passed', stdout: '11.16.0' }; };
+  // Windows layout without bundled npm beside node.exe: the Program Files
+  // npm-cli.js is found and probed through node; bare `npm` is never probed
+  // because a .cmd shim cannot be execFile'd without a shell.
+  const windows = fixture_options({
+    platform: 'win32',
+    env: { ProgramFiles: 'C:\\Program Files' },
+    path_exists: (path) => path.replaceAll('\\', '/').includes('Program Files/nodejs'),
+    probe,
+  });
+  const receipt = await inspect_desktop_environment(windows);
+  assert.equal(receipt.checks.find((check) => check.id === 'npm').status, 'passed');
+  const npm_call = calls.find(([executable, args]) => args.some((arg) => arg.includes('npm-cli.js')));
+  assert.equal(npm_call[0], process.execPath);
+  assert.equal(calls.some(([executable]) => executable === 'npm'), false);
+  // With no npm script entry anywhere, win32 reports failure without probing
+  // the unlaunchable .cmd shim, while POSIX still probes the PATH entry.
+  calls.length = 0;
+  const missing_win32 = fixture_options({ platform: 'win32', env: {}, path_exists: () => false, probe });
+  assert.equal((await inspect_desktop_environment(missing_win32)).status, 'failed');
+  assert.equal(calls.some(([executable]) => executable === 'npm'), false);
+  calls.length = 0;
+  const missing_posix = fixture_options({ platform: 'darwin', env: {}, path_exists: () => false, probe });
+  assert.equal((await inspect_desktop_environment(missing_posix)).status, 'failed');
+  assert.equal(calls.some(([executable]) => executable === 'npm'), true);
+});
+
 test('plan-only CLI works without toolchain executables and doctor JSON reports missing tools', async () => {
   const env = { ...process.env, PATH: '' };
   const plan = JSON.parse((await exec_file(process.execPath, ['scripts/verify_features.mjs', '--scope', 'all'], { cwd: process.cwd(), env })).stdout);

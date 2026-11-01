@@ -8,6 +8,7 @@ const ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 
 let currentLevel: LogLevel = 'info';
 
 const SAFE_TAGS = new Set([
+  'config',
   'anthropic',
   'circuit',
   'gateway',
@@ -18,12 +19,17 @@ const SAFE_TAGS = new Set([
 ]);
 
 const SAFE_EVENTS = new Set([
+  'config_reload_rejected',
+  'config_watcher_failed',
+  'gateway_reload_pinned',
+  'gateway_reloaded',
   'all_hops_exhausted',
   'breaker_closed',
   'breaker_half_open',
   'breaker_opened',
   'gateway_endpoint_ready',
   'gateway_listening',
+  'gateway_shutdown',
   'gateway_unhandled_error',
   'mid_stream_failed',
   'provider_failed',
@@ -32,14 +38,24 @@ const SAFE_EVENTS = new Set([
   'request_failed',
   'route_not_found',
   'sse_parse_failed',
+  'stream_empty',
   'stream_ended',
   'stream_failed',
+  'stream_first_event_timeout',
   'stream_succeeded',
   'switch_updated',
   'unsafe_event_redacted',
 ]);
 
 const SAFE_FIELD_NAMES = new Set([
+  'reload_reason',
+  'reload_status',
+  'listener_restart_required',
+  'auth_restart_required',
+  'restart_required',
+  'provider_count',
+  'route_count',
+  'budget_ms',
   'code',
   'data_bytes',
   'elapsed_ms',
@@ -51,6 +67,7 @@ const SAFE_FIELD_NAMES = new Set([
   'request_id',
   'response_bytes',
   'retriable',
+  'signal',
   'stage',
   'status',
   'stream',
@@ -62,6 +79,9 @@ type SafeLogScalar = boolean | number | string | null;
 export type LogMetadata = Record<string, unknown>;
 
 const NUMBER_FIELDS = new Set([
+  'provider_count',
+  'route_count',
+  'budget_ms',
   'data_bytes',
   'elapsed_ms',
   'message_count',
@@ -70,7 +90,11 @@ const NUMBER_FIELDS = new Set([
   'status',
   'tool_count',
 ]);
-const BOOLEAN_FIELDS = new Set(['retriable', 'stream']);
+const BOOLEAN_FIELDS = new Set(['retriable', 'stream', 'listener_restart_required', 'auth_restart_required', 'restart_required']);
+export type Reload_reason = 'read_failed' | 'invalid_json' | 'invalid_config' | 'apply_failed' | 'watch_failed' | 'listener_changed' | 'auth_changed' | 'listener_and_auth_changed';
+export type Reload_status = 'applied' | 'rejected' | 'failed' | 'restart_required';
+const reload_reasons: ReadonlySet<string> = new Set<Reload_reason>(['read_failed', 'invalid_json', 'invalid_config', 'apply_failed', 'watch_failed', 'listener_changed', 'auth_changed', 'listener_and_auth_changed']);
+const reload_statuses: ReadonlySet<string> = new Set<Reload_status>(['applied', 'rejected', 'failed', 'restart_required']);
 const REFERENCE_FIELDS = new Set(['model_ref', 'provider_ref']);
 const LOG_REFERENCE_KEY = randomBytes(32);
 
@@ -110,6 +134,12 @@ function safeMetadata(extra: LogMetadata | undefined): Record<string, SafeLogSca
     } else if (BOOLEAN_FIELDS.has(key) && typeof value === 'boolean') {
       safe[key] = value;
     } else if (
+      (key === 'reload_reason' || key === 'reload_status')
+      && typeof value === 'string'
+      && (key === 'reload_reason' ? reload_reasons : reload_statuses).has(value)
+    ) {
+      safe[key] = value;
+    } else if (
       REFERENCE_FIELDS.has(key)
       && typeof value === 'string'
       && /^ref_[a-f0-9]{12}$/.test(value)
@@ -137,6 +167,12 @@ function safeMetadata(extra: LogMetadata | undefined): Record<string, SafeLogSca
       key === 'surface'
       && typeof value === 'string'
       && ['chat', 'claude', 'codex', 'health', 'models'].includes(value)
+    ) {
+      safe[key] = value;
+    } else if (
+      key === 'signal'
+      && typeof value === 'string'
+      && ['sigint', 'sigterm'].includes(value)
     ) {
       safe[key] = value;
     }

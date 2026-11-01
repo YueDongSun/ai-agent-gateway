@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { AppConfig, Profile, ProviderConfig, RouteConfig, RouteHop } from './schema.js';
+import { defaultAgentTargets } from '../agents/adapters.js';
 
 /**
  * In-memory mutation helpers. Callers load -> mutate -> save.
@@ -77,8 +78,6 @@ export class ConfigManager {
   /* ---- agents --------------------------------------------------- */
   ensureAgents() {
     if (!this.cfg.agents.length) {
-      // lazy import to avoid cycle
-      const { defaultAgentTargets } = require('../agents/adapters.js') as typeof import('../agents/adapters.js');
       this.cfg.agents = defaultAgentTargets();
     }
     return this.cfg.agents;

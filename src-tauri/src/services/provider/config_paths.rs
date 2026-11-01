@@ -46,7 +46,10 @@ pub(crate) fn resolve(app_type: &str) -> Result<Resolved_config_paths, AppError>
 }
 
 fn failure(code: &str) -> AppError {
-    AppError::Config(format!("client_config_path:{code}"))
+    AppError::Config(format!(
+        "AAG_CLIENT_CONFIG_PATH_{}",
+        code.to_ascii_uppercase()
+    ))
 }
 
 fn validate_spelling(path: &Path) -> Result<(), AppError> {
@@ -76,10 +79,31 @@ fn environment_path(
     };
     let path = PathBuf::from(value);
     validate_spelling(&path)?;
-    if isolated && !path.starts_with(home) {
+    if isolated && !starts_with_home(&path, home) {
         return Ok(None);
     }
     Ok(Some(path))
+}
+
+/// Component-wise containment check. Windows paths are case-insensitive, so
+/// the isolation boundary must fold case there (`config::same_dir`
+/// precedent); `Path::starts_with` alone would silently drop a portable-run
+/// override that only differs by drive-letter or directory case.
+fn starts_with_home(path: &Path, home: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut path_components = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase());
+        home.components().all(|home_component| {
+            path_components.next()
+                == Some(home_component.as_os_str().to_string_lossy().to_lowercase())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(home)
+    }
 }
 
 fn file_exists(path: &Path) -> Result<bool, AppError> {
@@ -140,7 +164,7 @@ fn resolve_with_environment(
                 "copilot" => ("COPILOT_HOME", home.join(".copilot"), &["settings.json"]),
                 "pi" => (
                     "PI_CODING_AGENT_DIR",
-                    home.join(".pi/agent"),
+                    home.join(".pi").join("agent"),
                     &["models.json", "settings.json"],
                 ),
                 _ => (
@@ -161,6 +185,19 @@ fn resolve_with_environment(
             selected_files(
                 names.iter().map(|name| directory.join(name)).collect(),
                 from_environment,
+            )
+        }
+        "cline_cli" => {
+            // Cline resolves providers.json beneath CLINE_DATA_DIR/settings.
+            // AAG gives it a separate data directory so native ~/.cline stays
+            // owned by Cline and existing native credentials remain isolated.
+            let directory = home.join(".cline_cli").join("data").join("settings");
+            selected_files(
+                vec![
+                    directory.join("providers.json"),
+                    directory.join("models.json"),
+                ],
+                false,
             )
         }
         "opencode" | "kilo_cli" | "kilo_vscode" => {
@@ -211,8 +248,9 @@ fn resolve_with_environment(
                 names.iter().map(|name| directory.join(name)).collect();
             // Preserve the existing Kilo compatibility candidate only when the
             // user has not selected a different global configuration root.
+            // Stepwise joins keep the displayed spelling uniform on Windows.
             if is_kilo && !from_environment {
-                candidates.push(home.join(".kilo/config.json"));
+                candidates.push(home.join(".kilo").join("config.json"));
             }
             first_existing(candidates, directory.join(default_name), from_environment)
         }

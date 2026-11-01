@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_STRUCTURED_ERROR_BYTES: usize = 64 * 1024;
+
 /// A chat completion request in canonical OpenAI format.
 ///
 /// `tools` and `tool_choice` are stored as raw `serde_json::Value` arrays
@@ -38,6 +40,14 @@ pub struct ChatCompletionRequest {
     /// OpenAI-compatible wire.
     #[serde(skip)]
     pub source_anthropic_request: Option<serde_json::Value>,
+    /// Original OpenAI Responses request envelope. Internal routing context:
+    /// preserved only for a native Responses upstream and never serialized on
+    /// Chat Completions or Anthropic wires.
+    #[serde(skip)]
+    pub source_responses_request: Option<crate::proxy::responses::ResponsesRequest>,
+    /// Original Gemini body, retained only for a Gemini-native upstream.
+    #[serde(skip)]
+    pub source_gemini_request: Option<serde_json::Value>,
     /// Correlation id assigned at the local HTTP edge. Internal only.
     #[serde(skip)]
     pub request_id: Option<String>,
@@ -48,16 +58,84 @@ pub struct ChatCompletionRequest {
     pub client_credential: Option<Client_credential>,
 }
 
+/// The per-hop wire view of a canonical request: the same JSON with this
+/// hop's upstream model and stream flag applied, and the conversation
+/// payload borrowed rather than copied.
+///
+/// The router dispatches every hop against ONE shared request (see the
+/// `Provider::complete` contract), so the hop-specific fields used to be
+/// applied by serializing the request into a `serde_json::Value`, patching
+/// two keys, and serializing that DOM again. That deep-copied the whole
+/// message payload — base64 images included — on every hop and held the
+/// copy alongside the final bytes. Serializing this view writes the request
+/// body once.
+///
+/// `hop_body_matches_the_canonical_wire_shape` pins the two views to the
+/// same JSON, so a canonical field added without a mirror here fails the
+/// test instead of silently dropping off the wire.
+#[derive(Debug, Serialize)]
+#[allow(non_camel_case_types)] // repo style: snake_case type names are allowed explicitly
+pub struct Hop_body<'a> {
+    /// This hop's upstream model (the `[1M]`-stripped form the caller
+    /// resolved), not the client-requested alias.
+    pub model: &'a str,
+    pub messages: &'a [ChatMessage],
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<&'a [serde_json::Value]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<&'a serde_json::Value>,
+    #[serde(flatten, serialize_with = "serialize_hop_extra")]
+    pub extra: &'a std::collections::HashMap<String, serde_json::Value>,
+    /// Set by streaming hops that do not already carry a caller-supplied
+    /// `stream_options`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<Stream_options>,
+}
+
+fn serialize_hop_extra<S: serde::Serializer>(
+    extra: &&std::collections::HashMap<String, serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    for (key, value) in *extra {
+        if key != "model" && key != "stream" {
+            map.serialize_entry(key, value)?;
+        }
+    }
+    map.end()
+}
+
+/// OpenAI streaming usage accounting (`stream_options.include_usage`).
+#[derive(Debug, Serialize)]
+#[allow(non_camel_case_types)] // repo style: snake_case type names are allowed explicitly
+pub struct Stream_options {
+    pub include_usage: bool,
+}
+
 /// Raw inbound auth header values relayed verbatim to a passthrough
 /// upstream. Never logged, persisted, or serialized — treat the contents
 /// as secret.
 #[derive(Debug, Clone, Default)]
 #[allow(non_camel_case_types)] // repo style: snake_case types are allowed explicitly
 pub struct Client_credential {
+    /// Set only by the trusted HTTP edge when gateway authentication failed
+    /// but loopback passthrough admission succeeded. Never a wire field.
+    pub(crate) passthrough_only: bool,
     /// Raw `authorization` header value verbatim (e.g. `Bearer <oauth>`).
     pub authorization: Option<String>,
     /// Raw `x-api-key` header value verbatim.
     pub x_api_key: Option<String>,
+    /// Raw `anthropic-beta` header value verbatim (the feature-flag list a
+    /// subscription client sends, e.g. `context-1m,...`). Not a credential,
+    /// but relayed verbatim on passthrough hops only so the static-key wire
+    /// format stays byte-identical.
+    pub anthropic_beta: Option<String>,
 }
 
 /// One message in a chat completion request.
@@ -72,13 +150,53 @@ pub struct ChatMessage {
     pub content: serde_json::Value,
     /// OpenAI-style assistant tool invocations: array of
     /// `{id, type, function:{name, arguments}}` objects.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_chat_tool_calls"
+    )]
     pub tool_calls: Option<Vec<serde_json::Value>>,
     /// OpenAI-style `tool` role message id (`role: tool`, `tool_call_id`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Native Gemini call signatures remain in private source envelopes. The
+/// canonical Chat wire must not expose those protocol-specific fields, while
+/// all other provider extensions retain their original values without copies.
+fn serialize_chat_tool_calls<S: serde::Serializer>(
+    calls: &Option<Vec<serde_json::Value>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let Some(calls) = calls else {
+        return serializer.serialize_none();
+    };
+    let mut sequence = serializer.serialize_seq(Some(calls.len()))?;
+    for call in calls {
+        sequence.serialize_element(&Chat_tool_call_wire(call))?;
+    }
+    sequence.end()
+}
+
+#[allow(non_camel_case_types)]
+struct Chat_tool_call_wire<'a>(&'a serde_json::Value);
+
+impl Serialize for Chat_tool_call_wire<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Some(object) = self.0.as_object() else {
+            return self.0.serialize(serializer);
+        };
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in object {
+            if key != "thoughtSignature" && key != "thought_signature" {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
 }
 
 /// Non-streaming chat completion response.
@@ -96,6 +214,13 @@ pub struct OAIChatResponse {
     /// Original Anthropic response body for lossless same-protocol relay.
     #[serde(skip)]
     pub source_anthropic_response: Option<serde_json::Value>,
+    /// Original OpenAI Responses response body for lossless same-protocol
+    /// relay. Never serialized on a Chat Completions wire.
+    #[serde(skip)]
+    pub source_responses_response: Option<serde_json::Value>,
+    /// Original Gemini response, retained only on the Gemini client surface.
+    #[serde(skip)]
+    pub source_gemini_response: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +279,14 @@ pub struct OAIStreamChunk {
     /// Original Anthropic SSE data object for lossless same-protocol relay.
     #[serde(skip)]
     pub source_anthropic_event: Option<serde_json::Value>,
+    /// Original OpenAI Responses SSE frame for lossless same-protocol relay.
+    /// Includes event name, id, and the joined multiline data field. Never
+    /// serialized on a Chat Completions wire.
+    #[serde(skip)]
+    pub source_responses_event: Option<crate::proxy::responses::ResponsesSseEvent>,
+    /// Original Gemini SSE data object. Never serialized on foreign wires.
+    #[serde(skip)]
+    pub source_gemini_event: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +350,12 @@ pub enum UpstreamErrorKind {
     /// "Tool schema not supported by this upstream" response. The router
     /// SHOULD fail over to the next provider.
     ToolCapability,
+    /// A structured rate rejection whose bucket is not known to cover the
+    /// account. Another model on that account may still have capacity.
+    RateLimited,
+    /// An explicit account or plan allowance rejection. Protocol adapters
+    /// sharing that account do not provide independent quota capacity.
+    QuotaExceeded,
 }
 
 /// Error from a provider during request execution.
@@ -229,10 +368,35 @@ pub struct ProviderError {
     pub stage: String,
     pub response_bytes: Option<usize>,
     /// Stable classification for upstream 4xx bodies. `None` means
-    /// unclassified (legacy default — the router treats an unclassified
-    /// 4xx as terminal, matching the doc-comment invariant that
-    /// authentication and malformed-input failures must not be replayed).
+    /// unclassified: ordinary 4xx failures remain terminal rather than
+    /// replaying rejected requests on another supplier.
     pub kind: Option<UpstreamErrorKind>,
+    /// The upstream's own Anthropic-shaped `error.type` token when it is on
+    /// the public allowlist (see [`anthropic_upstream_error_type`]). Relayed
+    /// verbatim on the Anthropic surface so native CLI retry logic keys on
+    /// the documented types; never synthesized for foreign upstreams.
+    pub upstream_error_type: Option<&'static str>,
+}
+
+/// Anthropic's documented error `type` tokens. Only these relay upstream.
+pub(crate) const ANTHROPIC_ERROR_TYPES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "request_too_large",
+    "rate_limit_error",
+    "api_error",
+    "overloaded_error",
+];
+
+/// Extract an allowlisted Anthropic `error.type` from a captured upstream
+/// error body. Unknown spellings and unparseable bodies return `None` — the
+/// surface then maps its own status instead of inventing a type.
+pub fn anthropic_upstream_error_type(body: &str) -> Option<&'static str> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let token = value.get("error")?.get("type")?.as_str()?;
+    ANTHROPIC_ERROR_TYPES.iter().find(|known| **known == token).copied()
 }
 
 impl std::fmt::Display for ProviderError {
@@ -242,13 +406,87 @@ impl std::fmt::Display for ProviderError {
 }
 impl std::error::Error for ProviderError {}
 
+fn default_retriable(status: Option<u16>) -> bool {
+    status.is_none_or(|status| status == 429 || status >= 500)
+}
+
+/// Recognize explicit quota rejections returned as otherwise terminal 4xx.
+/// Only structured error fields participate; messages, request echoes and
+/// unrelated numeric values cannot turn a rejected request into a retry.
+/// MiniMax 2056 is the exhausted five-hour window; 2062 and 2067 are its
+/// documented rate/usage limits. The caller retains the ordinary HTTP policy
+/// when this returns `None`, including terminal authentication failures.
+pub(crate) fn upstream_quota_retriable(status: u16, body: &str) -> Option<bool> {
+    if !matches!(status, 400 | 402 | 403 | 429) || body.len() > MAX_STRUCTURED_ERROR_BYTES {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error").filter(|error| error.is_object());
+    let error_type = error
+        .and_then(|error| error.get("type"))
+        .and_then(serde_json::Value::as_str);
+    let error_code = error
+        .and_then(|error| error.get("code"))
+        .and_then(serde_json::Value::as_str);
+    let auth_rejection = error_type.is_some_and(|kind| {
+        matches!(
+            kind,
+            "authentication_error" | "authorization_error" | "permission_error"
+        )
+    }) || error_code.is_some_and(|code| {
+        matches!(
+            code,
+            "invalid_api_key"
+                | "invalid_token"
+                | "invalid_grant"
+                | "permission_denied"
+                | "access_denied"
+        )
+    });
+    if auth_rejection {
+        return None;
+    }
+    let quota_error = error_type == Some("rate_limit_error")
+        || error_code.is_some_and(|code| {
+            matches!(
+                code,
+                "rate_limit_exceeded"
+                    | "usage_limit_reached"
+                    | "insufficient_quota"
+                    | "quota_exceeded"
+            )
+        });
+    let minimax_quota = value
+        .pointer("/base_resp/status_code")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|code| matches!(code, 2056 | 2062 | 2067));
+    (quota_error || minimax_quota).then_some(true)
+}
+
+/// Require an explicit allowance signal before skipping every model and
+/// protocol sharing the credential. Ordinary 429/RPM/TPM errors and MiniMax
+/// 2062 rate/concurrency limits do not identify an exhausted account bucket.
+fn account_allowance_exhausted(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| matches!(code, "usage_limit_reached" | "insufficient_quota"))
+        || value
+            .pointer("/base_resp/status_code")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|code| matches!(code, 2056 | 2067))
+}
+
 pub fn make_error(
     message: impl Into<String>,
     status: Option<u16>,
     retriable: Option<bool>,
 ) -> ProviderError {
     let msg = message.into();
-    let retr = retriable.unwrap_or_else(|| status.map_or(true, |s| s == 429 || s >= 500));
+    let retr = retriable.unwrap_or_else(|| default_retriable(status));
     let code = stable_error_code(&msg)
         .unwrap_or("provider_error")
         .to_string();
@@ -260,6 +498,7 @@ pub fn make_error(
         stage: "provider".into(),
         response_bytes: None,
         kind: None,
+        upstream_error_type: None,
     }
 }
 
@@ -275,12 +514,12 @@ pub fn make_provider_error(
     ProviderError {
         message: public_error_message(code, status).to_string(),
         status,
-        retriable: retriable
-            .unwrap_or_else(|| status.map_or(true, |value| value == 429 || value >= 500)),
+        retriable: retriable.unwrap_or_else(|| default_retriable(status)),
         code: code.to_string(),
         stage: stage.to_string(),
         response_bytes,
         kind: None,
+        upstream_error_type: None,
     }
 }
 
@@ -309,6 +548,10 @@ pub fn make_provider_error_with_kind(
 ///   mirror auto-heal triggers.
 /// - `Some(UpstreamErrorKind::ToolCapability)` for "tool schema not
 ///   supported by this upstream" responses — the router SHOULD fail over.
+/// - `Some(UpstreamErrorKind::QuotaExceeded)` for a structured allowance
+///   rejection — the router skips other adapters sharing that quota resource.
+/// - `Some(UpstreamErrorKind::RateLimited)` for a structured rate rejection
+///   whose account scope is unknown — other models remain eligible.
 /// - `None` otherwise; the router treats an unclassified 4xx as terminal.
 ///
 /// Body inspection order:
@@ -329,10 +572,11 @@ pub fn classify_upstream_4xx(status: u16, body: &str) -> Option<UpstreamErrorKin
     // JSON-first: the structured fields are more reliable than the
     // free-form message, and `error.code == "invalid_grant"` is the
     // canonical OAuth refresh-token failure code.
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(head) {
-        if let Some(kind) = classify_from_json(&value) {
-            return Some(kind);
-        }
+    let structured_kind = serde_json::from_str::<serde_json::Value>(head)
+        .ok()
+        .and_then(|value| classify_from_json(&value));
+    if structured_kind == Some(UpstreamErrorKind::AuthExpired) {
+        return structured_kind;
     }
 
     // Substring fallback (non-JSON bodies, older Codex error pages, etc.).
@@ -355,6 +599,16 @@ pub fn classify_upstream_4xx(status: u16, body: &str) -> Option<UpstreamErrorKin
         if lower.contains(keyword) {
             return Some(UpstreamErrorKind::AuthExpired);
         }
+    }
+    if upstream_quota_retriable(status, body) == Some(true) {
+        return Some(if account_allowance_exhausted(body) {
+            UpstreamErrorKind::QuotaExceeded
+        } else {
+            UpstreamErrorKind::RateLimited
+        });
+    }
+    if structured_kind.is_some() {
+        return structured_kind;
     }
     const TOOL_KEYWORDS: &[&str] = &[
         "unsupported tool",
@@ -424,6 +678,10 @@ fn classify_from_json(value: &serde_json::Value) -> Option<UpstreamErrorKind> {
 pub fn public_error_message(code: &str, status: Option<u16>) -> &'static str {
     match code {
         "no_route" => "No route is available for the requested model.",
+        "model_alias_no_candidates" => "No eligible model can satisfy the requested routing tier.",
+        "model_precise_unavailable" => {
+            "No eligible provider is available for the requested exact model."
+        }
         "upstream_http_error" => match status {
             Some(429) => "The upstream provider is rate limited.",
             Some(400..=499) => "The upstream provider rejected the request.",
@@ -436,6 +694,17 @@ pub fn public_error_message(code: &str, status: Option<u16>) -> &'static str {
         }
         "all_hops_exhausted" => "No configured provider completed the request.",
         "invalid_request" => "The request is invalid.",
+        "responses_state_unsupported" => {
+            "The request contains Responses state this upstream cannot preserve."
+        }
+        "responses_feature_unsupported" => {
+            "The request uses a Responses feature this upstream cannot represent."
+        }
+        "responses_invalid_request" => "The Responses request is invalid.",
+        "anthropic_feature_unsupported" => {
+            "The request uses a feature this Anthropic upstream cannot represent."
+        }
+        "anthropic_invalid_request" => "The Anthropic request is invalid.",
         _ => "The gateway could not complete the request.",
     }
 }
@@ -499,18 +768,27 @@ pub fn stream_error_chunk(_model: &str, status: u16, kind: &str) -> OAIStreamChu
         .into_iter()
         .collect(),
         source_anthropic_event: None,
+        source_responses_event: None,
+        source_gemini_event: None,
     }
 }
 
 pub fn stream_chunk_error(chunk: &OAIStreamChunk) -> Option<ProviderError> {
     chunk.extra.get("error").map(|error| {
         let status = stream_error_status(error);
-        make_provider_error(
+        let body = if error.get("error").is_some() || error.get("base_resp").is_some() {
+            serde_json::to_string(error)
+        } else {
+            serde_json::to_string(&serde_json::json!({"error":error}))
+        }
+        .unwrap_or_default();
+        make_provider_error_with_kind(
             "upstream_stream_error",
             "stream_event",
             Some(status),
+            upstream_quota_retriable(status, &body),
             None,
-            None,
+            classify_upstream_4xx(status, &body),
         )
     })
 }
@@ -645,5 +923,286 @@ mod classify_tests {
         body.push_str(&"x".repeat(9000));
         body.push_str(" invalid function ");
         assert_eq!(classify_upstream_4xx(400, &body), None);
+    }
+}
+
+#[cfg(test)]
+mod retriable_tests {
+    use super::{
+        classify_upstream_4xx, default_retriable, make_provider_error, upstream_quota_retriable,
+        ProviderError, UpstreamErrorKind,
+    };
+
+    #[test]
+    fn structured_quota_rejections_allow_another_configured_supplier() {
+        for status in [400, 402, 403, 429] {
+            for code in [2056, 2062, 2067] {
+                let body = serde_json::json!({"base_resp":{"status_code":code}}).to_string();
+                assert_eq!(upstream_quota_retriable(status, &body), Some(true));
+                assert_eq!(
+                    classify_upstream_4xx(status, &body),
+                    Some(if code == 2062 {
+                        UpstreamErrorKind::RateLimited
+                    } else {
+                        UpstreamErrorKind::QuotaExceeded
+                    })
+                );
+            }
+            for (body, expected) in [
+                (
+                    r#"{"error":{"type":"rate_limit_error"}}"#,
+                    UpstreamErrorKind::RateLimited,
+                ),
+                (
+                    r#"{"error":{"code":"usage_limit_reached"}}"#,
+                    UpstreamErrorKind::QuotaExceeded,
+                ),
+                (
+                    r#"{"error":{"code":"rate_limit_exceeded"}}"#,
+                    UpstreamErrorKind::RateLimited,
+                ),
+                (
+                    r#"{"error":{"code":"quota_exceeded"}}"#,
+                    UpstreamErrorKind::RateLimited,
+                ),
+                (
+                    r#"{"error":{"code":"insufficient_quota"}}"#,
+                    UpstreamErrorKind::QuotaExceeded,
+                ),
+            ] {
+                assert_eq!(upstream_quota_retriable(status, body), Some(true));
+                assert_eq!(classify_upstream_4xx(status, body), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn structured_quota_recognition_keeps_auth_and_input_rejections_terminal() {
+        for (status, body) in [
+            (401, r#"{"base_resp":{"status_code":2056}}"#),
+            (
+                403,
+                r#"{"error":{"type":"authentication_error","code":"usage_limit_reached"}}"#,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"rate_limit_error","code":"invalid_api_key"}}"#,
+            ),
+            (
+                400,
+                r#"{"base_resp":{"status_code":2013,"status_msg":"usage limit exceeded"}}"#,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"usage_limit_reached rate_limit_error 2056"}}"#,
+            ),
+            (
+                400,
+                r#"{"request":{"base_resp":{"status_code":2056},"error":{"type":"rate_limit_error"}}}"#,
+            ),
+            (404, r#"{"error":{"type":"rate_limit_error"}}"#),
+            (200, r#"{"base_resp":{"status_code":2056}}"#),
+            (400, "usage_limit_reached"),
+        ] {
+            assert_eq!(
+                upstream_quota_retriable(status, body),
+                None,
+                "{status}: {body}"
+            );
+            assert_ne!(
+                classify_upstream_4xx(status, body),
+                Some(UpstreamErrorKind::QuotaExceeded)
+            );
+            let error = make_provider_error(
+                "upstream_http_error",
+                "response_status",
+                Some(status),
+                upstream_quota_retriable(status, body),
+                None,
+            );
+            assert!(!error.retriable);
+        }
+    }
+
+    #[test]
+    fn ordinary_4xx_failures_stay_terminal() {
+        for status in [400, 401, 402, 403, 404, 409, 413, 415, 422] {
+            assert!(
+                !default_retriable(Some(status)),
+                "{status} must not be replayed on another supplier"
+            );
+        }
+        // Rate limits and upstream outages always fail over.
+        assert!(default_retriable(Some(429)));
+        assert!(default_retriable(Some(500)));
+        assert!(default_retriable(Some(503)));
+        // A transport error carries no status and fails over.
+        assert!(default_retriable(None));
+    }
+
+    /// The default applies only when the caller did not decide; an explicit
+    /// decision always wins.
+    #[test]
+    fn explicit_retry_decisions_win_over_the_default() {
+        let forced: ProviderError = make_provider_error(
+            "upstream_http_error",
+            "response_status",
+            Some(400),
+            Some(true),
+            None,
+        );
+        assert!(forced.retriable, "an explicit decision is never overridden");
+        let forced_off: ProviderError = make_provider_error(
+            "upstream_http_error",
+            "response_status",
+            Some(503),
+            Some(false),
+            None,
+        );
+        assert!(!forced_off.retriable);
+        // Without an explicit decision the status decides.
+        let defaulted: ProviderError = make_provider_error(
+            "upstream_http_error",
+            "response_status",
+            Some(402),
+            None,
+            None,
+        );
+        assert!(!defaulted.retriable);
+        assert_eq!(defaulted.status, Some(402));
+    }
+}
+
+#[cfg(test)]
+mod hop_body_tests {
+    use super::{ChatCompletionRequest, ChatMessage, Client_credential, Hop_body, Stream_options};
+
+    #[test]
+    fn canonical_chat_wire_excludes_only_native_gemini_call_signatures() {
+        let message = ChatMessage {
+            role: "assistant".into(),
+            content: serde_json::Value::Null,
+            tool_calls: Some(vec![serde_json::json!({
+                "id":"call_fixture","type":"function","function":{"name":"lookup","arguments":"{}"},
+                "thoughtSignature":"native_signature","thought_signature":"native_sdk_signature",
+                "vendor_extension":{"preserve":true}
+            })]),
+            tool_call_id: None,
+            extra: Default::default(),
+        };
+        let request = ChatCompletionRequest {
+            messages: vec![message],
+            source_gemini_request: Some(serde_json::json!({"opaque":"request"})),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        let call = &wire["messages"][0]["tool_calls"][0];
+        assert!(call.get("thoughtSignature").is_none());
+        assert!(call.get("thought_signature").is_none());
+        assert_eq!(call["vendor_extension"]["preserve"], true);
+        assert_eq!(call["id"], "call_fixture");
+        assert!(wire.get("source_gemini_request").is_none());
+        assert_eq!(
+            request.messages[0].tool_calls.as_ref().unwrap()[0]["thoughtSignature"],
+            "native_signature"
+        );
+    }
+
+    /// The hop view must serialize to exactly the canonical request, field
+    /// for field. It carries the same payload by reference and adds only
+    /// the per-hop `model` / `stream` / `stream_options`; a canonical field
+    /// that is not mirrored here would silently stop reaching the wire, so
+    /// this comparison is the drift guard for that mirror.
+    #[test]
+    fn hop_body_matches_the_canonical_wire_shape() {
+        let mut request = ChatCompletionRequest {
+            model: "client-alias".into(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: serde_json::json!("be brief"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    extra: Default::default(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: serde_json::json!([
+                        {"type": "text", "text": "hi"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ]),
+                    tool_calls: Some(vec![serde_json::json!({
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    })]),
+                    tool_call_id: Some("call_1".into()),
+                    extra: [("name".to_string(), serde_json::json!("assistant"))]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+            stream: true,
+            temperature: Some(0.25),
+            max_tokens: Some(256),
+            tools: Some(vec![serde_json::json!({
+                "type": "function",
+                "function": {"name": "lookup"},
+            })]),
+            tool_choice: Some(serde_json::json!("auto")),
+            extra: [
+                ("top_p".to_string(), serde_json::json!(0.9)),
+                ("reasoning_effort".to_string(), serde_json::json!("high")),
+            ]
+            .into_iter()
+            .collect(),
+            // Internal routing context: never part of either wire shape.
+            source_anthropic_request: Some(serde_json::json!({"model": "claude"})),
+            source_responses_request: None,
+            source_gemini_request: None,
+            request_id: Some("req_1".into()),
+            client_credential: Some(Client_credential::default()),
+        };
+        // Every optional wire field is populated above; assert that, so a
+        // future field added as `Option` cannot silently go uncovered here.
+        assert!(request.tools.is_some() && request.tool_choice.is_some());
+
+        let canonical = serde_json::to_value(&request).expect("canonical serializes");
+        let hop = Hop_body {
+            model: &request.model,
+            messages: &request.messages,
+            stream: request.stream,
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            tools: request.tools.as_deref(),
+            tool_choice: request.tool_choice.as_ref(),
+            extra: &request.extra,
+            stream_options: None,
+        };
+        let mirrored = serde_json::to_value(hop).expect("hop body serializes");
+
+        assert_eq!(mirrored, canonical);
+        // The per-hop overrides are the ONLY intended difference.
+        request.stream = false;
+        let overridden = serde_json::to_value(Hop_body {
+            model: "upstream-model",
+            messages: &request.messages,
+            stream: true,
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            tools: request.tools.as_deref(),
+            tool_choice: request.tool_choice.as_ref(),
+            extra: &request.extra,
+            stream_options: Some(Stream_options {
+                include_usage: true,
+            }),
+        })
+        .expect("hop body serializes");
+        assert_eq!(overridden["model"], serde_json::json!("upstream-model"));
+        assert_eq!(overridden["stream"], serde_json::json!(true));
+        assert_eq!(
+            overridden["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
     }
 }

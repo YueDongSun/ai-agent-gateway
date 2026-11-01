@@ -1,0 +1,208 @@
+/* Usage & cost dashboard (usage_page.tsx). Mirrors the suppliers page
+ * visual language: eyebrow headings, Georgia stat numerals, bordered
+ * elevated cards, shared :root tokens from styles.css. */
+
+.usage_page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 12px 0 48px;
+  display: grid;
+  gap: 18px;
+}
+
+.usage_heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.usage_heading h2 {
+  margin: 2px 0 4px;
+}
+
+.usage_eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--fg-muted);
+  font-weight: 650;
+}
+
+.usage_muted {
+  color: var(--fg-muted);
+  line-height: 1.7;
+  margin: 0;
+}
+
+.usage_row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.usage_segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  overflow: hidden;
+}
+
+.usage_segmented button {
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.usage_segmented button + button {
+  border-left: 1px solid var(--border);
+}
+
+.usage_segmented button.active {
+  background: var(--accent-bg);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.usage_app_filter {
+  width: auto;
+  min-width: 120px;
+}
+
+.usage_error {
+  border: 1px solid var(--danger);
+  background: var(--danger-bg, transparent);
+  border-radius: 9px;
+  padding: 12px 15px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.usage_notice {
+  border: 1px solid var(--border);
+  background: var(--accent-bg);
+  border-radius: 9px;
+  padding: 12px 15px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.usage_empty {
+  text-align: center;
+  color: var(--fg-muted);
+  padding: 32px 24px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  margin: 0;
+}
+
+.usage_summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+.usage_stat {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 18px 20px;
+  min-width: 0;
+}
+
+.usage_stat + .usage_stat {
+  border-left: 1px solid var(--border);
+}
+
+.usage_stat strong {
+  font: 400 28px Georgia, serif;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage_stat_label {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.usage_stat_detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.usage_tables {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.usage_table_card {
+  min-width: 0;
+}
+
+.usage_table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.usage_table th {
+  text-align: left;
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage_table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage_table tr:last-child td {
+  border-bottom: 0;
+}
+
+.usage_cell_name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.usage_prune_row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.usage_prune_row h3 {
+  margin: 0 0 4px;
+}
+
+@media (max-width: 860px) {
+  .usage_summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .usage_stat:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .usage_stat:nth-child(4) {
+    border-top: 1px solid var(--border);
+  }
+
+  .usage_tables {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

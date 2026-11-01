@@ -1,7 +1,7 @@
 //! Tauri commands for local product diagnostics.
 
 use crate::database::Database;
-use crate::diagnostics::{self, Diagnostics_runtime, Diagnostics_state};
+use crate::diagnostics::{self, Diagnostics_runtime, Diagnostics_state, Request_event};
 
 #[tauri::command]
 pub(crate) fn diagnostics_get(
@@ -50,4 +50,15 @@ pub(crate) fn diagnostics_record_frontend_error(
     correlation_id: String,
 ) {
     diagnostics::record_frontend_error(&kind, message_chars, stack_chars, &correlation_id);
+}
+
+#[tauri::command]
+pub(crate) fn diagnostics_request_timeline() -> Result<Vec<Request_event>, String> {
+    Ok(diagnostics::request_timeline())
+}
+
+#[tauri::command]
+pub(crate) fn diagnostics_clear_request_timeline() -> Result<(), String> {
+    diagnostics::clear_request_timeline();
+    Ok(())
 }

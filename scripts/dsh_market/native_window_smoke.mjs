@@ -11,7 +11,19 @@ import { cdp_client } from '../ui_smoke/cdp_client.mjs';
 import { cdp_timeout_ms, read_cdp_endpoint } from '../ui_smoke/cdp_endpoint.mjs';
 
 if (process.platform !== 'win32') throw new Error('native_market_test_requires_windows');
-const process_count = Number(execFileSync(join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', "@(Get-Process 'ai-agent-gateway' -ErrorAction SilentlyContinue).Count"], { encoding: 'utf8', windowsHide: true }).trim());
+const powershell = join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
+// Elevated hosts can never open the CDP endpoint: per Microsoft's WebView2
+// security rules, an elevated host process ignores WEBVIEW2_* environment
+// overrides AND HKCU policy overrides (only HKLM policy or flags set through
+// the in-app WebView2 API are honored). Fail fast with the reason instead of
+// timing out after 45 seconds.
+const elevated = /True/i.test(execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+  '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'],
+  { encoding: 'utf8', windowsHide: true }).trim());
+if (elevated) {
+  throw new Error('native_market_test_requires_nonelevated_host: an elevated host ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, so the debug endpoint cannot open; rerun from a standard (non-admin) shell');
+}
+const process_count = Number(execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', "@(Get-Process 'ai-agent-gateway' -ErrorAction SilentlyContinue).Count"], { encoding: 'utf8', windowsHide: true }).trim());
 if (process_count !== 0) throw new Error('close_existing_aag_before_native_acceptance');
 const expected_count = JSON.parse(await readFile('shared/dsh_market_catalog.json', 'utf8')).entry_count;
 const binary = resolve(process.argv[2] || 'src-tauri/target/debug/ai-agent-gateway.exe');

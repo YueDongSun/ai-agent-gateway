@@ -1,5 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export interface Codex_reasoning_model {
+  model: string;
+  supportedEfforts: string[];
+  isDefault?: boolean;
+}
+
+export function codex_reasoning_models(provider_id?: string): Promise<Codex_reasoning_model[]> {
+  return invoke('codex_reasoning_models', { providerId: provider_id ?? null });
+}
+
 export interface CodexCliStatus {
   isolationEnabled: boolean;
   configDir: string;
@@ -30,6 +40,9 @@ export interface CodexDesktopResult {
   codexHome: string;
   codexBinary: string;
   mirror: boolean;
+  /** Explicit AAG Desktop preparation selects AAG in the isolated home. */
+  mirrorMode?: 'exclusive';
+  mirrorModeChanged?: boolean;
 }
 
 /** Read a device-level setting (app_meta table). */

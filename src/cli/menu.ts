@@ -4,9 +4,10 @@ import ora from 'ora';
 import { loadConfig, saveConfig, getConfigPath } from '../config/store.js';
 import { ConfigManager } from '../config/manager.js';
 import { Switcher } from '../agents/switcher.js';
-import { createGatewayApp } from '../gateway/server.js';
+import { createGatewayApp, install_shutdown_handlers } from '../gateway/server.js';
 import { detectInstalledAgents, defaultAgentTargets } from '../agents/adapters.js';
 import { logger } from '../util/log.js';
+import { parse_port_input } from '../util/parse_port.js';
 import type { AgentId } from '../config/schema.js';
 
 const { select, input, confirm, password, checkbox } = prompts;
@@ -50,7 +51,8 @@ async function startGateway() {
   const cfg = loadConfig();
   const { start } = createGatewayApp(cfg);
   console.log(chalk.green(`\n  Starting gateway on ${cfg.gateway.host}:${cfg.gateway.port} ...\n`));
-  start();
+  const server = start();
+  install_shutdown_handlers(server);
   // keep process alive
   await new Promise(() => {});
 }
@@ -166,7 +168,8 @@ async function manageProviders() {
         { name: 'Mock (no key needed)', value: 'mock' as const },
       ],
     });
-    const name = await input({ message: 'Display name:' });
+    const name = (await input({ message: 'Display name:' })).trim();
+    if (!name) { console.log(chalk.yellow('  display name required')); return; }
     const id = await input({ message: 'ID (optional):', default: '' });
     const baseURL = await input({
       message: 'Base URL:',
@@ -286,12 +289,19 @@ async function manageProfiles() {
 
 async function editSettings() {
   const cfg = loadConfig();
-  const host = await input({ message: 'Host:', default: cfg.gateway.host });
-  const port = await input({ message: 'Port:', default: String(cfg.gateway.port) });
+  const host = (await input({ message: 'Host:', default: cfg.gateway.host })).trim();
+  const port_raw = await input({ message: 'Port:', default: String(cfg.gateway.port) });
+  // setGateway bypasses AppConfig.parse; an unvalidated NaN would be
+  // serialized as null and make the saved config unparsable on next load.
+  const port = parse_port_input(port_raw);
+  if (!host || port === null) {
+    console.log(chalk.red('  ✗ host must be non-empty; port must be an integer between 1 and 65535'));
+    return;
+  }
   const authToken = await input({ message: 'Auth token (empty=none):', default: cfg.gateway.authToken });
   const logLevel = await select({ message: 'Log level', choices: (['debug', 'info', 'warn', 'error'] as const).map((v) => ({ name: v, value: v })), default: cfg.gateway.logLevel });
   const mgr = new ConfigManager(cfg);
-  mgr.setGateway({ host, port: parseInt(port, 10), authToken, logLevel });
+  mgr.setGateway({ host, port, authToken, logLevel });
   saveConfig(cfg);
   console.log(chalk.green('  ✓ settings saved'));
 }
@@ -329,7 +339,6 @@ async function runMockTest() {
     if (stream) {
       spin.succeed('streaming');
       const decoder = new TextDecoder();
-      let full = '';
       for await (const chunk of res.body as any) {
         const text = decoder.decode(chunk as Uint8Array);
         for (const line of text.split('\n')) {
@@ -339,7 +348,7 @@ async function runMockTest() {
           try {
             const obj = JSON.parse(d);
             const delta = obj.choices?.[0]?.delta?.content;
-            if (delta) { process.stdout.write(delta); full += delta; }
+            if (delta) process.stdout.write(delta);
           } catch {}
         }
       }

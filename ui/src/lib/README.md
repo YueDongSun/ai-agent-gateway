@@ -8,7 +8,10 @@ in-browser mock backend used by the demo.
 
 - [`api/`](api/README.md) — one typed wrapper per Tauri command and the
   shared DTO types. Frontend never calls `invoke` directly.
-- [`appPages.ts`](appPages.ts) — `AppPageConfig` per app. Drives the
+- [`client_apps.ts`](client_apps.ts) — lightweight client labels/order for navigation.
+- [`api/client_router_plan.ts`](api/client_router_plan.ts) — current-configuration
+  model DTO; `client_router_models.ts` projects only configured selections.
+- [`appPages.ts`](appPages.ts) — supplier-owned `AppPageConfig` per managed client. Drives the
   fields the modal renders, the failover chain, the gateway card, the
   cc-switch upstream card, and the launchers. Hidden apps (e.g. `pi`) get
   `enabled: false`; `APP_PAGE_ORDER` filters them out of the AppSwitcher.
@@ -19,12 +22,21 @@ in-browser mock backend used by the demo.
 - [`ctx.ts`](ctx.ts) — global `I18nCtx` provider. Bundles locale, theme
   override, and the resolved theme into one context so pages can subscribe
   once.
+- [`supplier_discovery_text.ts`](supplier_discovery_text.ts) — pure display
+  mapping for discovery result/reason codes. Uses the supplied translator,
+  preserves backend records, and never echoes unknown discovery details.
 - [`mock/`](mock/README.md) — synthetic IPC backend installed by the
   browser demo. Demo-only.
 - [`theme.ts`](theme.ts) — `useTheme()` hook. Reads / writes
   `aag.theme` in `localStorage`, follows the OS preference when the
   override is `auto`, applies the resolved theme to `<html>` via
-  `data-theme`.
+  `data-theme`. `index.html` resolves the same saved override before first
+  paint so the palette never flashes.
+- [`status_surface.ts`](status_surface.ts) — pure color helpers
+  (`parse_color`, `blend_rgb`, `contrast_ratio`, `resolve_status_surface`)
+  behind the header's bounded page-color echo.
+- [`workspace_routes.ts`](workspace_routes.ts) — the allowed workspace views and
+  `parse_workspace_route`, which maps `#/<view>` to a destination or `null`.
 
 ## Key contracts
 

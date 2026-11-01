@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { execute_plan, macos_group_is_inactive, run_check, stop_owned_child } from './runner.mjs';
+import { cleanup_path_is_owned, execute_plan, macos_group_is_inactive, run_check, stop_owned_child } from './runner.mjs';
 import { verification_plan } from './feature_catalog.mjs';
 
 const fixture_preflight = async () => ({ status: 'passed', checks: [] });
@@ -53,6 +53,116 @@ test('orchestrator isolates config, strips live DB opt-in, fails fast, and remov
   assert.equal(report.command_evidence, 'foreground_exit_only');
   assert.equal(report.descendant_cleanup, 'not_verified');
 });
+test('cleanup path ownership requires the canonical parent and generated prefix', () => {
+  const temporary_root = resolve(tmpdir());
+  assert.equal(cleanup_path_is_owned(join(temporary_root, 'aag_feature_verify_fixture'), temporary_root), true);
+  assert.equal(cleanup_path_is_owned(join(temporary_root, 'nested', 'aag_feature_verify_fixture'), temporary_root), false);
+  assert.equal(cleanup_path_is_owned(join(temporary_root, 'unowned_fixture'), temporary_root), false);
+});
+
+test('a passing check with unconfirmed foreground exit retains state and fails the plan', async () => {
+  let owned_directory;
+  try {
+    const report = await execute_fixture_plan(verification_plan('node'), { root: process.cwd(), run: async (check, context) => {
+      owned_directory = dirname(context.env.AAG_HOME_DIR);
+      return { status: 'passed', exit_code: 0, duration_ms: 1, foreground_exit: 'not_confirmed' };
+    } });
+    assert.equal(report.status, 'cleanup_failed');
+    assert.equal(report.runtime_state, 'retained');
+    assert.equal(report.retained_state_id, basename(owned_directory));
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].status, 'cleanup_failed');
+    assert.equal(existsSync(owned_directory), true);
+  } finally {
+    if (owned_directory) await remove_owned_fixture(owned_directory);
+  }
+});
+
+test('a throwing check runner retains its receipt and runtime state', async () => {
+  let owned_directory;
+  try {
+    const report = await execute_fixture_plan(verification_plan('node'), { root: process.cwd(), run: async (check, context) => {
+      owned_directory = dirname(context.env.AAG_HOME_DIR);
+      throw new Error('fixture runner failure');
+    } });
+    assert.equal(report.status, 'cleanup_failed');
+    assert.equal(report.runtime_state, 'retained');
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].error_code, 'AAG_CHECK_RUNNER_FAILED');
+    assert.equal(existsSync(owned_directory), true);
+  } finally {
+    if (owned_directory) await remove_owned_fixture(owned_directory);
+  }
+});
+
+test('final removal failure cannot leave a passing plan green', async () => {
+  let owned_directory;
+  try {
+    const report = await execute_fixture_plan(verification_plan('node'), {
+      root: process.cwd(),
+      run: async (check, context) => {
+        owned_directory = dirname(context.env.AAG_HOME_DIR);
+        return { status: 'passed', exit_code: 0, duration_ms: 1, foreground_exit: 'confirmed' };
+      },
+      remove: async () => { throw Object.assign(new Error('fixture locked directory'), { code: 'EBUSY' }); },
+    });
+    assert.equal(report.status, 'cleanup_failed');
+    assert.equal(report.runtime_state, 'retained');
+    assert.equal(report.retained_state_id, basename(owned_directory));
+    assert.equal(report.results.every((result) => result.status === 'passed'), true);
+    assert.equal(existsSync(owned_directory), true);
+  } finally {
+    if (owned_directory) await remove_owned_fixture(owned_directory);
+  }
+});
+
+test('child checks cannot inherit database or live-probe opt-ins', async () => {
+  const names = ['AAG_TEST_CCSWITCH_DB', 'AAG_MODEL_DISCOVERY_PROBE', 'AAG_LIVE_CANARY_MODEL'];
+  const original_environment = names.map((name) => [name, process.env[name]]);
+  let child_environment;
+  try {
+    for (const name of names) process.env[name] = 'fixture_opt_in';
+    const report = await execute_fixture_plan(verification_plan('node'), { root: process.cwd(), run: async (check, context) => {
+      child_environment = context.env;
+      return { status: 'passed', exit_code: 0, duration_ms: 1, foreground_exit: 'confirmed' };
+    } });
+    assert.equal(report.status, 'passed');
+    for (const name of names) {
+      assert.equal(child_environment[name], undefined, `${name} reached child checks`);
+      assert.equal(process.env[name], 'fixture_opt_in');
+    }
+  } finally {
+    for (const [name, value] of original_environment) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('Windows case aliases cannot preserve opt-ins or shadow disposable paths', { skip: process.platform !== 'win32' }, async () => {
+  const controlled_names = ['AAG_TEST_CCSWITCH_DB', 'AAG_MODEL_DISCOVERY_PROBE', 'AAG_LIVE_CANARY_MODEL',
+    'AAG_CONFIG_DIR', 'AAG_HOME_DIR', 'TMPDIR', 'TMP', 'TEMP'];
+  const is_controlled = (name) => controlled_names.includes(name.toUpperCase());
+  const original_environment = Object.entries(process.env).filter(([name]) => is_controlled(name));
+  const temporary_directory = await realpath(tmpdir());
+  let child_environment;
+  try {
+    for (const name of Object.keys(process.env).filter(is_controlled)) delete process.env[name];
+    for (const name of controlled_names) process.env[name.toLowerCase()] = 'fixture_case_alias';
+    const report = await execute_fixture_plan(verification_plan('node'), { root: process.cwd(), temporary_directory, run: async (check, context) => {
+      child_environment = context.env;
+      return { status: 'passed', exit_code: 0, duration_ms: 1, foreground_exit: 'confirmed' };
+    } });
+    assert.equal(report.status, 'passed');
+    assert.equal(report.runtime_state, 'removed');
+    const controlled_keys = Object.keys(child_environment).filter(is_controlled).sort();
+    assert.deepEqual(controlled_keys, ['AAG_CONFIG_DIR', 'AAG_HOME_DIR', 'TEMP', 'TMP', 'TMPDIR']);
+  } finally {
+    for (const name of Object.keys(process.env).filter(is_controlled)) delete process.env[name];
+    for (const [name, value] of original_environment) process.env[name] = value;
+  }
+});
+
 test('pre-cancelled plan never executes a check', async () => {
   const controller = new AbortController(); controller.abort();
   const report = await execute_fixture_plan(verification_plan('all'), { root: process.cwd(), signal: controller.signal, run: () => { throw new Error('must not run'); } });

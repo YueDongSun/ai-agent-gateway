@@ -50,6 +50,8 @@ external evidence separately.
 
 ## Known contracts
 
-- Rust routing snapshots configuration at `proxy_start`.
+- Rust routing hot-applies provider, route, supplier, model, pin, and catalog
+  changes to new requests; in-flight requests keep their admitted snapshot.
+  Listener host/port and gateway-auth changes still require a restart.
 - Streaming failover probes the first chunk only.
 - The current release is the unsigned `v0.2.0` preview.

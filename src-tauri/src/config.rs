@@ -32,11 +32,14 @@ pub fn get_app_config_dir() -> PathBuf {
         .join(".aag")
 }
 
+/// Whether the config tree at `AAG_CONFIG_DIR`/`~/.aag` is owned by AAG.
+/// Always true: the tree holds AAG's private database and backups wherever
+/// it lives, so it is created/hardened through the managed-private policy.
+/// (The old external treatment refused every write on Windows hosts whose
+/// parent tree carries inherited group-writer ACEs — Node's `mkdir(0700)`
+/// cannot strip Windows inheritance, so the automatic gate hit this too.)
 pub(crate) fn app_config_dir_is_managed_default() -> bool {
-    std::env::var("AAG_CONFIG_DIR")
-        .ok()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
+    true
 }
 
 /// Return the database file path (`~/.aag/aag.db`).
@@ -306,7 +309,6 @@ pub fn get_antigravity_settings_path() -> PathBuf {
 ///
 /// `AAG_HOME_DIR` overrides the home dir for testing/portable installs
 /// and takes priority over native APPDATA/XDG_CONFIG_HOME overrides.
-#[allow(dead_code)]
 pub fn get_vscode_user_settings_path() -> PathBuf {
     platform_paths::desktop_config_root().join("Code/User/settings.json")
 }
@@ -329,14 +331,31 @@ pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppErr
 }
 
 /// Read and parse a JSON file. Returns `Ok(None)` if the file doesn't exist.
-#[allow(dead_code)]
 pub fn read_json_file(path: &Path) -> Result<Option<Value>, AppError> {
     if !path.exists() {
         return Ok(None);
     }
     let raw = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
-    let value: Value = serde_json::from_str(&raw)?;
+    // Windows editors prepend a UTF-8 BOM; the TOML read path strips it
+    // explicitly and JSON deserves the same tolerance.
+    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}'))?;
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod read_json_file_tests {
+    use super::*;
+
+    #[test]
+    fn read_json_file_strips_a_utf8_bom() {
+        let dir = std::env::temp_dir().join("aag_read_json_bom_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "\u{feff}{\"theme\":\"dark\"}").unwrap();
+        let value = read_json_file(&path).unwrap().expect("bom json must parse");
+        assert_eq!(value["theme"], "dark");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Read a text file. Returns `Ok(None)` if the file doesn't exist.

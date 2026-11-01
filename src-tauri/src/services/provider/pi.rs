@@ -92,7 +92,7 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
         .unwrap_or_else(|| vec![json!({ "id": model })]);
 
     // ── models.json: upsert the provider into the `providers` map ──
-    let mut models_doc = read_json_file(&models_path)?.unwrap_or_else(|| json!({}));
+    let mut models_doc = read_json_file(models_path)?.unwrap_or_else(|| json!({}));
     let doc_obj = models_doc
         .as_object_mut()
         .ok_or_else(|| AppError::Config("~/.pi/agent/models.json must be a JSON object".into()))?;
@@ -113,7 +113,7 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
     );
 
     // Validate both destination documents before changing either file.
-    let mut settings_doc = read_json_file(&settings_path)?.unwrap_or_else(|| json!({}));
+    let mut settings_doc = read_json_file(settings_path)?.unwrap_or_else(|| json!({}));
     let settings_obj = settings_doc
         .as_object_mut()
         .ok_or_else(|| AppError::Config("pi settings.json must be a JSON object".into()))?;

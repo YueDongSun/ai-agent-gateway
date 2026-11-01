@@ -27,11 +27,33 @@ src-tauri/WixTools/
 # port Vite actually binds to. Safe to delete; regenerated on next `npm run tauri:dev`.
 src-tauri/tauri.dev.json
 
+# Packaged installer / update bundles (normally under src-tauri/target/, which is
+# already ignored; these catch bundles copied to the repo root or another path)
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.exe
+*.dmg
+*.AppImage
+*.appimage
+*.deb
+*.rpm
+*.apk
+*.snap
+*.blockmap
+*.nsis
+
 # Generated JS/TS artifacts
+# NOTE: do not add a bare *.d.ts rule here. Hand-written declaration files
+# (e.g. ui/src/vite-env.d.ts, src/types/globals.d.ts) must stay trackable;
+# only generated declaration maps and source maps are ignored. Compiled
+# output lands under dist/, which is already ignored above.
 *.tsbuildinfo
-*.d.ts
 *.d.ts.map
 *.js.map
+*.css.map
 *.sourcemaps
 
 # Environment files and authentication helpers
@@ -65,6 +87,26 @@ secrets.json
 service_account.json
 **/service_account.json
 
+# Agent-tool runtime state (promoted from .git/info/exclude so a fresh clone
+# and the privacy export are self-contained). Do NOT widen this to the whole
+# .claude/ or .kilo/ directory — tracked agent skills and configs live there.
+.kilo/worktrees/
+.kilocode/
+.kilo/setup-script*
+.kilocode/setup-script*
+.kilo/agent-manager.json
+.kilocode/agent-manager.json
+**/.claude/worktrees/
+**/.claude/checkpoints/
+**/.claude/mailbox/
+**/.claude/routines/.state/
+**/.claude/scheduled_tasks.json
+**/.claude/scheduled_tasks.lock
+**/.claude/agent-registry.json
+**/.claude/agent-memory-local
+**/.claude/assistant-daemon-state.json
+**/.claude/first-run
+
 # Private keys, certificates, and credential containers
 *.pem
 *.key
@@ -94,7 +136,15 @@ id_ed25519
 
 # OS-specific junk
 .DS_Store
+._*
+.Spotlight-V100/
+.Trashes/
+__MACOSX/
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+desktop.ini
+*.lnk
 
 # Logs
 *.log
@@ -103,6 +153,18 @@ logs/
 # Test and coverage artifacts
 coverage/
 .nyc_output/
+test-results/
+playwright-report/
+blob-report/
+junit.xml
+.vitest/
+
+# Tool caches
+.eslintcache
+.stylelintcache
+.cache/
+.parcel-cache/
+.vite/
 
 # Python cache (used by scripts/privacy and ad-hoc audit scripts)
 .mypy_cache/
@@ -121,10 +183,15 @@ temp/
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
 
 # Application-specific runtime state
 # .weave/    — Kilo CLI session/runtime data

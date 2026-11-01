@@ -95,8 +95,9 @@ requested.
   `src-tauri/src/commands/`; business logic belongs in `src-tauri/src/services/`.
 - Tauri commands expose `Result<T, String>` and map from `AppError`.
 - Live agent configuration uses atomic writes and backups before overwrite.
-- The Rust proxy is built from a database snapshot at `proxy_start`; restart it
-  after provider or route changes.
+- The Rust proxy hot-applies provider, route, supplier, model, pin, and catalog
+  changes to new requests; in-flight requests retain their admitted snapshot.
+  Listener and gateway-auth changes still require a restart.
 - Anthropic-to-Anthropic routing preserves the internal source body/events,
   including thinking signatures; source envelopes never serialize on OpenAI
   surfaces.
@@ -105,9 +106,19 @@ requested.
 
 ### React
 
-- `ui/src/App.tsx` owns the shell and global status/theme/locale.
-- `ui/src/components/app/AppPage.tsx` owns app-page orchestration.
-- `proxy_pool_state.tsx` and `routes_state.tsx` own separate data/action
+- `ui/src/App.tsx` owns the shell, grouped navigation, and the lazy page
+  boundary. `ui/src/components/workspace_header.tsx` owns the destination
+  selector, gateway status, diagnostics, theme, and locale controls.
+- `ui/src/hooks/use_workspace_navigation.ts` and `ui/src/lib/workspace_routes.ts`
+  own hash routes, Back/Forward restoration, and per-destination scroll/focus
+  reset. A destination change must not carry the previous page's local state.
+- `ui/src/components/app/AppPage.tsx` renders only current-configuration router
+  models. Client views and navigation do not own provider presentation or state.
+- `ui/src/components/suppliers/client_management/` owns retained provider, route,
+  gateway, configuration and launcher controls, reachable only from Suppliers.
+- `ui/src/components/use_accessible_dialog.ts` owns modal focus containment,
+  Escape handling, scroll lock, and focus return.
+- Supplier-owned `providers_state.tsx` and `routes_state.tsx` own separate data/action
   contexts. Current callbacks are required; stale closures are not a valid
   render optimization.
 - `ui/src/lib/api/` owns typed IPC contracts. `ui/src/lib/mock/` is demo-only.

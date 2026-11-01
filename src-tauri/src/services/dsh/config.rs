@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -178,29 +178,103 @@ pub(super) fn write_new(path: &Path, data: &[u8]) -> Result<(), AppError> {
         .map_err(|_| failure("managed_file_write_failed"))
 }
 
-/// Replace a managed file with a retained recovery copy. The caller holds both
-/// the in-process mutex and per-instance filesystem lock.
+pub(super) fn read_optional_recoverable(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match read_optional(path)? {
+        Some(data) => Ok(Some(data)),
+        None => {
+            let backup = stable_backup_path(path);
+            if backup.exists() {
+                read_optional(&backup)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Crash-in-gap recovery: a target absent while its latest recovery copy
+/// exists means write_atomic died between the two renames. Reserved for
+/// AAG-internal sidecars with no user-editable content; user-visible managed
+/// files keep strict reads so a deliberate deletion stays a reset.
+pub(super) fn read_json_recoverable(path: &Path) -> Result<Option<Value>, AppError> {
+    read_optional_recoverable(path)?
+        .map(|data| serde_json::from_slice(&data).map_err(|_| failure("invalid_managed_json")))
+        .transpose()
+}
+
+/// One recovery copy per managed file, named beside the target so it can
+/// never collide with the legacy per-operation sidecar names. The launcher
+/// mirror seed (services/launcher/mirror_seed.rs) independently keeps this
+/// same `<file>.aag_backup` convention for its own disjoint directories.
+fn stable_backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}.aag_backup"))
+}
+
+/// Replace a managed file, retaining only the latest recovery copy beside it.
+/// The caller holds both the in-process mutex and per-instance filesystem
+/// lock. A failed write never leaks its temporary file; a successful write
+/// prunes superseded legacy sidecars.
 pub(super) fn write_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
     safe_path(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| failure("invalid_managed_path"))?;
     fs::create_dir_all(parent).map_err(|_| failure("managed_directory_create_failed"))?;
-    let id = operation_id();
-    let temporary = parent.join(format!(".aag_write_{id}"));
-    let backup = parent.join(format!(".aag_backup_{id}"));
-    write_new(&temporary, data)?;
+    let temporary = parent.join(format!(".aag_write_{}", operation_id()));
+    let result = write_new(&temporary, data)
+        .and_then(|()| replace_with_backup(path, &temporary, &stable_backup_path(path)));
+    if result.is_err() {
+        // A leaked temporary is never a recovery source.
+        let _ = fs::remove_file(&temporary);
+    } else {
+        prune_legacy_sidecars(parent);
+    }
+    result
+}
+
+/// The stable recovery copy replaces the previous one. A recovery copy that
+/// cannot be replaced fails the write before the target is moved.
+fn replace_with_backup(path: &Path, temporary: &Path, backup: &Path) -> Result<(), AppError> {
+    reject_linked(backup)?;
+    if backup.exists() && fs::remove_file(backup).is_err() {
+        return Err(failure("backup_replace_failed"));
+    }
     let had_original = path.exists();
     if had_original {
-        fs::rename(path, &backup).map_err(|_| failure("backup_failed"))?;
+        fs::rename(path, backup).map_err(|_| failure("backup_failed"))?;
     }
-    if fs::rename(&temporary, path).is_err() {
-        if had_original && fs::rename(&backup, path).is_err() {
+    if fs::rename(temporary, path).is_err() {
+        if had_original && fs::rename(backup, path).is_err() {
             return Err(failure("rollback_failed"));
         }
         return Err(failure("atomic_write_failed"));
     }
     Ok(())
+}
+
+/// Legacy per-operation backups (.aag_backup_<id>) and leaked temporaries
+/// (.aag_write_<id>) are superseded by construction once a newer write
+/// commits. Removal is best-effort and limited to regular files.
+fn prune_legacy_sidecars(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with(".aag_backup_") || name.starts_with(".aag_write_")) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 pub(super) fn profile_manifest() -> Value {

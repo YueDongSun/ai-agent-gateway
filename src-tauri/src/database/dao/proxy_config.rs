@@ -32,6 +32,28 @@ impl Default for ProxyConfig {
     }
 }
 
+impl ProxyConfig {
+    /// The host a local client must use to reach this listen configuration.
+    ///
+    /// A wildcard bind is not a client target: `0.0.0.0`/`::` mean "accept
+    /// on every interface", the `localhost` alias and an unset host both mean
+    /// the local loopback. Any other host is a real endpoint the user chose
+    /// and is returned unchanged.
+    pub fn client_endpoint_host(&self) -> &str {
+        match self.host.trim() {
+            "" | "0.0.0.0" | "localhost" => "127.0.0.1",
+            "::" | "::1" => "[::1]",
+            host => host,
+        }
+    }
+
+    /// Whether this configuration is reachable from this machine only.
+    /// Wildcard binds count as loopback: the port is open on 127.0.0.1.
+    pub fn is_loopback_bind(&self) -> bool {
+        matches!(self.client_endpoint_host(), "127.0.0.1" | "[::1]")
+    }
+}
+
 impl Database {
     /// Read the singleton proxy config (returns default if absent).
     pub fn get_proxy_config(&self) -> Result<ProxyConfig, AppError> {
@@ -69,5 +91,52 @@ impl Database {
             params![cfg.host, cfg.port, cfg.auth_token, cfg.enabled],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_host(host: &str) -> ProxyConfig {
+        ProxyConfig {
+            host: host.into(),
+            ..ProxyConfig::default()
+        }
+    }
+
+    #[test]
+    fn wildcard_and_alias_binds_resolve_to_a_dialable_loopback_endpoint() {
+        for (host, expected) in [
+            ("", "127.0.0.1"),
+            ("0.0.0.0", "127.0.0.1"),
+            ("localhost", "127.0.0.1"),
+            ("::", "[::1]"),
+            ("::1", "[::1]"),
+        ] {
+            let config = config_with_host(host);
+            assert_eq!(config.client_endpoint_host(), expected, "{host}");
+            assert!(config.is_loopback_bind(), "{host}");
+        }
+    }
+
+    #[test]
+    fn loopback_and_non_loopback_documentation_literals_are_left_intact() {
+        assert_eq!(
+            config_with_host("127.0.0.1").client_endpoint_host(),
+            "127.0.0.1"
+        );
+        // RFC 5737 TEST-NET-1 is documentation-only, not a deployed endpoint.
+        let documentation_host = config_with_host("192.0.2.5");
+        assert_eq!(documentation_host.client_endpoint_host(), "192.0.2.5");
+        assert!(
+            !documentation_host.is_loopback_bind(),
+            "an explicit non-loopback bind is not loopback"
+        );
+        // Surrounding whitespace is a configuration slip, not a host name.
+        assert_eq!(
+            config_with_host("  0.0.0.0  ").client_endpoint_host(),
+            "127.0.0.1"
+        );
     }
 }

@@ -24,6 +24,16 @@ Tauri command names in
   (`listProviders`, `getCurrentProvider`, `getProvider`, `saveProvider`,
   `deleteProvider`, `switchProvider`, `reorderProviders`,
   `setProviderFailoverQueue`).
+- [`suppliers.ts`](suppliers.ts) — supplier CRUD, model inventories, and
+  status (`supplier_list`, `supplier_get`, `supplier_save`,
+  `supplier_delete`, `supplier_models_update`, `supplier_status`) plus
+  the cc-switch import commands (`supplier_import_preview`,
+  `supplier_import_apply`). Secrets are write-only: omitting `apiKey` /
+  `apiKeyOverride` preserves the stored value, `''` clears it.
+- [`suppliers_logic.ts`](suppliers_logic.ts) — dependency-free supplier
+  DTOs and pure helpers (error classification, secret intents, draft
+  validation, capability tiers, routing preview, client snippets) shared
+  by the UI, the demo mock, and the Node contract tests.
 - [`proxy.ts`](proxy.ts) — proxy lifecycle, config, providers, routes,
   pinned provider, test results, health, and model fetch.
 - [`diagnostics.ts`](diagnostics.ts) — temporary Debug state, local log access,

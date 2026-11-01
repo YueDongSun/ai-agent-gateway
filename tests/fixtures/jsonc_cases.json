@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "description": "Shared JSONC-parity fixture consumed by BOTH the Rust unit test (src-tauri/src/services/provider/config_editor.rs, via include_str!) and the Vitest parity test (tests/jsonc_parity.test.ts). Each case: the raw JSONC text, whether stripping comments must leave it parseable as JSON, and which probes the stripped text must contain/not contain. Adding a case here updates both parsers' contracts at once.",
+  "cases": [
+    {
+      "name": "plain_object",
+      "raw": "{\n  \"theme\": \"dark\"\n}\n",
+      "parses": true,
+      "contains": ["\"theme\": \"dark\""],
+      "not_contains": []
+    },
+    {
+      "name": "line_comment",
+      "raw": "{\n  // provider map\n  \"provider\": {}\n}\n",
+      "parses": true,
+      "contains": ["\"provider\": {}"],
+      "not_contains": ["// provider map"]
+    },
+    {
+      "name": "block_comment",
+      "raw": "{ /* c1 */ \"k\": 1 /* c2 */ }",
+      "parses": true,
+      "contains": ["\"k\": 1"],
+      "not_contains": ["c1", "c2"]
+    },
+    {
+      "name": "url_and_marker_lookalikes_inside_strings",
+      "raw": "{\"a\": \"http://x\", \"b\": \"//not-a-comment\", \"c\": 1} // tail",
+      "parses": true,
+      "contains": ["\"http://x\"", "\"//not-a-comment\""],
+      "not_contains": ["tail"]
+    },
+    {
+      "name": "escaped_quote_in_string",
+      "raw": "{ \"say\": \"quote \\\" then // still a string\" }",
+      "parses": true,
+      "contains": ["still a string"],
+      "not_contains": []
+    },
+    {
+      "name": "unterminated_string_is_invalid",
+      "raw": "{ \"k\": \"unterminated }",
+      "parses": false,
+      "contains": [],
+      "not_contains": []
+    },
+    {
+      "name": "truncated_object_is_invalid",
+      "raw": "{ not json",
+      "parses": false,
+      "contains": [],
+      "not_contains": []
+    }
+  ]
+}

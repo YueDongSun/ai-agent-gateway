@@ -1,19 +1,100 @@
 import chalk from 'chalk';
-import { loadConfig, saveConfig, getConfigPath } from '../config/store.js';
+import { loadConfig, saveConfig, getConfigPath, desktop_database_exists, desktop_database_path } from '../config/store.js';
 import { ConfigManager } from '../config/manager.js';
 import { Switcher } from '../agents/switcher.js';
-import { createGatewayApp } from '../gateway/server.js';
+import { createGatewayApp, install_shutdown_handlers } from '../gateway/server.js';
+import { start_config_watcher } from '../gateway/config_reload.js';
 import { defaultAgentTargets, detectInstalledAgents } from '../agents/adapters.js';
 import { logger, setLogLevel } from '../util/log.js';
+import { parse_port_input } from '../util/parse_port.js';
+import { consume_test_stream, Test_stream_error } from './test_stream.js';
+
+/** Default desktop proxy listener (the Rust proxy binds 127.0.0.1:8989
+ * unless configured otherwise). */
+const DESKTOP_PROXY_DEFAULT_ENDPOINT = 'http://127.0.0.1:8989';
+const DESKTOP_PROXY_PROBE_TIMEOUT_MS = 1500;
+
+/**
+ * Probe the explicitly selected/default desktop endpoint. Opt into runtime
+ * identity while preserving the legacy four-field discovery contract. A
+ * shared service marker alone cannot identify the runtime or prove readiness.
+ */
+export async function desktop_runtime_status(options: { endpoint?: string } = {}): Promise<
+  { running: true; version: string; endpoint: string } | { running: false; installed: boolean; endpoint: string; runtime_kind?: 'node' | 'unknown'; reason: 'unreachable' | 'unrecognized' | 'invalid_endpoint' }
+> {
+  const installed = desktop_database_exists();
+  const selected_endpoint = options.endpoint ?? process.env.AAG_DESKTOP_ENDPOINT ?? DESKTOP_PROXY_DEFAULT_ENDPOINT;
+  let endpoint: string;
+  try {
+    const parsed = new URL(selected_endpoint);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') throw new Error('invalid endpoint');
+    endpoint = parsed.origin;
+  } catch {
+    return { running: false, installed, endpoint: '', reason: 'invalid_endpoint' };
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DESKTOP_PROXY_PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${endpoint}/aag/discovery?runtime=1`, { signal: controller.signal });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const body = (await res.json()) as { service?: unknown; version?: unknown; runtime_kind?: unknown };
+      if (body.service !== 'ai-agent-gateway') return { running: false, installed, endpoint, runtime_kind: 'unknown', reason: 'unrecognized' };
+      if (body.runtime_kind !== 'desktop') return { running: false, installed, endpoint, runtime_kind: body.runtime_kind === 'node' ? 'node' : 'unknown', reason: 'unrecognized' };
+      return { running: true, version: typeof body.version === 'string' ? body.version : '?', endpoint };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return { running: false, installed, endpoint, reason: 'unreachable' };
+  }
+}
 
 /* ---- gateway --------------------------------------------------- */
 
 export async function startGatewayCmd(opts: { host?: string; port?: string }) {
   const cfg = loadConfig();
-  if (opts.host) cfg.gateway.host = opts.host;
-  if (opts.port) cfg.gateway.port = parseInt(opts.port, 10);
-  const { start } = createGatewayApp(cfg);
-  start();
+  const host_override = opts.host;
+  let port_override: number | undefined;
+  if (host_override) cfg.gateway.host = host_override;
+  if (opts.port !== undefined) {
+    // The CLI override is applied after AppConfig.parse, so it validates its
+    // own input — an invalid value would otherwise surface as an async
+    // listen error (or a NaN serialized as null into config.json).
+    const port = parse_port_input(opts.port);
+    if (port === null) {
+      console.error(chalk.red(`--port must be an integer between 1 and 65535 (got "${opts.port}")`));
+      process.exitCode = 1;
+      return;
+    }
+    port_override = port;
+    cfg.gateway.port = port;
+  }
+  // Reloads re-apply the validated CLI overrides so the pinned listener
+  // identity matches what is actually serving.
+  const apply_cli_overrides = (next: ReturnType<typeof loadConfig>) => {
+    if (host_override) next.gateway.host = host_override;
+    if (port_override !== undefined) next.gateway.port = port_override;
+    return next;
+  };
+  const { start, reload_config } = createGatewayApp(cfg);
+  const server = start();
+  install_shutdown_handlers(server);
+  if (desktop_database_exists()) {
+    // The desktop runtime (Rust/SQLite) and this gateway (Node/JSON) keep
+    // independent provider stores; without this hint a switch applied in
+    // one silently never reaches the other.
+    console.warn(chalk.yellow(
+      `note: desktop runtime database found at ${desktop_database_path()}; ` +
+        'the desktop app and this gateway keep separate provider/route stores — ' +
+        'switching in one does not update the other.',
+    ));
+  }
+  const config_watcher = start_config_watcher({
+    config_path: getConfigPath(),
+    reload: (next) => reload_config(apply_cli_overrides(next)),
+  });
+  console.log(chalk.dim(`watching config for hot reload: ${getConfigPath()}`));
   await new Promise(() => {});
 }
 
@@ -69,6 +150,24 @@ export async function statusCmd() {
   console.log(chalk.bold.cyan('\n  Gateway:'));
   console.log(`    ${cfg.gateway.host}:${cfg.gateway.port}  log=${cfg.gateway.logLevel}`);
 
+  console.log(chalk.bold.cyan('\n  Desktop runtime:'));
+  const desktop = await desktop_runtime_status();
+  if (desktop.running) {
+    console.log(
+      `    ${chalk.green('●')} desktop proxy running at ${desktop.endpoint} (v${desktop.version}) — separate provider store`,
+    );
+  } else if (desktop.reason === 'invalid_endpoint') {
+    console.log(chalk.yellow('    invalid AAG_DESKTOP_ENDPOINT; use an HTTP(S) endpoint without credentials, query or path'));
+  } else if (desktop.runtime_kind) {
+    console.log(chalk.yellow(`    ${desktop.runtime_kind === 'node' ? 'Node gateway' : 'unidentified/older runtime'} at ${desktop.endpoint}; desktop runtime is not verified`));
+  } else if (desktop.installed) {
+    console.log(
+      `    ${chalk.yellow('○')} installed (${desktop_database_path()}) — proxy not detected at ${desktop.endpoint}; set AAG_DESKTOP_ENDPOINT for a custom listener`,
+    );
+  } else {
+    console.log(chalk.gray(`    not installed; no desktop proxy detected at ${desktop.endpoint}`));
+  }
+
   console.log(chalk.bold.cyan('\n  Providers:'));
   if (!cfg.providers.length) console.log(chalk.gray('    (none)'));
   for (const p of cfg.providers) {
@@ -122,15 +221,20 @@ export async function modelsCmd() {
 
 /* ---- test ----------------------------------------------------- */
 
-export async function testCmd(model: string | undefined, opts: { noStream?: boolean }) {
+export async function testCmd(model: string | undefined, opts: { noStream?: boolean; stream?: boolean; signal?: AbortSignal }) {
   const cfg = loadConfig();
   const url = `http://${cfg.gateway.host}:${cfg.gateway.port}`;
   const mdl = model ?? cfg.routes[0]?.alias ?? 'claude-sonnet-4';
-  const stream = !opts.noStream;
+  const stream = opts.stream ?? !opts.noStream;
 
   console.log(chalk.gray(`  POST ${url}/v1/chat/completions  model=${mdl} stream=${stream}\n`));
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (cfg.gateway.authToken) headers['authorization'] = `Bearer ${cfg.gateway.authToken}`;
+
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (!opts.signal) process.once('SIGINT', cancel);
+  const signal = opts.signal ?? controller.signal;
 
   try {
     const body = {
@@ -138,36 +242,30 @@ export async function testCmd(model: string | undefined, opts: { noStream?: bool
       messages: [{ role: 'user', content: 'Hello! Reply in one short sentence.' }],
       stream,
     };
-    const res = await fetch(`${url}/v1/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const res = await fetch(`${url}/v1/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal });
     if (!res.ok) {
-      console.error(chalk.red(`HTTP ${res.status}`));
-      console.error(await res.text());
+      process.exitCode = 1;
+      console.error(chalk.red(`Test failed: HTTP ${res.status}`));
+      await res.body?.cancel();
       return;
     }
     if (stream) {
-      const decoder = new TextDecoder();
-      for await (const chunk of res.body as any) {
-        const text = decoder.decode(chunk as Uint8Array);
-        for (const line of text.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const d = line.slice(5).trim();
-          if (d === '[DONE]') continue;
-          try {
-            const obj = JSON.parse(d);
-            const delta = obj.choices?.[0]?.delta?.content;
-            if (delta) process.stdout.write(delta);
-          } catch {}
-        }
-      }
+      if (!res.body) throw new Test_stream_error('stream incomplete: response body is missing');
+      await consume_test_stream(res.body, (text) => { process.stdout.write(text); });
+      signal.throwIfAborted();
       console.log(chalk.green('\n\n  ✓ stream complete'));
     } else {
-      const obj = (await res.json()) as { choices?: Array<{ message?: { content?: string } }>; usage?: unknown };
+      const obj = (await res.json()) as { error?: unknown; choices?: Array<{ message?: { content?: string } }>; usage?: unknown };
+      if (obj.error !== undefined || typeof obj.choices?.[0]?.message?.content !== 'string') throw new Test_stream_error('Test failed: invalid completion response');
       console.log(chalk.gray('  content:'), obj.choices?.[0]?.message?.content);
       console.log(chalk.gray('  usage:'), obj.usage);
     }
   } catch (e) {
-    console.error(chalk.red(`Error: ${(e as Error).message}`));
-    console.error(chalk.yellow('  Is the gateway running? Start with: aag gateway'));
+    process.exitCode = 1;
+    const message = e instanceof Test_stream_error ? e.message : 'Test failed: transport or response decoding error';
+    console.error(chalk.red(signal.aborted ? 'Test cancelled; any displayed output is incomplete.' : message));
+  } finally {
+    if (!opts.signal) process.removeListener('SIGINT', cancel);
   }
 }
 

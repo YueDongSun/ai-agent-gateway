@@ -19,7 +19,7 @@
 //!   AAG's `/v1/messages` auth relaxation admits it and an
 //!   `anthropic_passthrough` pool row relays it verbatim upstream.
 //!
-//! AAG only ever writes the two env keys above — never any upstream
+//! AAG writes the gateway fields and configured model selectors, with no upstream
 //! credential. Foreign keys in an existing mirror `settings.json` (both
 //! top-level and inside `env`) are preserved; the file is backed up to a
 //! sibling `.bak` before each overwrite.
@@ -82,6 +82,24 @@ pub fn write_claude_mirror_files(
     auth_token: &str,
     mode: Claude_mirror_mode,
 ) -> Result<LiveWriteResult, AppError> {
+    write_claude_mirror_with_model(
+        claude_cli_home,
+        proxy_base_url,
+        auth_token,
+        mode,
+        None,
+        false,
+    )
+}
+
+fn write_claude_mirror_with_model(
+    claude_cli_home: Option<&str>,
+    proxy_base_url: &str,
+    auth_token: &str,
+    mode: Claude_mirror_mode,
+    model: Option<&str>,
+    mirror_roles: bool,
+) -> Result<LiveWriteResult, AppError> {
     let mirror_dir = config::get_claude_mirror_dir(claude_cli_home);
     // The native `~/.claude` belongs to the live Claude install (and to
     // cc-switch when chained). Refuse a mirror override that resolves
@@ -104,12 +122,13 @@ pub fn write_claude_mirror_files(
     config::private_fs::validate_external_file_path(&settings_path)?;
 
     // Shallow-merge an existing mirror settings.json: foreign top-level
-    // keys AND foreign env keys survive; a malformed file is replaced
-    // (the .bak keeps the original recoverable).
-    let mut settings: Value = match std::fs::read(&settings_path) {
-        Ok(raw) => serde_json::from_slice(&raw).map_err(AppError::Json)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(error) => return Err(AppError::io(&settings_path, error)),
+    // keys AND foreign env keys survive; a malformed file blocks the write
+    // and is retained (the contract is never to replace invalid user JSON
+    // silently — the user can recover via the .bak from a previous write).
+    let previous = config::private_fs::read_mirror_file(&settings_path)?;
+    let mut settings: Value = match previous.contents.as_deref() {
+        Some(raw) => serde_json::from_slice(raw).map_err(AppError::Json)?,
+        None => serde_json::json!({}),
     };
     if !settings.is_object() {
         return Err(AppError::Config(
@@ -128,6 +147,30 @@ pub fn write_claude_mirror_files(
         ));
     }
     let env_obj = env.as_object_mut().expect("env is an object");
+    if mirror_roles {
+        for (key, model) in [
+            (
+                "ANTHROPIC_MODEL",
+                crate::services::mirror_models::DEFAULT_CLAUDE_ROLE,
+            ),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "claude-fable-5"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-5"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-5-5"),
+        ] {
+            env_obj.insert(key.to_string(), Value::String(model.to_string()));
+        }
+    } else if let Some(model) = model {
+        for key in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            env_obj.insert(key.to_string(), Value::String(model.to_string()));
+        }
+    }
     env_obj.insert(
         "ANTHROPIC_BASE_URL".to_string(),
         Value::String(proxy_base_url.to_string()),
@@ -152,14 +195,20 @@ pub fn write_claude_mirror_files(
             env_obj.remove("ANTHROPIC_AUTH_TOKEN");
         }
     }
+    if mirror_roles {
+        settings["model"] =
+            Value::String(crate::services::mirror_models::DEFAULT_CLAUDE_ROLE.into());
+    }
 
     let serialized = serde_json::to_vec_pretty(&settings)?;
-    let (written, backups) =
-        super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
+    let (written, backups) = super::config_writes::write_mirror_files(&[
+        super::config_writes::MirrorConfigFileUpdate {
             path: &settings_path,
             contents: &serialized,
             app_type: "claude",
-        }])?;
+            previous: &previous,
+        },
+    ])?;
 
     Ok(LiveWriteResult {
         app_type: "claude_desktop".into(),
@@ -176,13 +225,28 @@ pub fn switch_claude_mirror(
     db: &crate::database::Database,
     claude_cli_home: Option<&str>,
 ) -> Result<LiveWriteResult, AppError> {
-    let proxy_cfg = db.get_proxy_config().map_err(AppError::from)?;
-    let base_url = format!("http://{}:{}", proxy_cfg.host, proxy_cfg.port);
-    let mut result = write_claude_mirror_files(
+    let proxy_cfg = db.get_proxy_config()?;
+    // A wildcard or unset bind is not a client target — the Claude client
+    // dials this address, so translate it to the loopback (same rule as the
+    // Codex and Gemini mirrors).
+    let base_url = format!(
+        "http://{}:{}",
+        proxy_cfg.client_endpoint_host(),
+        proxy_cfg.port
+    );
+    let default_model =
+        db.get_setting(crate::services::supplier_setup::KEY_UNIFIED_DEFAULT_MODEL)?;
+    let mirror_roles = db
+        .get_setting(crate::services::mirror_models::KEY_ENABLED)?
+        .as_deref()
+        == Some("1");
+    let mut result = write_claude_mirror_with_model(
         claude_cli_home,
         &base_url,
         &proxy_cfg.auth_token,
         claude_mirror_mode_from_db(db),
+        default_model.as_deref(),
+        mirror_roles,
     )?;
     result.provider_id = db
         .get_current_provider("claude_code")
@@ -198,11 +262,60 @@ mod tests {
     use crate::services::provider::test_support::{isolated_home, IsolatedHome};
     use std::path::PathBuf;
 
+    #[test]
+    fn managed_role_configuration_keeps_roles_separate_from_actual_supply() {
+        let (home, mirror) = fresh_home("role-config");
+        let db = crate::database::Database::memory().unwrap();
+        db.set_setting(crate::services::mirror_models::KEY_ENABLED, "1")
+            .unwrap();
+        db.set_setting(
+            crate::services::supplier_setup::KEY_UNIFIED_DEFAULT_MODEL,
+            "MiniMax-M3.1-Flash",
+        )
+        .unwrap();
+        config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        config::private_fs::atomic_write(
+            &mirror.join("settings.json"),
+            br#"{"theme":"dark","env":{"UNRELATED":"kept"}}"#,
+        )
+        .unwrap();
+        switch_claude_mirror(&db, mirror.to_str()).unwrap();
+        let settings = read_mirror_settings(&mirror);
+        assert_eq!(settings["model"], "claude-fable-5");
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "claude-fable-5");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "claude-fable-5"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+            "claude-opus-5"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "claude-sonnet-5"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "claude-haiku-5-5"
+        );
+        assert_eq!(settings["env"]["UNRELATED"], "kept");
+        assert_eq!(settings["theme"], "dark");
+        assert!(!settings.to_string().contains("MiniMax"));
+        assert!(!home.root.join(".claude/settings.json").exists());
+        assert!(switch_claude_mirror(&db, mirror.to_str())
+            .unwrap()
+            .written
+            .is_empty());
+    }
+
     /// Build a fresh owner-only home for a single test. The returned
     /// `IsolatedHome` keeps AAG_HOME_DIR/AAG_CONFIG_DIR captured and will
-    /// restore them on Drop; callers may use `home.precreate_owner_only`
-    /// to stage sub-directories that need owner-only DACLs (e.g. the
-    /// mirror dir before pre-writing settings.json).
+    /// restore them on Drop; it already secures the temp root to owner-only
+    /// (Windows protected owner DACL / Unix 0o700) so the write path's
+    /// external-parent ACL checks pass on hosts whose shared temp directory
+    /// carries untrusted writer ACEs (the WIP fixture hardened its root the
+    /// same way before pre-writing settings.json).
     fn fresh_home(tag: &str) -> (IsolatedHome, PathBuf) {
         let home = isolated_home(&format!("claude-mirror-{tag}"));
         let mirror = home.root.clone();
@@ -314,6 +427,34 @@ mod tests {
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "PROXY_MANAGED");
     }
 
+    /// A malformed mirror settings.json BLOCKS the write and is retained:
+    /// invalid user JSON is never replaced silently (the validation doc's
+    /// contract). The stale comment above the merge used to claim the
+    /// opposite; this test pins the actual fail-closed behavior.
+    #[test]
+    fn malformed_mirror_settings_blocks_the_write_and_is_retained() {
+        let (_home, home) = fresh_home("malformed");
+
+        let mirror = config::get_claude_mirror_dir(Some(home.to_str().unwrap()));
+        std::fs::create_dir_all(&mirror).unwrap();
+        let broken = r#"{"env": { "ANTHROPIC_BASE_URL": "#;
+        std::fs::write(mirror.join("settings.json"), broken).unwrap();
+
+        let error = write_claude_mirror_files(
+            Some(home.to_str().unwrap()),
+            "http://127.0.0.1:8989",
+            "aag-proxy-token",
+            Claude_mirror_mode::Token,
+        )
+        .expect_err("malformed settings must block the write");
+        assert!(matches!(error, AppError::Json(_)), "got: {error}");
+        assert_eq!(
+            std::fs::read_to_string(mirror.join("settings.json")).unwrap(),
+            broken,
+            "the invalid file must be retained untouched"
+        );
+    }
+
     /// A mirror override resolving to the native `~/.claude` is refused
     /// before any filesystem write.
     #[test]
@@ -334,6 +475,26 @@ mod tests {
         assert!(
             !std::path::Path::new(&native).join("settings.json").exists(),
             "no file may be created in the native dir"
+        );
+    }
+
+    /// A wildcard proxy bind must not be written into the client's
+    /// `ANTHROPIC_BASE_URL`: the CLI needs a dialable endpoint, so the
+    /// mirror translates `0.0.0.0` to the loopback.
+    #[test]
+    fn wildcard_bind_is_translated_to_a_dialable_client_endpoint() {
+        let (_home, mirror) = fresh_home("wildcard-bind");
+        let db = crate::database::Database::memory().unwrap();
+        db.save_proxy_config(&crate::database::dao::proxy_config::ProxyConfig {
+            host: "0.0.0.0".into(),
+            ..crate::database::dao::proxy_config::ProxyConfig::default()
+        })
+        .unwrap();
+        switch_claude_mirror(&db, Some(mirror.to_str().unwrap())).expect("mirror write");
+        let settings = read_mirror_settings(&mirror);
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8989",
+            "wildcard bind must reach the client as the loopback"
         );
     }
 

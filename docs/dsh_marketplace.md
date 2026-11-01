@@ -1,8 +1,8 @@
 # DSH plugin marketplace
 
 The DSH page now includes a **Plugin marketplace** button. In Tauri it opens
-a dedicated bundled window; repeated clicks restore and focus the same window
-without resetting its filters. Browser demo mode opens a separate same-origin
+a dedicated local window; repeated clicks restore and focus the same window
+and fetch the latest catalog without resetting its filters. Browser demo mode opens a separate same-origin
 tab. Opening the market does not require a running DSH instance and does not
 install, enable, or execute any plugin.
 
@@ -27,56 +27,53 @@ Each detail drawer exposes:
 - package/version and non-executable installation reference, if supplied;
 - source-reported license and update/star metadata;
 - the individual plugin revision supplied by the registry;
-- the separate registry revision and collection time;
-- links to the repository, plugin revision, pinned registry JSON and upstream
-  collection script.
+- the feed update and fetch times, with missing revisions marked unknown;
+- links to the repository, supplied plugin revision and live marketplace feed.
 
 Source and registry revisions are separate facts. A registry commit must never
 be substituted for a plugin commit. Registry inclusion or upstream verification
 labels are not an AAG security audit. The market deliberately does not expand
 the existing managed installer allowlist.
 
-## Real catalog and provenance
+## Live catalog and provenance
 
-The bundled normalized snapshot currently contains **8,874 entries** from
-[YELEBAI/dsh-plugin-marketplace](https://github.com/YELEBAI/dsh-plugin-marketplace).
-It was collected from registry commit
-33af32809ed33ee0588ab2acac454a0d8c4a4de3 at
-2026-08-30T13:27:51.996Z. Individual source revisions come from that registry,
-not from separately running every repository or reviewing its code.
+Every standalone marketplace open requests
+[the public dsh.market feed](https://dsh.market/plugins.json), the same endpoint
+used by [dsh.market](https://dsh.market). The native adapter performs the request
+through Rust; the browser adapter uses credential-free browser fetch. Neither
+runtime imports a bundled catalog for display. Entry counts, classifications,
+search results and sorting are recomputed from each validated response using
+the [shared classification rules](../scripts/dsh_market/classification_rules.json).
 
-The upstream [collector](https://github.com/YELEBAI/dsh-plugin-marketplace/blob/33af32809ed33ee0588ab2acac454a0d8c4a4de3/scripts/registry-scan.mjs)
-discovers GitHub topic candidates and maintains its registry.
-AAG reads the published output; it does not execute upstream collectors,
-package scripts, YAML expressions or plugin code.
-The normalized data is redistributed with the
-[upstream MIT notice](../scripts/dsh_market/source_notice.txt).
+The UI shows both the feed's `generatedAt` and the actual fetch time. The site
+does not provide a registry commit, so that revision remains explicitly unknown.
+Plugin revisions are shown only when the feed supplies them. Canonical GitHub
+repository links are derived from validated repository identities; AAG does not
+execute installation commands, readmes, collectors or plugin code.
 
-AAG's [collector](../scripts/dsh_market/collect_catalog.mjs) resolves the current
-registry branch to a commit and downloads the registry by that exact commit.
-[Shared classification rules](../scripts/dsh_market/classification_rules.json)
-are used by the Node collector and Rust refresh adapter. The generated snapshot
-is [shared/dsh_market_catalog.json](../shared/dsh_market_catalog.json).
+## Refresh and failure behavior
 
-## Refresh and offline behavior
+Opening a new window, reopening the existing native window, retrying a failed
+initial load and clicking **Refresh catalog** all request the live feed.
+Concurrent requests in one frontend are coalesced; completed responses are not
+reused on the next open. Both adapters enforce a thirty-second deadline,
+a 64 MiB response limit and a 20,000-entry limit. The native adapter permits
+only the exact marketplace endpoint and disables redirects.
 
-Opening the market reads a validated cached catalog or the bundled snapshot.
-It does not initiate a network scan or create a cache. **Refresh catalog** is
-an explicit network action. The native service performs only two allowlisted
-GitHub GET requests, with redirects disabled, a thirty-second total deadline,
-a 24 MiB input limit, and a 20,000-entry limit.
+Initial load failures show an error and retry action without displaying an old
+bundled list. If an already-open window has a successful catalog, a failed
+refresh keeps that list visible with an error. The native cache stores only
+validated successful responses, separately from DSH runtime configuration.
+Source links resolve from the current in-memory response even if saving the
+disk cache fails; cache reads do not replace the live open request.
 
-The service validates the replacement before publishing it. A failed network,
-rate limit, malformed response or invalid catalog does not replace the last
-good cache. The UI keeps the existing list and shows the error. Invalid local
-cache data falls back to the bundled snapshot with a warning. The cache is
-separate from DSH runtime configuration.
+Browser demo mode also fetches the live public feed. Desktop-only actions remain
+simulated in that mode. Browser regression tests inject responses at the fetch
+boundary to verify updates and failures independently of public network uptime.
+No recurring job or background polling is involved.
 
-Browser demo mode reloads the real bundled snapshot without simulating a fresh
-network collection. The demo notice and collection date remain visible.
-No recurring job, GitHub workflow or background polling was installed.
-
-Rebuild the repository snapshot explicitly:
+The historical repository snapshot and its maintainer collector remain separate
+from the displayed marketplace. To maintain that optional artifact explicitly:
 
 ~~~text
 npm run dsh:market_collect
@@ -107,13 +104,14 @@ the distinction. DSH runtime WebUI windows still have no AAG command authority.
 Navigation stays on the owned application origin and market route. Native
 popups/downloads are denied. Source-opening requests pass a catalog entry ID
 and source kind to Rust; the UI cannot hand arbitrary URLs to an OS shell.
-Resolved links must be HTTPS GitHub source URLs. Browser-demo anchors apply
+Resolved links must be HTTPS GitHub source URLs or the exact public marketplace
+feed URL. Browser-demo anchors apply
 the same host/scheme checks and use noopener/noreferrer.
 
 ## Modules
 
-- src-tauri/src/services/dsh/market_catalog.rs: validated cache and explicit
-  refresh orchestration.
+- src-tauri/src/services/dsh/market_catalog.rs: bounded live requests and
+  validated cache persistence.
 - market_normalize.rs and market_tests.rs: schema, source and classification
   contracts.
 - src-tauri/src/commands/dsh_market.rs: narrow IPC surface.
@@ -121,18 +119,21 @@ the same host/scheme checks and use noopener/noreferrer.
   source-link handoff.
 - ui/src/components/dsh_market/: independent storefront and provenance drawer.
 - ui/src/lib/api/dsh_market.ts: typed contracts.
-- ui/src/lib/mock/dsh_market.ts: lazy demo snapshot loading.
+- ui/src/lib/api/dsh_market_config.ts: public source and request limits.
+- ui/src/lib/api/dsh_market_normalize.ts: pure feed validation and classification.
+- ui/src/lib/api/dsh_market_feed.ts: bounded credential-free browser requests.
+- ui/src/lib/mock/dsh_market.ts: browser-demo dispatch to the live feed adapter.
 - scripts/dsh_market/: collector, fixtures, tests, source notice and native test.
 
-The approximately 8.3 MB generated browser snapshot chunk is lazy-loaded only
-when the market is opened; the initial frontend bundle remains approximately
-198 KB. This is a complete offline catalog, not an initial-page dependency.
-Pagination bounds rendered cards, but parsing/search still uses the full
-catalog. The build size warning is retained rather than hidden.
+The frontend bundle contains presentation code and classification rules. Catalog
+entries arrive through the live request when the marketplace opens. Pagination
+bounds rendered cards, while validation, parsing and search use the full
+bounded response. No generated offline catalog chunk is loaded for display.
 
 ## Verification
 
-See [marketplace validation](dsh_marketplace_validation.md) for fresh results.
+The [historical marketplace validation](dsh_marketplace_validation.md) records
+the earlier bundled-catalog implementation and is not current live-feed evidence.
 The existing browser suite retains its original DSH and gateway checks and adds
 market-specific checks. A separate opt-in Windows test checks the actual Tauri
 button, distinct native window, singleton reuse, language switching and denied

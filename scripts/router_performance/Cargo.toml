@@ -1,0 +1,24 @@
+[package]
+name = "router_performance"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[features]
+baseline = []
+
+[dependencies]
+bytes = "1"
+futures-core = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+tokio = { version = '1', features = ['macros', 'rt'] }
+

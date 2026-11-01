@@ -170,19 +170,52 @@ impl Dsh_service {
                 receipt.error_code = Some(code);
             }
         }
-        receipt.finished_at_ms = config::now_ms();
-        let persisted = config::write_atomic(
-            &journal_dir.join("receipt.json"),
-            &serde_json::to_vec_pretty(&receipt)?,
-        );
-        if let Ok(mut state) = self.state.lock() {
-            state.job = None;
-            state.previews.clear();
-        }
-        drop(instance_lock);
-        persisted.map_err(|_| failure("receipt_persist_failed"))?;
-        Ok(receipt)
+        Ok(finish_receipt(
+            &journal_dir,
+            receipt,
+            &self.state,
+            instance_lock,
+        ))
     }
+}
+
+/// Receipt fidelity contract: the journal commit markers are authoritative and
+/// the receipt is only their report. Persisting the report uses one bounded
+/// retry and degrades gracefully; a persistence failure can never invert a
+/// committed outcome, mask the real operation failure, or skip job/lock
+/// cleanup (which must also survive a serialization failure).
+pub(super) fn finish_receipt(
+    journal_dir: &Path,
+    mut receipt: Dsh_receipt,
+    state: &std::sync::Mutex<super::Manager_state>,
+    instance_lock: Instance_lock,
+) -> Dsh_receipt {
+    receipt.finished_at_ms = config::now_ms();
+    let persisted = serde_json::to_vec_pretty(&receipt)
+        .map_err(|_| failure("receipt_persist_failed"))
+        .and_then(|bytes| persist_receipt(journal_dir, &bytes));
+    if let Ok(mut guard) = state.lock() {
+        guard.job = None;
+        guard.previews.clear();
+    }
+    drop(instance_lock);
+    if persisted.is_err() {
+        // Best-effort forensic marker inside the owned journal so a missing
+        // history entry stays discoverable; it never changes the outcome.
+        let _ = config::write_new(&journal_dir.join("receipt_persist_failed.json"), b"{}\n");
+    }
+    receipt
+}
+
+/// Bounded single retry: write_atomic keeps a recovery copy; its failure
+/// leaves the target absent, so a create_new fallback cannot double-write or
+/// clobber a completed receipt.
+pub(super) fn persist_receipt(journal_dir: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let path = journal_dir.join("receipt.json");
+    if config::write_atomic(&path, bytes).is_ok() {
+        return Ok(());
+    }
+    config::write_new(&path, bytes)
 }
 
 fn validate_request(root: &Path, request: &Dsh_operation_request) -> Result<(), AppError> {

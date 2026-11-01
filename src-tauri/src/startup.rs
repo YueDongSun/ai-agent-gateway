@@ -8,6 +8,16 @@ use std::env;
 
 /// Argument passed by the autostart registration.
 pub const AUTOSTART_ARGUMENT: &str = "--aag-autostart";
+pub const NO_AUTOSTART_ARGUMENT: &str = "--aag-no-autostart";
+
+fn autostart_registration_requested<I>(arguments: I) -> bool
+where
+    I: IntoIterator<Item = String>,
+{
+    !arguments
+        .into_iter()
+        .any(|argument| argument == NO_AUTOSTART_ARGUMENT)
+}
 
 /// Return whether the current process was launched by the OS login entry.
 pub fn launched_from_autostart() -> bool {
@@ -26,6 +36,11 @@ where
 #[cfg(desktop)]
 pub fn enable_autostart<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri_plugin_autostart::ManagerExt;
+
+    if !autostart_registration_requested(env::args()) {
+        log::info!("autostart: registration disabled for this launch");
+        return;
+    }
 
     let manager = app.autolaunch();
     match manager.is_enabled() {
@@ -55,7 +70,29 @@ pub fn show_main_window_for_normal_launch<R: tauri::Runtime>(app: &tauri::AppHan
 
 #[cfg(test)]
 mod tests {
-    use super::{has_autostart_argument, AUTOSTART_ARGUMENT};
+    use super::{autostart_registration_requested, has_autostart_argument, AUTOSTART_ARGUMENT};
+
+    #[test]
+    fn isolated_launch_can_disable_registration_without_changing_window_mode() {
+        for arguments in [
+            vec!["aag.exe", "--aag-no-autostart"],
+            vec!["aag.exe", "--aag-autostart", "--aag-no-autostart"],
+        ] {
+            let arguments: Vec<String> = arguments.into_iter().map(String::from).collect();
+            assert!(!autostart_registration_requested(arguments.clone()));
+            assert_eq!(
+                has_autostart_argument(arguments.clone()),
+                arguments.iter().any(|argument| argument == AUTOSTART_ARGUMENT)
+            );
+        }
+        for argument in ["--aag-autostart", "--aag-no-autostart=1", "normal"] {
+            assert!(autostart_registration_requested(vec![
+                "aag.exe".to_string(),
+                argument.to_string(),
+            ]));
+        }
+        assert!(autostart_registration_requested(vec!["aag.exe".to_string()]));
+    }
 
     #[test]
     fn detects_only_the_private_autostart_argument() {

@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { dsh_market_get_catalog, dsh_market_refresh, type Market_catalog } from '../../lib/api/dsh_market.js';
+import { dsh_market_get_catalog, dsh_market_refresh, type Market_catalog, type Market_entry } from '../../lib/api/dsh_market.js';
 import { isDemo } from '../../lib/mock/backend.js';
-import { category_label, entry_description, filter_entries, format_count, localized_date, market_categories, market_modules, market_page_size, market_use_cases, module_label } from './market_catalog.js';
+import { build_entry_haystacks, category_label, entry_description, filter_entries, format_count, localized_date, market_categories, market_modules, market_page_size, market_use_cases, module_label } from './market_catalog.js';
 import { Market_detail } from './market_detail.js';
 import { Market_icon } from './market_icons.js';
 import { market_translate, type Market_locale } from './market_i18n.js';
@@ -35,7 +35,7 @@ export function Dsh_market_page() {
   const [loading, set_loading] = useState(true);
   const [refreshing, set_refreshing] = useState(false);
   const [error, set_error] = useState<string | null>(null);
-  const [notice, set_notice] = useState<'refreshed' | 'refresh_demo' | null>(null);
+  const [notice, set_notice] = useState<'refreshed' | null>(null);
   const [query, set_query] = useState('');
   const [category, set_category] = useState('all');
   const [use_case, set_use_case] = useState('all');
@@ -48,7 +48,7 @@ export function Dsh_market_page() {
   const results_ref = useRef<HTMLElement>(null);
   const mounted_ref = useRef(false);
   const request_sequence = useRef(0);
-  const refresh_lock = useRef(false);
+  const catalog_ready_ref = useRef(false);
   const t = market_translate(locale);
 
   useEffect(() => {
@@ -61,22 +61,30 @@ export function Dsh_market_page() {
     window.history.replaceState(null, '', current_url.href);
   }, [locale, theme]);
 
-  const load_catalog = useCallback(async () => {
+  const load_catalog = useCallback(async (refresh = false) => {
     const sequence = ++request_sequence.current;
-    set_loading(true); set_error(null);
+    set_loading(!catalog_ready_ref.current); set_refreshing(catalog_ready_ref.current); set_error(null); set_notice(null);
     try {
-      const next = await dsh_market_get_catalog();
-      if (mounted_ref.current && sequence === request_sequence.current) set_catalog(next);
+      const next = await (refresh ? dsh_market_refresh() : dsh_market_get_catalog());
+      if (mounted_ref.current && sequence === request_sequence.current) {
+        set_catalog(next); catalog_ready_ref.current = true; set_selected_id(null);
+        if (refresh) { set_page(1); set_notice('refreshed'); }
+      }
     } catch (failure) {
       if (mounted_ref.current && sequence === request_sequence.current) set_error(String(failure));
     } finally {
-      if (mounted_ref.current && sequence === request_sequence.current) set_loading(false);
+      if (mounted_ref.current && sequence === request_sequence.current) { set_loading(false); set_refreshing(false); }
     }
   }, []);
   useEffect(() => {
     mounted_ref.current = true;
     void load_catalog();
-    return () => { mounted_ref.current = false; request_sequence.current += 1; };
+    const handle_open = () => { void load_catalog(); };
+    window.addEventListener('dsh_market_opened', handle_open);
+    return () => {
+      window.removeEventListener('dsh_market_opened', handle_open);
+      mounted_ref.current = false; request_sequence.current += 1;
+    };
   }, [load_catalog]);
   useEffect(() => {
     if (selected_id) content_ref.current?.setAttribute('inert', '');
@@ -88,16 +96,6 @@ export function Dsh_market_page() {
     set_selected_id(null);
   }, []);
 
-  const refresh_catalog = async () => {
-    if (refresh_lock.current) return;
-    refresh_lock.current = true; set_refreshing(true); set_error(null); set_notice(null);
-    try {
-      const next = await dsh_market_refresh();
-      if (mounted_ref.current) { set_catalog(next); set_page(1); close_detail(); set_notice(isDemo ? 'refresh_demo' : 'refreshed'); }
-    } catch (failure) { if (mounted_ref.current) set_error(String(failure)); }
-    finally { refresh_lock.current = false; if (mounted_ref.current) set_refreshing(false); }
-  };
-
   const category_counts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const entry of catalog?.entries ?? []) for (const id of entry.categories) counts.set(id, (counts.get(id) ?? 0) + 1);
@@ -108,15 +106,20 @@ export function Dsh_market_page() {
     for (const entry of catalog?.entries ?? []) for (const id of entry.modules ?? []) counts.set(id, (counts.get(id) ?? 0) + 1);
     return counts;
   }, [catalog]);
+  /** Per-entry search text + parsed timestamp, rebuilt only when the catalog
+   *  itself changes (load/refresh) — keystrokes read these instead of
+   *  re-joining and re-lowercasing every entry. */
+  const entry_haystacks = useMemo(() => build_entry_haystacks(catalog?.entries ?? []), [catalog]);
   const filtered = useMemo(() => {
-    const entries = filter_entries(catalog?.entries ?? [], query, category, use_case, module);
+    const entries = filter_entries(catalog?.entries ?? [], entry_haystacks, query, category, use_case, module);
+    const entry_ts = (entry: Market_entry): number => entry_haystacks.get(entry.id)?.ts ?? (Date.parse(entry.updated_at ?? '') || 0);
     entries.sort((left, right) => {
       if (sort === 'stars') return right.stars - left.stars || left.full_name.localeCompare(right.full_name);
-      if (sort === 'recent') return (Date.parse(right.updated_at ?? '') || 0) - (Date.parse(left.updated_at ?? '') || 0) || left.full_name.localeCompare(right.full_name);
+      if (sort === 'recent') return entry_ts(right) - entry_ts(left) || left.full_name.localeCompare(right.full_name);
       return left.name.localeCompare(right.name) || left.full_name.localeCompare(right.full_name);
     });
     return entries;
-  }, [catalog, query, category, use_case, module, sort]);
+  }, [catalog, entry_haystacks, query, category, use_case, module, sort]);
   const page_count = Math.max(1, Math.ceil(filtered.length / market_page_size));
   const current_page = Math.min(page, page_count);
   const offset = (current_page - 1) * market_page_size;
@@ -155,11 +158,11 @@ export function Dsh_market_page() {
           </nav><h2 className="market_sidebar_subhead">{t('modules')}</h2>
           <nav className="market_categories" aria-label={t('modules')}><button type="button" aria-pressed={module === 'all'} onClick={() => { set_module('all'); set_page(1); }} data-testid="market_module_all"><Market_icon name="grid" /><span>{t('all_modules')}</span><small>{catalog ? format_count(catalog.entries.length, locale) : '—'}</small></button>
             {market_modules.map((item) => <button type="button" key={item.id} aria-pressed={module === item.id} onClick={() => { set_module(item.id); set_page(1); }} data-testid={`market_module_${item.id}`}><Market_icon name={item.icon} /><span>{item[locale]}</span><small>{format_count(module_counts.get(item.id) ?? 0, locale)}</small></button>)}
-          </nav><div className="market_sidebar_note"><Market_icon name="book" /><strong>{t('source_health')}</strong><p>{catalog?.source_registry ?? 'GitHub'}</p>{catalog && <><code title={catalog.registry_commit}>{catalog.registry_commit.slice(0, 12)}</code><span>{t(catalog.cache_status === 'bundled' ? 'bundled' : catalog.cache_status === 'cached' ? 'cached' : 'live')}</span></>}<p>{t('taxonomy_note')}</p></div>
+          </nav><div className="market_sidebar_note"><Market_icon name="book" /><strong>{t('source_health')}</strong><p>{catalog?.source_registry ?? 'dsh.market'}</p>{catalog && <><code title={catalog.registry_commit}>{catalog.registry_commit ? catalog.registry_commit.slice(0, 12) : t('commit_unknown')}</code><span>{t(catalog.cache_status === 'bundled' ? 'bundled' : catalog.cache_status === 'cached' ? 'cached' : 'live')}</span></>}<p>{t('taxonomy_note')}</p></div>
         </aside><section className="market_results" aria-labelledby="market_results_title" ref={results_ref}>
           <div className="market_workflow_section"><h2>{t('use_cases')}</h2><div className="market_workflow_filters" role="group" aria-label={t('use_cases')}><button type="button" aria-pressed={use_case === 'all'} data-testid="market_use_case_all" onClick={() => { set_use_case('all'); set_page(1); }}>{t('all_use_cases')}</button>{market_use_cases.map((item) => <button type="button" key={item.id} aria-pressed={use_case === item.id} data-testid={`market_use_case_${item.id}`} onClick={() => { set_use_case(item.id); set_page(1); }}>{item[locale]}</button>)}</div></div>
           <div className="market_results_toolbar"><div><h2 id="market_results_title">{category === 'all' ? t('browse') : category_label(category, locale)}</h2><p aria-live="polite" data-testid="market_results_count" data-count={filtered.length}>{t('results', { count: format_count(filtered.length, locale) })}</p></div><div className="market_sort_controls">{has_filters && <button type="button" className="market_text_button" onClick={clear_filters} data-testid="market_clear_filters">{t('clear')}</button>}<label><span className="market_sr_only">{t('sort')}</span><select value={sort} onChange={(event) => { set_sort(event.target.value as Market_sort); set_page(1); }} data-testid="market_sort"><option value="stars">{t('sort_stars')}</option><option value="recent">{t('sort_recent')}</option><option value="name">{t('sort_name')}</option></select></label></div></div>
-          {loading ? <div className="market_loading" role="status"><span className="market_loading_dot" />{t('loading')}</div> : <>
+          {loading ? <div className="market_loading" role="status"><span className="market_loading_dot" />{t('loading')}</div> : catalog && <>
             {!visible_entries.length && <div className="market_empty" data-testid="market_empty"><Market_icon name="search" /><h3>{t('no_results')}</h3><p>{t('no_results_hint')}</p>{has_filters && <button type="button" className="market_button" onClick={clear_filters}>{t('clear')}</button>}</div>}
             <div className="market_grid">{visible_entries.map((entry) => {
               const description = entry_description(entry, locale);
@@ -175,7 +178,7 @@ export function Dsh_market_page() {
             {filtered.length > 0 && <nav className="market_pagination" aria-label={t('pagination')}><span>{t('showing', { start: format_count(offset + 1, locale), end: format_count(Math.min(offset + market_page_size, filtered.length), locale), count: format_count(filtered.length, locale) })}</span><div><button type="button" className="market_button" disabled={current_page <= 1} onClick={() => set_result_page(current_page - 1)} data-testid="market_previous">{t('previous')}</button><span>{t('page', { page: current_page, pages: page_count })}</span><button type="button" className="market_button" disabled={current_page >= page_count} onClick={() => set_result_page(current_page + 1)} data-testid="market_next">{t('next')}</button></div></nav>}
           </>}
         </section></div>
-        <footer className="market_footer"><div><strong>{t('collection')}</strong><p>{catalog ? `${catalog.source_registry} · ${t('snapshot_date')} ${localized_date(catalog.fetched_at, locale) ?? t('unknown')} UTC` : t('loading')}</p><span>{isDemo ? t('preview_note') : t('evidence_note')}</span></div><button type="button" className="market_button" disabled={loading || refreshing} onClick={() => void refresh_catalog()} data-testid="market_refresh"><Market_icon name="refresh" class_name={refreshing ? 'market_spinning' : ''} />{t(refreshing ? 'refreshing' : 'refresh')}</button></footer>
+        <footer className="market_footer"><div><strong>{t('collection')}</strong><p>{catalog ? `${catalog.source_registry} · ${t('snapshot_date')} ${localized_date(catalog.fetched_at, locale) ?? t('unknown')} UTC` : t('loading')}</p><span>{isDemo ? t('preview_note') : t('evidence_note')}</span></div><button type="button" className="market_button" disabled={loading || refreshing} onClick={() => void load_catalog(true)} data-testid="market_refresh"><Market_icon name="refresh" class_name={refreshing ? 'market_spinning' : ''} />{t(refreshing ? 'refreshing' : 'refresh')}</button></footer>
       </main>
     </div>
     {selected_entry && catalog && <Market_detail key={selected_entry.id} entry={selected_entry} catalog={catalog} locale={locale} t={t} return_focus={detail_trigger_ref.current} on_close={close_detail} />}

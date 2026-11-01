@@ -1,5 +1,11 @@
 use super::*;
 
+use crate::proxy::canonical::ChatCompletionRequest;
+use futures_util::StreamExt;
+use crate::proxy::responses::ResponsesRequest;
+use serde_json::{json, Value};
+
+
 fn parse_sse_events(events: &[String]) -> Vec<Value> {
     events
         .iter()
@@ -92,7 +98,7 @@ fn responses_parallel_calls_share_one_assistant_turn() {
 
 #[test]
 fn anthropic_parallel_results_share_the_next_user_turn() {
-    let anthropic = oai_req_to_anthropic_req(&responses_to_chat(&parallel_tool_follow_up()));
+    let anthropic = oai_req_to_anthropic_req(&responses_to_chat(&parallel_tool_follow_up())).unwrap();
     assert_eq!(
         anthropic.messages.len(),
         3,
@@ -137,7 +143,7 @@ fn serial_tool_turns_remain_separate() {
     );
     assert_eq!(chat.messages[1].tool_calls.as_ref().unwrap().len(), 1);
     assert_eq!(chat.messages[3].tool_calls.as_ref().unwrap().len(), 1);
-    let anthropic = oai_req_to_anthropic_req(&chat);
+    let anthropic = oai_req_to_anthropic_req(&chat).unwrap();
     let roles: Vec<&str> = anthropic
         .messages
         .iter()
@@ -202,7 +208,7 @@ async fn anthropic_tool_stream_round_trips_through_responses_follow_up() {
             {"type": "function_call_output", "call_id": "call_fixture", "output": "FIXTURE_OK"},
         ],
     })).unwrap();
-    let anthropic = oai_req_to_anthropic_req(&responses_to_chat(&follow_up));
+    let anthropic = oai_req_to_anthropic_req(&responses_to_chat(&follow_up)).unwrap();
     assert_eq!(
         anthropic.extra["tools"][0]["input_schema"],
         follow_up.tools.unwrap()[0]["parameters"]
@@ -343,7 +349,7 @@ fn responses_tool_choice_uses_anthropic_object_shape() {
         }))
         .unwrap();
         assert_eq!(
-            oai_req_to_anthropic_req(&responses_to_chat(&request)).extra["tool_choice"],
+            oai_req_to_anthropic_req(&responses_to_chat(&request)).unwrap().extra["tool_choice"],
             expected
         );
     }
@@ -429,7 +435,7 @@ fn responses_function_reaches_anthropic_with_native_schema() {
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]
     }))
     .unwrap();
-    let converted = oai_req_to_anthropic_req(&responses_to_chat(&request));
+    let converted = oai_req_to_anthropic_req(&responses_to_chat(&request)).unwrap();
     assert_eq!(
         converted.extra["tools"],
         json!([{
@@ -447,7 +453,7 @@ fn canonical_function_without_parameters_has_empty_object_schema() {
     }))
     .unwrap();
     assert_eq!(
-        oai_req_to_anthropic_req(&request).extra["tools"],
+        oai_req_to_anthropic_req(&request).unwrap().extra["tools"],
         json!([{
             "name": "ping", "input_schema": {"type": "object", "properties": {}}
         }])
@@ -480,11 +486,11 @@ fn native_anthropic_source_tool_envelope_stays_intact() {
     .unwrap();
     request.source_anthropic_request = Some(native.clone());
     assert_eq!(
-        oai_req_to_anthropic_req(&request).extra["tools"],
+        oai_req_to_anthropic_req(&request).unwrap().extra["tools"],
         native["tools"]
     );
     assert_eq!(
-        oai_req_to_anthropic_req(&request).extra["tool_choice"],
+        oai_req_to_anthropic_req(&request).unwrap().extra["tool_choice"],
         native["tool_choice"]
     );
 }

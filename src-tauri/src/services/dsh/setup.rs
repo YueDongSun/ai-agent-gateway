@@ -190,6 +190,20 @@ impl Dsh_service {
     }
 }
 
+/// Runtime paths arrive from discovery as display text and can be stored
+/// (hand-edited, or synced from another device) with different case; on
+/// Windows the same executable must still validate.
+fn same_runtime_path(candidate: &str, stored: &str) -> bool {
+    #[cfg(windows)]
+    {
+        candidate.to_lowercase() == stored.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        candidate == stored
+    }
+}
+
 fn build_plan(
     mut settings: Dsh_settings,
     request: Dsh_setup_request,
@@ -238,7 +252,7 @@ fn build_plan(
                 blockers.push(format!("runtime_{kind}_required"));
             }
         } else if !discovery.candidates.iter().any(|candidate| {
-            candidate.kind == kind && candidate.path == *value && candidate.compatible
+            candidate.kind == kind && same_runtime_path(&candidate.path, value) && candidate.compatible
         }) {
             blockers.push(format!("runtime_{kind}_invalid"));
         }
@@ -483,13 +497,13 @@ fn commit_setup(
     if let Err(error) = result {
         let mut restored = true;
         for target in targets.iter_mut().rev() {
-            if target.promoted {
-                if config::read_optional(&target.path).ok().flatten().as_ref() != Some(&target.data)
-                    || fs::rename(&target.path, target.stage.with_extension("failed")).is_err()
-                {
-                    restored = false;
-                    continue;
-                }
+            if target.promoted
+                && (config::read_optional(&target.path).ok().flatten().as_ref()
+                    != Some(&target.data)
+                    || fs::rename(&target.path, target.stage.with_extension("failed")).is_err())
+            {
+                restored = false;
+                continue;
             }
             if target.backed_up && fs::rename(&target.backup, &target.path).is_err() {
                 restored = false;

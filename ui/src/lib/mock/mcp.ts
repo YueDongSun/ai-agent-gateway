@@ -59,7 +59,7 @@ export async function mock_mcp_command(command: string, args: Record<string, unk
     const changes: Mcp_sync_preview['changes'] = [];
     for (const server of servers.values()) {
       const key = 'aag_' + server.id;
-      if (selected.includes(server)) changes.push({ server_id: key, action: client_entries.has(key) ? 'replace' : 'add' });
+      if (selected.includes(server)) changes.push({ server_id: server.id, action: client_entries.has(key) ? 'replace' : 'add' });
       else if (client === 'claude' && client_entries.has(key)) changes.push({ server_id: key, action: 'remove' });
     }
     const token = `demo_mcp_${++sequence}`;
@@ -79,7 +79,7 @@ export async function mock_mcp_command(command: string, args: Record<string, unk
     const backup_created = client_entries.size > 0;
     for (const server of servers.values()) { if (server.enabled_claude) client_entries.set('aag_' + server.id, structuredClone(server.server_config)); else client_entries.delete('aag_' + server.id); }
     ++revision;
-    return { client: 'claude', applied_server_count: plan.preview.server_ids.length, backup_created, restart_required: true };
+    return { client: 'claude', applied_server_count: plan.preview.changes.filter((change) => change.action !== 'unchanged').length, backup_created, restart_required: true };
   }
   throw new Error('MCP_UNKNOWN_COMMAND');
 }

@@ -274,8 +274,8 @@ export function Dsh_page() {
   };
 
   const dialog = preview?.kind === 'operation'
-    ? { title: `${t(`action_${preview.value.action}`)}${preview.value.package_name ? ` · ${preview.value.package_name}` : ''}`, ...preview.value }
-    : preview?.value;
+    ? { title: `${t(`action_${preview.value.action}`)}${preview.value.package_name ? ` · ${preview.value.package_name}` : ''}`, ...preview.value, floating_action: preview.value.action === 'remove' ? 'delete' as const : undefined }
+    : preview ? { ...preview.value, floating_action: 'save' as const } : undefined;
 
   return (
     <div className="dsh_page" data-testid="dsh_page">

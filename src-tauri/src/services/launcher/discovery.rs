@@ -276,6 +276,184 @@ fn numeric_version(value: &str) -> Option<[u64; 3]> {
     (count > 0).then_some(result)
 }
 
+/// Parse one to four dot-separated numeric components, zero-padded to four,
+/// so 3-part Squirrel versions (`app-1.46388.4`) and 4-part store versions
+/// (`3.6556.2.0`) compare against each other directly.
+pub(super) fn padded_version(value: &str) -> Option<[u64; 4]> {
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let mut result = [0u64; 4];
+    let mut count = 0;
+    for component in value.split('.') {
+        if count == result.len()
+            || component.is_empty()
+            || !component.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        result[count] = component.parse().ok()?;
+        count += 1;
+    }
+    (count > 0).then_some(result)
+}
+
+/// A store (Appx) installation only supersedes an existing local
+/// (Squirrel-style) installation when its version is known and strictly
+/// newer. A known store version supersedes a local install with no readable
+/// version — the typical shape of a stale shim left behind after a store
+/// migration — but an unknown store version never displaces a working local
+/// install.
+#[cfg(any(windows, test))]
+pub(super) fn version_supersedes(store: Option<[u64; 4]>, local: Option<[u64; 4]>) -> bool {
+    match (store, local) {
+        (Some(store_version), Some(local_version)) => store_version > local_version,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// One `Get-AppxPackage` result row: package identity plus install root.
+/// `version` is `None` when the store reports an unparsable version string.
+#[cfg(any(windows, test))]
+pub(super) struct appx_package {
+    pub(super) name: String,
+    pub(super) version: Option<[u64; 4]>,
+    pub(super) install_dir: PathBuf,
+}
+
+/// Parse `name|version|install_dir` lines emitted by `query_appx_packages`.
+/// Malformed rows (wrong field count, empty fields, relative install paths)
+/// are skipped so one broken companion package cannot hide the real app.
+#[cfg(any(windows, test))]
+pub(super) fn parse_appx_packages(output: &str) -> Vec<appx_package> {
+    output.lines().filter_map(parse_appx_package_line).collect()
+}
+
+#[cfg(any(windows, test))]
+fn parse_appx_package_line(line: &str) -> Option<appx_package> {
+    let mut fields = line.trim().splitn(3, '|');
+    let name = fields.next()?.trim();
+    let version = fields.next()?.trim();
+    let install_dir = fields.next()?.trim();
+    if name.is_empty() || install_dir.is_empty() {
+        return None;
+    }
+    let install_dir = PathBuf::from(install_dir);
+    if !install_dir.is_absolute() {
+        return None;
+    }
+    Some(appx_package {
+        name: name.to_string(),
+        version: padded_version(version),
+        install_dir,
+    })
+}
+
+/// Select only the requested desktop package, then its numerically newest
+/// version (ties keep query order). Companion packages such as
+/// `OpenAI.CodexPrimaryRuntime` match `*Codex*` without shipping the desktop
+/// executable and must never stand in for a missing desktop package.
+#[cfg(any(windows, test))]
+pub(super) fn select_appx_package<'a>(
+    packages: &'a [appx_package],
+    exact_name: &str,
+) -> Option<&'a appx_package> {
+    let mut ranked: Vec<_> = packages
+        .iter()
+        .filter(|package| package.name == exact_name)
+        .collect();
+    ranked.sort_by(|left, right| right.version.cmp(&left.version));
+    ranked.into_iter().next()
+}
+
+/// Check the real desktop executable inside the selected package. Relative
+/// names are an internal allowlist bound to that application's known layout;
+/// an activation stub is not a substitute for its Electron executable.
+#[cfg(any(windows, test))]
+pub(super) fn select_appx_desktop_executable(
+    packages: &[appx_package],
+    exact_name: &str,
+    relative_paths: &[&str],
+) -> Option<(PathBuf, Option<[u64; 4]>)> {
+    let package = select_appx_package(packages, exact_name)?;
+    relative_paths.iter().find_map(|relative| {
+        // ShellExecute through cmd/start requires native separators even
+        // though Windows file metadata accepts mixed slash spelling.
+        let path: PathBuf = package.install_dir.join(relative).components().collect();
+        (path.is_absolute() && executable(&path, desktop_platform::windows))
+            .then_some((path, package.version))
+    })
+}
+
+/// Query `Get-AppxPackage` for one wildcard `pattern` and return every
+/// matching package. Output is `name|version|install_dir` per line so the
+/// caller can select deterministically in-process instead of trusting
+/// PowerShell's package ordering.
+#[cfg(windows)]
+pub(super) fn query_appx_packages(pattern: &str) -> Result<Vec<appx_package>, String> {
+    let script = format!(
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-AppxPackage {pattern} -ErrorAction Stop | ForEach-Object {{ \"{{0}}|{{1}}|{{2}}\" -f $_.Name, $_.Version, $_.InstallLocation }}"
+    );
+    let mut command = super::process::background_command(powershell()?);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let bytes = super::process::capture_stdout(&mut command, super::process::PROBE_TIMEOUT)?;
+    let output = String::from_utf8(bytes).map_err(|_| "appx_probe_invalid".to_string())?;
+    Ok(parse_appx_packages(&output))
+}
+
+/// Pick the executable from the numerically newest versioned sibling
+/// directory (`app-1.2.3`, `0.42.0`) below `root`. Numeric comparison keeps
+/// `1.10.0` newer than `1.9.0`, which a lexicographic sort would misorder;
+/// directories whose names do not parse as a version are used only when no
+/// versioned candidate exists (last resort, lexicographically newest).
+/// An unreadable or oversized root yields `None` instead of a
+/// filesystem-order-dependent pick, mirroring `version_directories`.
+pub(super) fn newest_versioned_executable(
+    root: &Path,
+    prefix: &str,
+    binary_name: &str,
+    platform: desktop_platform,
+    entry_limit: usize,
+) -> Option<PathBuf> {
+    if !root.is_absolute() {
+        return None;
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut candidates = entries.take(entry_limit + 1);
+    let mut versioned: Vec<([u64; 3], PathBuf)> = Vec::new();
+    let mut unparsed: Vec<PathBuf> = Vec::new();
+    for entry in (&mut candidates).take(entry_limit) {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let path = entry.path().join(binary_name);
+        if !executable(&path, platform) {
+            continue;
+        }
+        match name.strip_prefix(prefix).and_then(numeric_version) {
+            Some(version) => versioned.push((version, path)),
+            None => unparsed.push(path),
+        }
+    }
+    // The limit+1 probe must not leave an unconsumed iterator behind before
+    // we can tell whether the root was oversized.
+    if candidates.next().is_some() {
+        return None;
+    }
+    versioned.sort_by(|(left_version, left_path), (right_version, right_path)| {
+        right_version
+            .cmp(left_version)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    versioned
+        .into_iter()
+        .next()
+        .map(|(_, path)| path)
+        .or_else(|| {
+            unparsed.sort();
+            unparsed.pop()
+        })
+}
+
 pub(super) fn child_path(program: &Path) -> Result<OsString, String> {
     child_path_for(program, search_directories(), desktop_platform::current())
 }
@@ -341,21 +519,27 @@ pub(super) fn find_codex_cli_binary() -> Option<PathBuf> {
         if executable(&root.join("codex.exe"), desktop_platform::windows) {
             return Some(root.join("codex.exe"));
         }
-        let mut candidates: Vec<_> = std::fs::read_dir(root)
-            .ok()?
-            .take(64)
-            .filter_map(Result::ok)
-            .map(|entry| entry.path().join("codex.exe"))
-            .filter(|path| executable(path, desktop_platform::windows))
-            .collect();
-        candidates.sort();
-        return candidates.pop();
+        // Versioned sibling directories: newest numeric version wins, so a
+        // `0.44.0` installation beats an older `0.9.0` one.
+        return newest_versioned_executable(
+            &root,
+            "",
+            "codex.exe",
+            desktop_platform::windows,
+            MAX_INSTALLATION_ENTRIES,
+        );
     }
     None
 }
 
 pub(super) fn find_copilot_cli_binary() -> Option<PathBuf> {
     find_tool("copilot", &["copilot.exe", "copilot.cmd"])
+}
+
+/// The Gemini CLI ships as an npm package whose shim is `gemini`
+/// (`gemini.cmd` on Windows), same shape as the Copilot CLI shim.
+pub(super) fn find_gemini_cli_binary() -> Option<PathBuf> {
+    find_tool("gemini", &["gemini.exe", "gemini.cmd"])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -528,15 +712,15 @@ pub(super) fn find_codex_desktop_exe() -> Result<PathBuf, String> {
             }
         }
     }
-    let mut command = super::process::background_command(powershell()?);
-    command.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-AppxPackage *Codex* -ErrorAction Stop | Select-Object -First 1 -ExpandProperty InstallLocation"]);
-    let bytes = super::process::capture_stdout(&mut command, super::process::PROBE_TIMEOUT)?;
-    let location =
-        String::from_utf8(bytes).map_err(|_| "codex_desktop_probe_invalid".to_string())?;
-    let path = PathBuf::from(location.trim()).join("app/ChatGPT.exe");
-    if path.is_absolute() && executable(&path, desktop_platform::windows) {
-        Ok(path)
-    } else {
-        Err("codex_desktop_not_found".into())
-    }
+    // Store installs register runtime companion packages that also match
+    // `*Codex*` (for example `OpenAI.CodexPrimaryRuntime`) but never ship the
+    // desktop executable; only the app package does, so selection is by
+    // exact package name, then newest version. The current package manifest
+    // names app/ChatGPT.exe; Codex.exe can be an activation stub and does not
+    // establish a launch that inherits the isolated mirror environment.
+    let packages =
+        query_appx_packages("*Codex*").map_err(|_| "codex_desktop_probe_invalid".to_string())?;
+    select_appx_desktop_executable(&packages, "OpenAI.Codex", &["app/ChatGPT.exe"])
+        .map(|(path, _)| path)
+        .ok_or_else(|| "codex_desktop_not_found".into())
 }

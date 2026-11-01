@@ -4,7 +4,8 @@
 //! map whose entries contain an AI SDK package, options, and model map. The
 //! AAG provider row stores one entry; this adapter merges it into the global
 //! OpenCode config and updates the selected model without replacing unrelated
-//! user settings.
+//! user settings. Existing JSONC documents are patched in place so user
+//! comments, key order and formatting survive a switch.
 
 #[cfg(test)]
 use crate::config::get_opencode_config_path;
@@ -24,55 +25,18 @@ pub fn detect() -> bool {
         .unwrap_or(false)
 }
 
+/// Strip JSONC comments before parsing (delegates to the shared stripper in
+/// [`super::config_editor`]).
 fn strip_jsonc_comments(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(c) = chars.next() {
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                chars.next();
-                for ch in chars.by_ref() {
-                    if ch == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
+    super::config_editor::strip_jsonc_comments(raw)
 }
 
-fn read_config(path: &std::path::Path) -> Result<Value, AppError> {
+/// Read the current config value together with its raw text (when the file
+/// exists), so the JSONC patcher can preserve the user's comments and
+/// formatting on rewrite.
+fn read_config(path: &std::path::Path) -> Result<(Value, Option<String>), AppError> {
     if !path.exists() {
-        return Ok(json!({}));
+        return Ok((json!({}), None));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
     let value: Value = serde_json::from_str(&strip_jsonc_comments(&raw)).map_err(AppError::Json)?;
@@ -82,7 +46,7 @@ fn read_config(path: &std::path::Path) -> Result<Value, AppError> {
             path.display()
         )));
     }
-    Ok(value)
+    Ok((value, Some(raw)))
 }
 
 fn model_from_provider(id: &str, entry: &serde_json::Map<String, Value>) -> Option<String> {
@@ -97,6 +61,23 @@ fn model_from_provider(id: &str, entry: &serde_json::Map<String, Value>) -> Opti
                 .and_then(|models| models.keys().next().map(String::as_str))
         })
         .map(|model| format!("{id}/{model}"))
+}
+
+/// Apply the provider-entry and `model` edits to the raw document, then
+/// verify the patched text against `config`.
+fn patch_jsonc(
+    raw: &str,
+    provider_id: &str,
+    entry: &Value,
+    model: Option<&str>,
+    config: &Value,
+) -> Result<String, AppError> {
+    let mut editor = super::jsonc_edit::JsoncEditor::new(raw)?;
+    editor.set_provider_entry(provider_id, entry)?;
+    if let Some(model) = model {
+        editor.set_top_level("model", &Value::String(model.to_string()))?;
+    }
+    editor.finish(config)
 }
 
 /// Write one AAG provider into the global OpenCode config.
@@ -126,7 +107,7 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
         .filter(|url| !url.trim().is_empty())
         .ok_or_else(|| AppError::Config("OpenCode provider requires options.baseURL".into()))?;
 
-    let mut config = read_config(&path)?;
+    let (mut config, existing_text) = read_config(path)?;
     let root = config
         .as_object_mut()
         .expect("read_config validates object root");
@@ -150,13 +131,28 @@ pub fn write_live_at(provider: &Provider, paths: &[PathBuf]) -> Result<LiveWrite
     entry_obj
         .entry("name")
         .or_insert_with(|| Value::String(provider.name.clone()));
-    providers.insert(provider.id.clone(), entry_value);
+    let selected_model = model_from_provider(&provider.id, entry);
+    providers.insert(provider.id.clone(), entry_value.clone());
 
-    if let Some(selected_model) = model_from_provider(&provider.id, entry) {
-        root.insert("model".into(), Value::String(selected_model));
+    if let Some(selected_model) = &selected_model {
+        root.insert("model".into(), Value::String(selected_model.clone()));
     }
 
-    let serialized = serde_json::to_vec_pretty(&config)?;
+    let serialized = match existing_text.as_deref() {
+        Some(raw) => match patch_jsonc(
+            raw,
+            &provider.id,
+            &entry_value,
+            selected_model.as_deref(),
+            &config,
+        ) {
+            Ok(text) => text.into_bytes(),
+            // The patcher refuses documents it cannot splice safely; fall
+            // back to the full rewrite exactly as before.
+            Err(_) => serde_json::to_vec_pretty(&config)?,
+        },
+        None => serde_json::to_vec_pretty(&config)?,
+    };
     let (written, backups) =
         super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
             path,
@@ -199,7 +195,12 @@ mod tests {
         fs::write(&path, "{ // JSONC\n \"small_model\":\"zai/glm-mini\", \"theme\":\"dark\", \"provider\":{\"old\":{\"npm\":\"x\"}} }").unwrap();
 
         let result = write_live(&provider()).expect("OpenCode write");
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("// JSONC"),
+            "the JSONC comment must survive the switch"
+        );
+        let value: Value = serde_json::from_str(&strip_jsonc_comments(&written)).unwrap();
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["small_model"], "zai/glm-mini");
         assert_eq!(value["provider"]["old"]["npm"], "x");
@@ -209,6 +210,54 @@ mod tests {
         );
         assert_eq!(value["model"], "zai/glm-5");
         assert!(result.backup.is_some());
+    }
+
+    #[test]
+    fn write_live_preserves_jsonc_comments_and_key_order() {
+        let _home = isolated_home("opencode-jsonc");
+        let path = get_opencode_config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            concat!(
+                "{\n",
+                "  // user theme\n",
+                "  \"theme\": \"dark\",\n",
+                "  \"provider\": {\n",
+                "    \"old\": { \"npm\": \"x\" } // keep sibling\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        write_live(&provider()).expect("OpenCode write");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            concat!(
+                "{\n",
+                "  // user theme\n",
+                "  \"theme\": \"dark\",\n",
+                "  \"provider\": {\n",
+                "    \"zai\": {\n",
+                "      \"npm\": \"@ai-sdk/openai-compatible\",\n",
+                "      \"options\": {\n",
+                "        \"baseURL\": \"https://example.invalid/v1\",\n",
+                "        \"apiKey\": \"sk-secret\"\n",
+                "      },\n",
+                "      \"models\": {\n",
+                "        \"glm-5\": {\n",
+                "          \"name\": \"GLM-5\"\n",
+                "        }\n",
+                "      },\n",
+                "      \"name\": \"Z.AI\"\n",
+                "    },\n",
+                "    \"old\": { \"npm\": \"x\" } // keep sibling\n",
+                "  },\n",
+                "  \"model\": \"zai/glm-5\"\n",
+                "}\n",
+            )
+        );
     }
 
     #[test]

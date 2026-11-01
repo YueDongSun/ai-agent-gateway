@@ -1,0 +1,107 @@
+/* Designed provider tiles (provider_icon.tsx) and the glyph picker
+   (icon_picker.tsx). Lives with the component rather than the providers
+   panel so every surface that renders a tile — provider cards, preset
+   picker, modal preview, and the suppliers page — loads these styles
+   regardless of which page mounted first. */
+
+/* Brand-colored squircle with a soft top-light sheen and a white
+   geometric glyph (or monogram). */
+.provider-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: #fff;
+  background: #8d8578;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+.provider-icon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0) 52%,
+    rgba(0, 0, 0, 0.12)
+  );
+  pointer-events: none;
+}
+.provider-icon-glyph {
+  display: block;
+  width: 64%;
+  height: 64%;
+}
+.provider-icon-char {
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+.provider-icon-sm {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.provider-icon-md {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+
+/* Icon picker: the preview tile toggles a dropdown of every designed
+   glyph on the provider's own tile color. */
+.icon-picker {
+  position: relative;
+  align-self: end;
+  margin-bottom: 2px;
+}
+.icon-picker-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 10px;
+  line-height: 0;
+}
+.icon-picker-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.icon-picker-grid {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 6;
+  width: 268px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+.icon-picker-option {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 9px;
+  line-height: 0;
+}
+.icon-picker-option .provider-icon {
+  transition: transform 120ms ease;
+}
+.icon-picker-option:hover .provider-icon {
+  transform: scale(1.08);
+}
+.icon-picker-option.selected .provider-icon {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.14),
+    0 0 0 2px var(--accent);
+}

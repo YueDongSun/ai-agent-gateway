@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AgentId, AgentTarget } from '../config/schema.js';
+import { is_json_object, parse_jsonc_object } from './jsonc.js';
 
 /* ------------------------------------------------------------------ */
 /*  Detection of where each agent keeps its config                     */
@@ -109,12 +110,31 @@ export function defaultAgentTargets(): AgentTarget[] {
 /*  Agent adapter interface                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Atomic config replacement with a rolling backup. The previous file (if
+ * any) is copied to `<path>.bak` first, then the new content goes to a
+ * sibling staging file and is renamed into place — a crash mid-write can
+ * never leave a truncated agent config, and the prior state stays
+ * recoverable. A failed rename removes the staging file so the agent's
+ * config directory is not left with partial artifacts.
+ */
+function write_config_with_backup(path: string, content: string): void {
+  if (existsSync(path)) copyFileSync(path, `${path}.bak`);
+  const staging_path = `${path}.aag-tmp`;
+  writeFileSync(staging_path, content, 'utf8');
+  try {
+    renameSync(staging_path, path);
+  } catch (error) {
+    rmSync(staging_path, { force: true });
+    throw error;
+  }
+}
+
 export interface SwitchResult {
   ok: boolean;
   agent: AgentId;
   path: string;
   message: string;
-  previous?: string;
 }
 
 export interface AgentAdapter {
@@ -145,9 +165,9 @@ export abstract class JsonAgentAdapter implements AgentAdapter {
 
   resolveConfigPath(): string | undefined {
     for (const p of this.target.configPaths) {
-      // prefer existing, else pick first writable parent candidate
       if (existsSync(p)) return p;
     }
+    // No existing file: create it at the first candidate path.
     return this.target.configPaths[0];
   }
 
@@ -162,13 +182,13 @@ export abstract class JsonAgentAdapter implements AgentAdapter {
     if (!p) throw new Error(`no config path for agent ${this.target.id}`);
     const dir = dirname(p);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(p, content, 'utf8');
+    write_config_with_backup(p, content);
   }
 
   detectCurrentBaseURL(): string | undefined {
-    const raw = this.read();
-    if (!raw) return undefined;
     try {
+      const raw = this.read();
+      if (!raw) return undefined;
       const obj = JSON.parse(raw);
       return obj.baseURL ?? obj.base_url ?? obj.endpoint ?? obj.apiBase ?? undefined;
     } catch {
@@ -214,36 +234,27 @@ export class CopilotAdapter extends JsonAgentAdapter {
       },
     };
   }
-  /** Copilot settings.json is JSONC — strip comments before JSON.parse. */
+  /** The public read contract is parseable JSON, preserving JSONC values. */
   read(): string | undefined {
     const p = this.target.configPaths.find((x) => existsSync(x));
     if (!p) return undefined;
     const raw = readFileSync(p, 'utf8');
-    return raw.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    return JSON.stringify(parse_jsonc_object(raw, 'Copilot config'));
   }
   /** Merge the new config into the existing settings so user keys survive. */
   write(content: string): void {
     const p = this.resolveConfigPath();
     if (!p) throw new Error(`no config path for agent ${this.target.id}`);
+    const existing = existsSync(p) ? parse_jsonc_object(readFileSync(p, 'utf8'), 'Copilot config') : {};
+    const patch = parse_jsonc_object(content, 'Copilot config patch');
+    if ((existing.env !== undefined && !is_json_object(existing.env)) || (patch.env !== undefined && !is_json_object(patch.env))) {
+      throw new Error('Copilot config env must be an object; original file was not changed');
+    }
+    const merged = { ...existing, ...patch };
+    if (patch.env !== undefined) merged.env = { ...(existing.env as Record<string, unknown> | undefined), ...patch.env as Record<string, unknown> };
     const dir = dirname(p);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-    let merged: Record<string, unknown> = {};
-    if (existsSync(p)) {
-      try {
-        const existing = JSON.parse(this.read() ?? '{}');
-        if (existing && typeof existing === 'object') merged = existing;
-      } catch {
-        merged = {};
-      }
-    }
-    const patch = JSON.parse(content) as Record<string, unknown>;
-    merged = { ...merged, ...patch };
-    // merge env sub-object instead of replacing wholesale
-    if (patch.env && typeof patch.env === 'object' && merged.env && typeof merged.env === 'object') {
-      merged.env = { ...(merged.env as Record<string, unknown>), ...(patch.env as Record<string, unknown>) };
-    }
-    writeFileSync(p, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+    write_config_with_backup(p, JSON.stringify(merged, null, 2) + '\n');
   }
 }
 
@@ -257,7 +268,7 @@ export class KiloAdapter extends JsonAgentAdapter {
   read(): string | undefined {
     const raw = super.read();
     if (!raw) return undefined;
-    return raw.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    return JSON.stringify(parse_jsonc_object(raw, 'Kilo config'));
   }
 
   write(content: string): void {
@@ -278,13 +289,13 @@ export class KiloAdapter extends JsonAgentAdapter {
     const providers = (merged.provider as Record<string, unknown> | undefined) ?? {};
     merged.provider = { ...providers, ...(patch.provider as Record<string, unknown>) };
     if (typeof patch.model === 'string' && patch.model) merged.model = patch.model;
-    writeFileSync(p, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+    write_config_with_backup(p, JSON.stringify(merged, null, 2) + '\n');
   }
 
   detectCurrentBaseURL(): string | undefined {
-    const raw = this.read();
-    if (!raw) return undefined;
     try {
+      const raw = this.read();
+      if (!raw) return undefined;
       const cfg = JSON.parse(raw) as Record<string, unknown>;
       const providers = cfg.provider as Record<string, unknown> | undefined;
       const aag = providers?.aag as Record<string, unknown> | undefined;
@@ -429,8 +440,7 @@ export function createAdapter(target: AgentTarget): AgentAdapter {
 
 export function detectInstalledAgents(targets: AgentTarget[]): AgentTarget[] {
   return targets.filter((t) => {
-    const adapter = createAdapter(t);
-    const p = t.configPaths.find((x) => existsSync(x));
-    return !!p;
+    createAdapter(t); // validates the target maps to a known adapter
+    return t.configPaths.some((x) => existsSync(x));
   });
 }

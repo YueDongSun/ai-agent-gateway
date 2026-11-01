@@ -94,13 +94,18 @@ pub fn provider_config_status(
         | AppType::Gemini
         | AppType::OpenCode
         | AppType::KiloCli
+        | AppType::ClineCli
         | AppType::KiloVsCode => {
             let resolved = config_paths::resolve(app_type)?;
             Ok(Provider_config_status {
                 app_type: app_type.into(),
                 platform: platform_name().into(),
                 supported: platform_name() != "unsupported",
-                mode: "config",
+                mode: if app == AppType::ClineCli {
+                    "mirror"
+                } else {
+                    "config"
+                },
                 source: resolved.source,
                 config_paths: resolved
                     .paths

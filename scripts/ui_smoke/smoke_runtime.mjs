@@ -260,17 +260,26 @@ export async function wait_for_cdp_origin(profile_directory, browser_process, {
   throw read_spawn_error() ?? new Error('owned headless browser did not expose DevToolsActivePort within 20s');
 }
 
-async function start_browser(browser_path) {
-  const profile_directory = mkdtempSync(join(tmpdir(), profile_prefix));
-  const browser_process = spawn(browser_path, [
+export function owned_browser_arguments(profile_directory) {
+  return [
     '--headless=new',
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
+    // The owned browser must measure AAG only. Host-installed extensions
+    // otherwise inject their own content scripts into this disposable
+    // profile, and their rejections surface as application exceptions.
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
     '--user-data-dir=' + profile_directory,
     '--remote-debugging-port=0',
     'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
+  ];
+}
+
+async function start_browser(browser_path) {
+  const profile_directory = mkdtempSync(join(tmpdir(), profile_prefix));
+  const browser_process = spawn(browser_path, owned_browser_arguments(profile_directory), { stdio: 'ignore', windowsHide: true });
   let spawn_error = null;
   browser_process.once('error', (error) => {
     spawn_error = error;
@@ -298,8 +307,14 @@ export async function create_smoke_runtime(browser_path, { built_demo = false } 
       demo_url,
       cdp_origin: browser.cdp_origin,
       profile_directory: browser.profile_directory,
-      async close() {
+      async close(browser_client) {
         try {
+          if (browser_client) {
+            try {
+              await browser_client.send('Browser.close');
+              await wait_for_browser_exit(browser.browser_process);
+            } catch { /* The existing owned-process cleanup remains mandatory. */ }
+          }
           await stop_owned_browser(browser.browser_process, browser.profile_directory);
         } finally {
           await vite_server.close();

@@ -1,5 +1,6 @@
 import { cdp_client } from './cdp_client.mjs';
 import { cdp_timeout_ms, read_cdp_endpoint } from './cdp_endpoint.mjs';
+import { readFile } from 'node:fs/promises';
 
 const responsive_viewports = [
   { width: 1200, height: 900 },
@@ -27,6 +28,11 @@ async function attach_market_popup(cdp_origin, initial_target_ids, demo_url, sle
     if (popup) {
       const client = new cdp_client(new WebSocket(popup.webSocketDebuggerUrl));
       await client.connect();
+      client.market_exception_records = [];
+      client.web_socket.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.method === 'Runtime.exceptionThrown') client.market_exception_records.push(message.params.exceptionDetails);
+      });
       await client.send('Runtime.enable');
       await client.send('Page.enable');
       return { client, target_id: popup.id };
@@ -38,9 +44,16 @@ async function attach_market_popup(cdp_origin, initial_target_ids, demo_url, sle
 
 // Installed only in the new demo popup. Preserve the absent native bridge until
 // mockIPC creates it, so the instrumentation does not change demo detection.
-function trace_market_page() {
-  const trace = { commands: [], catalog: null, override: null, opened_urls: [] };
+function trace_market_page(feed) {
+  const trace = { commands: [], catalog: null, override: null, opened_urls: [], feed, fetches: [], fail_next: true };
   window.__aag_market_trace = trace;
+  const original_fetch = window.fetch;
+  window.fetch = async (target, options) => {
+    if (String(target) !== 'https://dsh.market/plugins.json') return original_fetch(target, options);
+    trace.fetches.push({ target: String(target), credentials: options?.credentials, cache: options?.cache });
+    if (trace.fail_next) { trace.fail_next = false; throw new Error('smoke network unavailable'); }
+    return new Response(JSON.stringify(trace.feed), { headers: { 'Content-Type': 'application/json' } });
+  };
   let bridge;
   Object.defineProperty(window, '__TAURI_INTERNALS__', {
     configurable: true,
@@ -53,7 +66,7 @@ function trace_market_page() {
         trace.commands.push({ command, args });
         const result = await implementation.call(value, command, args, options);
         if (command === 'dsh_market_get_catalog' || command === 'dsh_market_refresh') {
-          trace.catalog ??= structuredClone(result);
+          if (!trace.override) trace.catalog = structuredClone(result);
           return trace.override ? structuredClone(trace.override) : result;
         }
         return result;
@@ -111,6 +124,14 @@ async function prepare_market_page() {
 }
 
 export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_in_page, check, sleep }) {
+  // The historical snapshot supplies test metadata only, never runtime catalog data.
+  const source_fixture = JSON.parse(await readFile(new URL('../../shared/dsh_market_catalog.json', import.meta.url), 'utf8'));
+  const entries = source_fixture.entries.slice(0, 160);
+  const feed_fixture = { schemaVersion: 2, generatedAt: source_fixture.registry_generated_at, plugins: entries.map((entry) => ({
+    fullName: entry.full_name, description: entry.description, descriptionEn: entry.description_en, descriptionZh: entry.description_zh,
+    stars: entry.stars, updatedAt: entry.updated_at, topics: [...entry.categories, ...entry.use_cases, ...entry.modules],
+    packageName: entry.package_name, version: entry.version, license: entry.license, verifiedCommit: entry.source_commit,
+  })) };
   let popup = null;
   const initial_target_ids = new Set((await list_owned_targets(cdp_origin)).map((target) => target.id));
   const fixture_ready = await cdp.eval_value('(' + (async () => {
@@ -162,9 +183,36 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       detail: 'view=' + new URL(location.href).searchParams.get('view') + ' opener-null=' + (window.opener === null),
     }));
 
-    await market_cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: '(' + trace_market_page.toString() + ')()' });
+    await market_cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: '(' + trace_market_page.toString() + ')(' + JSON.stringify(feed_fixture) + ')' });
+    // Settle the original live load before replacing its document. Reloading
+    // during lazy imports or an IPC response can report an orphaned rejection.
+    const initial_load_deadline = Date.now() + 35_000;
+    let initial_load_settled = false;
+    while (Date.now() < initial_load_deadline) {
+      initial_load_settled = await market_cdp.eval_value(`Boolean(
+        document.querySelector('[data-testid="market_refresh"]')?.disabled === false &&
+        (document.querySelector('[data-testid="market_card"]') || document.querySelector('[data-testid="market_error"]'))
+      )`);
+      if (initial_load_settled) break;
+      await sleep(100);
+    }
+    if (!initial_load_settled) throw new Error('initial marketplace request did not settle before fixture reload');
     await market_cdp.send('Page.reload', { ignoreCache: false });
     await sleep(150);
+    await check_in_page(market_cdp, check, 'Initial network failure shows retry without a bundled or cached list', async () => {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const error = document.querySelector('[data-testid="market_error"]');
+        if (error) {
+          const trace = window.__aag_market_trace;
+          const ok = trace.fetches.length === 1 && trace.catalog === null && !document.querySelector('[data-testid="market_card"]') &&
+            !document.querySelector('[data-testid="market_empty"]');
+          error.querySelector('button')?.click();
+          return { ok, detail: 'requests=' + trace.fetches.length + ' bundled-list=false' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return 'initial-fetch-error-missing';
+    });
     const market_ready_deadline = Date.now() + 30_000;
     let market_ready = false;
     while (Date.now() < market_ready_deadline) {
@@ -184,9 +232,32 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       return {
         ok: Boolean(api.element('market_page')) && !document.querySelector('.aag-header') &&
           catalog.entry_count === catalog.entries.length && catalog.entry_count > 100 && api.cards().length > 0 && api.cards().length <= 12 &&
-          api.count() === catalog.entry_count && commands.length > 0 && commands.every((command) => command === 'dsh_market_get_catalog'),
+          api.count() === catalog.entry_count && commands.length > 0 && commands.every((command) => command === 'dsh_market_get_catalog') &&
+          api.trace.fetches.length === 2 && api.trace.fetches.every((request) => request.credentials === 'omit' && request.cache === 'no-store') &&
+          catalog.source_registry === 'dsh.market' && catalog.registry_commit === '' && catalog.cache_status === 'refreshed',
         detail: 'entries=' + catalog.entry_count + ' rendered=' + api.cards().length + ' commands=' + commands.join(','),
       };
+    });
+
+    await check_in_page(market_cdp, check, 'Reopening fetches changed content and preserves the active search', async () => {
+      const api = window.__aag_market_smoke;
+      const original_feed = structuredClone(api.trace.feed);
+      const original_count = api.entries().length;
+      const requests_before = api.trace.fetches.length;
+      await api.input('market_search', 'example/live_refresh');
+      api.trace.feed.plugins.push({ fullName: 'example/live_refresh', description: 'Browser automation workflow tools', topics: ['browser', 'automation'], stars: 7 });
+      window.dispatchEvent(new Event('dsh_market_opened'));
+      await api.wait_for(() => api.entries().length === original_count + 1 && api.ids().includes('example/live_refresh'));
+      const updated = api.trace.fetches.length === requests_before + 1 && api.element('market_search').value === 'example/live_refresh' && api.count() === 1;
+      api.trace.fail_next = true;
+      window.dispatchEvent(new Event('dsh_market_opened'));
+      await api.wait_for(() => api.element('market_error'));
+      const retained = api.ids().includes('example/live_refresh') && api.count() === 1 && api.element('market_error').textContent.includes('previous catalog');
+      api.trace.feed = original_feed;
+      window.dispatchEvent(new Event('dsh_market_opened'));
+      await api.wait_for(() => !api.element('market_error') && api.entries().length === original_count && !api.element('market_refresh').disabled);
+      await api.reset();
+      return { ok: updated && retained, detail: 'fresh-response=' + updated + ' filters-preserved=' + updated + ' failed-reopen-retained=' + retained };
     });
 
     await check_in_page(market_cdp, check, 'Marketplace EN and CN switches update labels and preserve catalog state', async () => {
@@ -274,7 +345,7 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       return { ok: names_sorted && dates_sorted && named.map((entry) => entry.id).join('|') !== recent.map((entry) => entry.id).join('|'), detail: 'name-order=' + names_sorted + ' date-order=' + dates_sorted };
     });
 
-    await check_in_page(market_cdp, check, 'Plugin details expose repository and pinned collection provenance without installation', async () => {
+    await check_in_page(market_cdp, check, 'Plugin details expose the live feed and mark its unprovided revision as unknown', async () => {
       const api = window.__aag_market_smoke;
       const entry = api.displayed_entries()[0];
       await api.click('market_detail_' + entry.id);
@@ -283,15 +354,15 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       const registry = api.element('market_source_registry');
       const collector = api.element('market_source_collector');
       const catalog = api.trace.catalog;
-      const source_links = [repository, registry, collector];
+      const source_links = [repository, registry];
       const safe_links = source_links.every((link) => {
-        try { const url = new URL(link?.getAttribute('href')); return url.protocol === 'https:' && url.hostname === 'github.com' && link.getAttribute('rel')?.includes('noopener'); }
+        try { const url = new URL(link?.getAttribute('href')); return url.protocol === 'https:' && (url.hostname === 'github.com' || url.href === 'https://dsh.market/plugins.json') && link.getAttribute('rel')?.includes('noopener'); }
         catch { return false; }
       });
-      const source_matches = repository?.getAttribute('href') === entry.repo_url && registry?.getAttribute('href') === catalog.registry_url && collector?.getAttribute('href') === catalog.collector_url;
+      const source_matches = repository?.getAttribute('href') === entry.repo_url && registry?.getAttribute('href') === catalog.registry_url && !collector;
       const warning = dialog?.textContent.includes('A source listing is not a trust certificate.') && dialog.textContent.includes('not the plugin code');
       const focused = dialog?.contains(document.activeElement);
-      const commit = dialog?.textContent.includes(catalog.registry_commit);
+      const commit = api.element('market_registry_commit')?.textContent === 'Not provided by the marketplace';
       await api.click('market_detail_close');
       const focus_restored = document.activeElement?.getAttribute('data-testid') === 'market_detail_' + entry.id;
       return { ok: safe_links && source_matches && warning && focused && commit && focus_restored, detail: 'safe-links=' + safe_links + ' provenance=' + source_matches + ' warning=' + warning + ' pinned=' + commit + ' focus-restored=' + focus_restored };
@@ -381,7 +452,20 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       const unexpected = commands.filter((command) => !allowed.includes(command));
       return { ok: unexpected.length === 0 && api.trace.override === null && api.trace.opened_urls.length === 0, detail: 'calls=' + commands.length + ' commands=' + [...new Set(commands)].join(',') + ' unexpected=' + unexpected.join(',') };
     });
-    check('marketplace has zero uncaught browser exceptions', market_cdp.exceptions.length === 0, market_cdp.exceptions[0]?.slice(0, 200));
+    // Attribute any exception to its source. Without the URL and script id a
+    // failure here reports only `name:line`, which cannot distinguish
+    // application code from a third-party script injected into this browser.
+    const exception_summary = market_cdp.market_exception_records.map((record) => ({
+      text: record.text,
+      description: record.exception?.description,
+      url: record.url ?? record.stackTrace?.callFrames?.[0]?.url ?? null,
+      script_id: record.scriptId ?? record.stackTrace?.callFrames?.[0]?.scriptId ?? null,
+      frames: record.stackTrace?.callFrames?.slice(0, 4).map((frame) => ({ name: frame.functionName, line: frame.lineNumber, column: frame.columnNumber })),
+    }));
+    check('marketplace has zero uncaught browser exceptions', market_cdp.exceptions.length === 0, JSON.stringify(exception_summary));
+    await check_in_page(cdp, check, 'Marketplace popup preserves its opener route', () => ({
+      ok: location.href === new URL('#/dsh', window.__aag_market_main.url).href,
+    }));
   } finally {
     if (popup) {
       await cdp.send('Target.closeTarget', { targetId: popup.target_id });
@@ -393,7 +477,7 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
       const previous = new Map(state.storage);
       for (const key of Object.keys(localStorage)) if (!previous.has(key)) localStorage.removeItem(key);
       for (const [key, value] of previous) localStorage.setItem(key, value);
-      [...document.querySelectorAll('.app-switcher button')].find((button) => button.textContent.trim() === 'Claude')?.click();
+      await window.__aag_open_client_management('claude_code');
       for (let attempt = 0; attempt < 60; attempt += 1) {
         if (document.querySelector('.page-header h2')?.textContent === 'Claude') return true;
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -405,7 +489,9 @@ export async function run_dsh_market_checks({ cdp, cdp_origin, demo_url, check_i
   await check_in_page(cdp, check, 'Marketplace popup leaves the original app and DSH fixtures unchanged', async () => {
     const state = window.__aag_market_main;
     const preserved = await state.fixture() === state.before;
-    const original_url = location.href === state.url;
+    // This test explicitly restores Suppliers client management above; its route reflects that
+    // navigation. Check the full expected URL, including origin/path/query.
+    const original_url = location.href === new URL('#/suppliers', state.url).href;
     delete window.__aag_market_main;
     return { ok: preserved && original_url && document.querySelector('.page-header h2')?.textContent === 'Claude', detail: 'fixtures=' + preserved + ' original-url=' + original_url };
   });

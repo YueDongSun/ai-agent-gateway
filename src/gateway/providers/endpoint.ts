@@ -139,3 +139,14 @@ export function modelsUrls(baseUrl: string, protocol: Protocol): string[] {
   }
   return out;
 }
+
+/** Derive the count_tokens endpoint from a resolved messages endpoint
+ * (Rust parity: `anthropic_count_tokens_url` in
+ * src-tauri/src/proxy/endpoint.rs). Only a URL whose final path segment is
+ * `messages` can carry the suffix; anything else is not a messages
+ * endpoint. */
+export function anthropicCountTokensUrl(messagesEndpoint: string): string | undefined {
+  return messagesEndpoint.endsWith('/messages')
+    ? `${messagesEndpoint}/count_tokens`
+    : undefined;
+}

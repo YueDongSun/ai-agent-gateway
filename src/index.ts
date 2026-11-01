@@ -9,12 +9,22 @@ program
   .name('aag')
   .description(chalk.bold('AI Agent Gateway') + ' — unified proxy + switcher for Copilot/Kilo/Cursor/ZCode/MiniMax/Kimi')
   .version('0.1.0')
-  .option('--menu', 'launch interactive TUI menu (default if no subcommand)');
+  .option('--menu', 'launch interactive TUI menu (default if no subcommand)')
+  // Root action = the interactive menu default. Without a root action,
+  // commander prints help and exits 1 during parse when no subcommand is
+  // selected, so the no-args menu default would never run.
+  .action(() => {
+    interactiveMenu().catch((e) => {
+      console.error(chalk.red(e.message));
+      process.exit(1);
+    });
+  });
 
 program
   .command('gateway', { isDefault: false })
   .description('start the gateway proxy server')
-  .option('-h, --host <host>')
+  // No -h short flag: it would shadow commander's built-in help.
+  .option('--host <host>')
   .option('-p, --port <port>')
   .action(startGatewayCmd);
 
@@ -49,17 +59,7 @@ program
   .description('print the config file path')
   .action(configPathCmd);
 
-const parsed = program.parseAsync(process.argv);
-
-// If no subcommand given, launch interactive menu.
-if (process.argv.slice(2).length === 0) {
-  interactiveMenu().catch((e) => {
-    console.error(chalk.red(e.message));
-    process.exit(1);
-  });
-} else {
-  parsed.catch((e) => {
-    console.error(chalk.red(e.message));
-    process.exit(1);
-  });
-}
+program.parseAsync(process.argv).catch((e) => {
+  console.error(chalk.red(e.message));
+  process.exit(1);
+});

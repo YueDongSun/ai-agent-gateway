@@ -19,6 +19,8 @@ const ENV_OVERRIDES: &[&str] = &[
     "OPENCODE_CONFIG_DIR",
     "KILO_CONFIG",
     "KILO_CONFIG_DIR",
+    "CLINE_DATA_DIR",
+    "CLINE_PROVIDER_SETTINGS_PATH",
     "XDG_CONFIG_HOME",
 ];
 
@@ -69,13 +71,9 @@ fn build_isolated_home(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let root = std::env::temp_dir().join(format!(
-        "aag-{label}-test-{}-{nonce}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("create isolated AAG test root");
-    crate::config::private_fs::prepare_managed_private_dir(&root)
+    let root =
+        std::env::temp_dir().join(format!("aag-{label}-test-{}-{nonce}", std::process::id()));
+    crate::config::private_fs::create_private_dir(&root)
         .expect("secure isolated AAG test root to owner-only");
 
     // Capture then clear every override, then install the test's own values.
@@ -87,13 +85,16 @@ fn build_isolated_home(
         std::env::remove_var(key);
     }
     let aag_state = root.join("aag_state");
-    std::fs::create_dir_all(&aag_state).expect("create aag_state");
-    crate::config::private_fs::prepare_managed_private_dir(&aag_state)
+    crate::config::private_fs::create_private_dir(&aag_state)
         .expect("secure aag_state to owner-only");
     std::env::set_var("AAG_HOME_DIR", &root);
     std::env::set_var("AAG_CONFIG_DIR", &aag_state);
 
-    IsolatedHome { root, environment, _env_guard: env_guard }
+    IsolatedHome {
+        root,
+        environment,
+        _env_guard: env_guard,
+    }
 }
 
 impl IsolatedHome {

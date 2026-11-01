@@ -70,6 +70,49 @@ export function CopilotIcon(props: IconProps = {}) {
   );
 }
 
+/** Faceted starburst glyph for Gemini CLI navigation. */
+export function gemini_icon(props: IconProps = {}) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M8 1.7 L9.3 6.7 L14.3 8 L9.3 9.3 L8 14.3 L6.7 9.3 L1.7 8 L6.7 6.7 Z" />
+      <path d="M8 4.5 L8 11.5 M4.5 8 L11.5 8" />
+    </svg>
+  );
+}
+
+/** Stacked angle glyph for Kilo CLI. */
+export function kilo_icon(props: IconProps = {}) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M3 2.5 V13.5 M3.5 8 L11 2.5 M3.5 8 L11 13.5" />
+      <path d="M12.5 5.5 V13.5" />
+    </svg>
+  );
+}
+
+/** Bracketed prompt glyph for Cline CLI. */
+export function cline_icon(props: IconProps = {}) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M5.5 3 H3 V13 H5.5 M10.5 3 H13 V13 H10.5" />
+      <path d="M6.5 8 H10" />
+      <path d="M8.7 6.5 L10.2 8 L8.7 9.5" />
+    </svg>
+  );
+}
+
+/// Greek π with a small orbit dot — abstract stand-in for the Pi coding
+/// agent (letterform kept geometric, no vendor mark).
+export function PiIcon(props: IconProps = {}) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M3 4.5 L13 4.5" />
+      <path d="M5 4.5 L5 12" />
+      <path d="M11 4.5 L11 8.2 A2.2 2.2 0 0 1 6.6 8.2" />
+    </svg>
+  );
+}
+
 /// Two overlapping rounded rects — the standard "duplicate" glyph.
 export function CopyIcon(props: IconProps = {}) {
   return (

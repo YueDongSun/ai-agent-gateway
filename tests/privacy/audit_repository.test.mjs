@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { audit_repository, scan_content } from '../../scripts/privacy/audit_repository.mjs';
+import { audit_repository, directory_mode_matches_manifest, scan_content } from '../../scripts/privacy/audit_repository.mjs';
 import { create_test_repository, run_git } from './test_repository.mjs';
 
 function adversarial_values() {
@@ -16,6 +18,15 @@ function adversarial_values() {
   const tailnet = ['private-node', 'private-mesh', 'ts', 'net'].join('.');
   return { token, key, jwt, authenticated_url, email, user_path, private_address, tailnet };
 }
+
+test('public protocol network ranges are not peer inventory but individual peers remain findings', () => {
+  for (const range of ['100.64.0.0/10', 'fd7a:115c:a1e0::/48']) {
+    assert.equal(scan_content('src/policy.py', Buffer.from(`address in ipaddress.ip_network("${range}")`)).findings.length, 0);
+  }
+  for (const peer of ['100.64.0.1', '100.64.0.0', '100.64.0.0/32', '100.64.1.0/24', 'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0::/64']) {
+    assert.ok(scan_content('src/policy.py', Buffer.from(peer)).findings.some(item => item.category === 'private_network_address'));
+  }
+});
 
 test('detects adversarial secrets and PII without returning raw matches', () => {
   const values = adversarial_values();
@@ -204,5 +215,133 @@ test('history audit scans every path for a reused blob and every historical sens
     assert.equal(JSON.stringify(report).includes(secret), false);
   } finally {
     rmSync(fixture.base, { recursive: true, force: true });
+  }
+});
+
+test('directory_mode_matches_manifest treats the executable bit as not applicable on win32', () => {
+  assert.equal(directory_mode_matches_manifest('100644', '100644', 'win32'), 'not_applicable');
+  assert.equal(directory_mode_matches_manifest('100644', '100755', 'win32'), 'not_applicable');
+  assert.equal(directory_mode_matches_manifest('100755', '100644', 'win32'), 'not_applicable');
+});
+
+test('directory_mode_matches_manifest compares listed and observed modes off windows', () => {
+  assert.equal(directory_mode_matches_manifest('100644', '100644', 'linux'), true);
+  assert.equal(directory_mode_matches_manifest('100755', '100755', 'linux'), true);
+  assert.equal(directory_mode_matches_manifest('100644', '100755', 'linux'), false);
+  assert.equal(directory_mode_matches_manifest('100755', '100644', 'linux'), false);
+});
+
+test('audits a plain exported directory against its public snapshot manifest modes', () => {
+  const base = mkdtempSync(join(tmpdir(), 'privacy_audit_fixture_'));
+  try {
+    const policy_bytes = Buffer.from(`${JSON.stringify({
+      schema_version: 1,
+      history_policy: 'history_free',
+      package_surface: 'private',
+      required_ignored_paths: [],
+      required_public_examples: [],
+      maximum_text_file_bytes: 1048576,
+    }, null, 2)}\n`, 'utf8');
+    const file_bytes = new Map([
+      ['.npmignore', Buffer.from('node_modules\n', 'utf8')],
+      ['NOTES.md', Buffer.from('Snapshot notes.\n', 'utf8')],
+      ['README.md', Buffer.from('Fixture snapshot readme.\n', 'utf8')],
+      ['package.json', Buffer.from(JSON.stringify({ private: true, files: ['dist'] }), 'utf8')],
+      ['scripts/privacy/public_export_policy.json', policy_bytes],
+    ]);
+    const manifest_files = [...file_bytes].map(([path, bytes]) => ({
+      path,
+      mode: path === 'README.md' ? '100755' : '100644',
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    }));
+    const tree_hasher = createHash('sha256');
+    for (const file of [...manifest_files].sort((left, right) => left.path.localeCompare(right.path, 'en'))) {
+      tree_hasher.update(file.mode + '\0' + file.path + '\0' + file.sha256 + '\0' + file.bytes + '\n');
+    }
+    mkdirSync(join(base, 'scripts', 'privacy'), { recursive: true });
+    for (const [path, bytes] of file_bytes) writeFileSync(join(base, ...path.split('/')), bytes);
+    writeFileSync(join(base, 'public_snapshot_manifest.json'), Buffer.from(`${JSON.stringify({
+      schema_version: 1,
+      snapshot_type: 'history_free_tracked_tree',
+      policy_sha256: createHash('sha256').update(policy_bytes).digest('hex'),
+      export_tree_sha256: tree_hasher.digest('hex'),
+      files: manifest_files,
+    }, null, 2)}\n`, 'utf8'));
+
+    const report = audit_repository({ repository_root: base, directory: true, include_npm_pack: false });
+    const mismatches = report.findings.filter(finding => finding.category === 'public_snapshot_mode_mismatch');
+    const expected_mismatches = process.platform === 'win32' ? 0 : 1;
+    assert.equal(report.summary.blockers, expected_mismatches);
+    assert.equal(mismatches.length, expected_mismatches);
+    if (expected_mismatches === 1) assert.equal(mismatches[0].path, 'README.md');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+function write_snapshot_directory_fixture(base, manifest_policy_sha256) {
+  const policy_bytes = Buffer.from(`${JSON.stringify({
+    schema_version: 1,
+    history_policy: 'history_free',
+    package_surface: 'private',
+    required_ignored_paths: [],
+    required_public_examples: [],
+    maximum_text_file_bytes: 1048576,
+  }, null, 2)}\n`, 'utf8');
+  const file_bytes = new Map([
+    ['.npmignore', Buffer.from('node_modules\n', 'utf8')],
+    ['NOTES.md', Buffer.from('Snapshot notes.\n', 'utf8')],
+    ['README.md', Buffer.from('Fixture snapshot readme.\n', 'utf8')],
+    ['package.json', Buffer.from(JSON.stringify({ private: true, files: ['dist'] }), 'utf8')],
+    ['scripts/privacy/public_export_policy.json', policy_bytes],
+  ]);
+  const manifest_files = [...file_bytes].map(([path, bytes]) => ({
+    path,
+    mode: '100644',
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  }));
+  const tree_hasher = createHash('sha256');
+  for (const file of [...manifest_files].sort((left, right) => left.path.localeCompare(right.path, 'en'))) {
+    tree_hasher.update(file.mode + '\0' + file.path + '\0' + file.sha256 + '\0' + file.bytes + '\n');
+  }
+  mkdirSync(join(base, 'scripts', 'privacy'), { recursive: true });
+  for (const [path, bytes] of file_bytes) writeFileSync(join(base, ...path.split('/')), bytes);
+  const manifest = {
+    schema_version: 1,
+    snapshot_type: 'history_free_tracked_tree',
+    export_tree_sha256: tree_hasher.digest('hex'),
+    files: manifest_files,
+  };
+  if (manifest_policy_sha256 !== undefined) manifest.policy_sha256 = manifest_policy_sha256;
+  writeFileSync(join(base, 'public_snapshot_manifest.json'), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
+}
+
+test('flags a snapshot whose manifest policy_sha256 does not match the exported policy bytes', () => {
+  const base = mkdtempSync(join(tmpdir(), 'privacy_audit_fixture_'));
+  try {
+    write_snapshot_directory_fixture(base, 'f'.repeat(64));
+    const report = audit_repository({ repository_root: base, directory: true, include_npm_pack: false });
+    const mismatches = report.findings.filter(finding => finding.category === 'public_snapshot_policy_mismatch');
+    assert.equal(mismatches.length, 1);
+    assert.equal(mismatches[0].path, 'scripts/privacy/public_export_policy.json');
+    assert.equal(mismatches[0].line, 0);
+    assert.equal(mismatches[0].severity, 'blocker');
+    assert.equal(report.summary.blockers, 1);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('rejects a snapshot manifest without policy_sha256 as invalid without a policy mismatch', () => {
+  const base = mkdtempSync(join(tmpdir(), 'privacy_audit_fixture_'));
+  try {
+    write_snapshot_directory_fixture(base, undefined);
+    const report = audit_repository({ repository_root: base, directory: true, include_npm_pack: false });
+    assert.ok(report.findings.some(finding => finding.category === 'public_snapshot_manifest_invalid'));
+    assert.equal(report.findings.some(finding => finding.category === 'public_snapshot_policy_mismatch'), false);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

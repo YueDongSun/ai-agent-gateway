@@ -1,5 +1,6 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
 import { feature_scopes, verification_plan } from './feature_catalog.mjs';
 
 test('every scope produces unique allowlisted local checks and explicit exclusions', () => {
@@ -13,6 +14,23 @@ test('every scope produces unique allowlisted local checks and explicit exclusio
     assert.ok(plan.checks.every((check) => ['.', 'ui', 'src-tauri'].includes(check.cwd)));
     assert.ok(plan.checks.every((check) => !check.args.includes('--ignored')));
   }
+});
+test('npm-script catalog entries stay in sync with package.json', () => {
+  const package_json = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const expected_guarded_ids = ['automation_tests', 'desktop_runner', 'dsh_market', 'dsh_transport', 'privacy_audit', 'rust_profile_runner', 'ui_smoke', 'workflow_facade_tests'];
+  const guarded_ids = [];
+  for (const check of verification_plan('all').checks) {
+    const match = /^npm run (\S+)$/.exec(check.command);
+    if (!match) continue;
+    const script_name = match[1];
+    const script_text = package_json.scripts[script_name];
+    assert.ok(typeof script_text === 'string', `check ${check.id} references missing package.json script ${script_name}`);
+    const tokens = script_text.split(/\s+/);
+    if (tokens[0] !== 'node' || script_text.includes('&&')) continue;
+    guarded_ids.push(check.id);
+    assert.deepEqual(check.args, tokens.slice(1), `check ${check.id} args must match npm script ${script_name}`);
+  }
+  assert.deepEqual(guarded_ids.sort(), expected_guarded_ids);
 });
 test('release verification includes both preflight assets and privacy audit', () => {
   const plan = verification_plan('all');

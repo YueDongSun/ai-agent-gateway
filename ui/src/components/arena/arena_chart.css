@@ -1,0 +1,28 @@
+.arena_panel { margin-top: 20px; }
+.arena_loading { min-height: 325px; }
+.arena_controls { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.arena_controls > label:not(.arena_check) { display: grid; gap: 6px; font-size: 12px; flex: 1 1 200px; min-width: 0; }
+.arena_check { display: flex; gap: 8px; align-items: center; font-size: 12px; line-height: 1.7; margin: 7px 0; }
+.arena_check input { accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 16px; margin: 0; }
+.arena_scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+.arena_svg { display: block; width: 100%; color: var(--accent-text); }
+.arena_svg text { font: 11px system-ui, sans-serif; fill: var(--fg-muted); }
+.arena_grid { stroke: var(--border); stroke-dasharray: 3 5; }
+.arena_cloud { fill: var(--fg-muted); opacity: .5; }
+.arena_bin { fill: var(--accent); opacity: .24; }
+.arena_candidate { fill: var(--bg-elevated); stroke: var(--accent); stroke-width: 1.5; }
+.arena_svg .arena_step { fill: var(--fg); font-size: 9px; }
+.arena_selected { color: var(--accent-text); }.arena_comparator { color: var(--success); }
+.arena_summary { display: grid; gap: 5px; margin-block: 12px; font-size: 12px; overflow-wrap: anywhere; }
+.arena_strategy { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; padding: 14px; background: var(--bg-elevated-2); border-radius: var(--radius-sm); }
+.arena_strategy ol { width: 100%; margin: 4px 0 0; padding-left: 22px; }
+.arena_strategy li { padding: 4px; overflow-wrap: anywhere; }
+
+.arena_strategy { min-width: 0; overflow-wrap: anywhere; }
+.arena_strategy .routing_queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; min-width: 0; }
+.arena_strategy .routing_queue_item { padding: 0; min-width: 0; }
+.routing_candidate { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); min-width: 0; }
+.routing_candidate_heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.routing_candidate_heading code { flex: 1 1 140px; min-width: 0; }
+.routing_fallback_arrow { display: flex; align-items: center; gap: 8px; padding: 6px 14px; color: var(--fg-muted); }
+.routing_fallback_arrow > span:first-child { font-size: 24px; line-height: 1; color: var(--accent-text); }

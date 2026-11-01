@@ -41,6 +41,12 @@ about the wire format. All providers return canonical `OAIChatResponse` /
   stream setup bounds response-header time without imposing a total stream
   timeout. OpenAI-compatible streams request usage when the caller did not
   provide `stream_options`.
+- The shared SSE decoder consumes prefixes through a bounded byte-buffer
+  view and resumes delimiter scans at newly received bytes. It preserves
+  CR/LF/CRLF framing, fragmented UTF-8, multiline data, explicit terminal
+  errors, and one-event-at-a-time delivery. See the
+  [speed research and benchmark](../../../../docs/performance/router_speed_research.md)
+  for measured CPU results and their latency limits.
 
 ## See also
 

@@ -133,11 +133,30 @@ fn text<'a>(value: &'a Value, field: &str, limit: usize) -> Result<&'a str, AppE
         .filter(|value| valid_text(value, limit))
         .ok_or_else(|| failure("invalid_text"))
 }
+fn text_any<'a>(value: &'a Value, fields: &[&str], limit: usize) -> Result<&'a str, AppError> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).map(|_| *field))
+        .ok_or_else(|| failure("invalid_text"))
+        .and_then(|field| text(value, field, limit))
+}
 fn optional_text(value: &Value, field: &str, limit: usize) -> Result<Option<String>, AppError> {
     match value.get(field) {
         None | Some(Value::Null) => Ok(None),
         _ => Ok(Some(text(value, field, limit)?.into())),
     }
+}
+fn optional_text_any(
+    value: &Value,
+    fields: &[&str],
+    limit: usize,
+) -> Result<Option<String>, AppError> {
+    for field in fields {
+        if value.get(*field).is_some_and(|item| !item.is_null()) {
+            return optional_text(value, field, limit);
+        }
+    }
+    Ok(None)
 }
 fn valid_timestamp(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(value).is_ok()
@@ -151,6 +170,68 @@ fn timestamp<'a>(value: &'a Value, field: &str) -> Result<&'a str, AppError> {
 }
 fn excerpt(value: &str) -> String {
     value.chars().take(400).collect()
+}
+
+/// Site readme excerpts can end at a high UTF-16 surrogate. JavaScript JSON
+/// parsers replace that unmatched code unit, while serde_json correctly rejects
+/// it. Match the site's display behavior for malformed surrogate escapes only.
+pub(super) fn replace_unpaired_surrogates(bytes: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'\\' {
+            result.push(bytes[cursor]);
+            cursor += 1;
+            continue;
+        }
+        let run_start = cursor;
+        while cursor < bytes.len() && bytes[cursor] == b'\\' {
+            cursor += 1;
+        }
+        let slash_count = cursor - run_start;
+        let has_unicode_escape = slash_count % 2 == 1
+            && bytes.get(cursor) == Some(&b'u')
+            && cursor + 5 < bytes.len()
+            && bytes[cursor + 1..cursor + 5]
+                .iter()
+                .all(u8::is_ascii_hexdigit);
+        if !has_unicode_escape {
+            result.extend_from_slice(&bytes[run_start..cursor]);
+            if cursor < bytes.len() {
+                result.push(bytes[cursor]);
+                cursor += 1;
+            }
+            continue;
+        }
+        result.extend_from_slice(&bytes[run_start..cursor - 1]);
+        let escape_start = cursor - 1;
+        let code_unit = u16::from_str_radix(
+            std::str::from_utf8(&bytes[cursor + 1..cursor + 5]).unwrap_or(""),
+            16,
+        )
+        .unwrap_or(0);
+        if (0xd800..=0xdbff).contains(&code_unit) {
+            let low_start = cursor + 5;
+            let low_is_valid = bytes.get(low_start..low_start + 6).is_some_and(|escape| {
+                escape[0..2] == *b"\\u"
+                    && escape[2..6].iter().all(u8::is_ascii_hexdigit)
+                    && u16::from_str_radix(std::str::from_utf8(&escape[2..6]).unwrap_or(""), 16)
+                        .is_ok_and(|value| (0xdc00..=0xdfff).contains(&value))
+            });
+            if low_is_valid {
+                result.extend_from_slice(&bytes[escape_start..low_start + 6]);
+                cursor = low_start + 6;
+                continue;
+            }
+        } else if !(0xdc00..=0xdfff).contains(&code_unit) {
+            result.extend_from_slice(&bytes[escape_start..cursor + 5]);
+            cursor += 5;
+            continue;
+        }
+        result.extend_from_slice(b"\\uFFFD");
+        cursor += 5;
+    }
+    result
 }
 
 fn is_private_ipv4(address: Ipv4Addr) -> bool {
@@ -371,15 +452,34 @@ fn expected_install_spec(entry: &Market_entry) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn normalize_feed(
     bytes: &[u8],
     registry_commit: &str,
     fetched_at: &str,
 ) -> Result<Market_catalog, AppError> {
+    normalize_feed_source(bytes, Some(registry_commit), fetched_at, false)
+}
+
+pub(super) fn normalize_site_feed(
+    bytes: &[u8],
+    fetched_at: &str,
+) -> Result<Market_catalog, AppError> {
+    normalize_feed_source(bytes, None, fetched_at, true)
+}
+
+fn normalize_feed_source(
+    bytes: &[u8],
+    registry_commit: Option<&str>,
+    fetched_at: &str,
+    is_site_feed: bool,
+) -> Result<Market_catalog, AppError> {
     if bytes.len() > MAX_FEED_BYTES {
         return Err(failure("feed_too_large"));
     }
-    let feed: Value = serde_json::from_slice(bytes).map_err(|_| failure("invalid_json"))?;
+    let normalized_bytes = replace_unpaired_surrogates(bytes);
+    let feed: Value =
+        serde_json::from_slice(&normalized_bytes).map_err(|_| failure("invalid_json"))?;
     if !matches!(
         feed.get("schemaVersion").and_then(Value::as_u64),
         Some(1 | 2)
@@ -393,7 +493,7 @@ pub(super) fn normalize_feed(
     if raw_entries.is_empty() || raw_entries.len() > MAX_ENTRIES {
         return Err(failure("invalid_entry_count"));
     }
-    if !valid_sha(registry_commit) || !valid_timestamp(fetched_at) {
+    if registry_commit.is_some_and(|commit| !valid_sha(commit)) || !valid_timestamp(fetched_at) {
         return Err(failure("invalid_provenance"));
     }
     let registry_generated_at = timestamp(&feed, "generatedAt")?.into();
@@ -403,7 +503,7 @@ pub(super) fn normalize_feed(
         BTreeMap::from(PRIVACY_REPLACEMENTS.map(|(key, _)| (key.to_string(), 0usize)));
     let mut privacy_modified_entries = 0usize;
     for raw in raw_entries {
-        let full_name = text(raw, "fullName", 140)?;
+        let full_name = text_any(raw, &["fullName", "full_name", "repo"], 140)?;
         if !valid_full_name(full_name) {
             return Err(failure("invalid_repository"));
         }
@@ -412,14 +512,17 @@ pub(super) fn normalize_feed(
             return Err(failure("duplicate_entry"));
         }
         let repo_url = format!("https://github.com/{full_name}");
-        if !text(raw, "htmlUrl", 256)?.eq_ignore_ascii_case(&repo_url) {
+        if raw.get("htmlUrl").or_else(|| raw.get("html_url")).is_some()
+            && !text_any(raw, &["htmlUrl", "html_url"], 256)?.eq_ignore_ascii_case(&repo_url)
+        {
             return Err(failure("invalid_repository_url"));
         }
         let (description, description_counts) = scrub_privacy_text(&excerpt(
             &optional_text(raw, "description", 16000)?.unwrap_or_default(),
         ));
-        let package_name = optional_text(raw, "packageName", 214)?;
-        let version = optional_text(raw, "version", 128)?;
+        let package_name = optional_text_any(raw, &["packageName", "package_name"], 214)?;
+        let version =
+            optional_text_any(raw, &["version", "packageVersion", "package_version"], 128)?;
         if package_name
             .as_deref()
             .is_some_and(|value| !valid_package(value))
@@ -432,7 +535,16 @@ pub(super) fn normalize_feed(
         {
             return Err(failure("invalid_version_privacy"));
         }
-        let source_commit = optional_text(raw, "verifiedCommit", 40)?;
+        let source_commit = optional_text_any(
+            raw,
+            &[
+                "verifiedCommit",
+                "verified_commit",
+                "sourceCommit",
+                "source_commit",
+            ],
+            40,
+        )?;
         if source_commit
             .as_ref()
             .map(|commit| !valid_sha(commit))
@@ -461,7 +573,7 @@ pub(super) fn normalize_feed(
                 .filter(|value| *value <= 9_007_199_254_740_991)
                 .ok_or_else(|| failure("invalid_stars"))?,
         };
-        let has_client = match raw.get("hasClient") {
+        let has_client = match raw.get("hasClient").or_else(|| raw.get("has_client")) {
             None => false,
             Some(value) => value
                 .as_bool()
@@ -479,17 +591,14 @@ pub(super) fn normalize_feed(
             "unknown"
         }
         .to_string();
-        let description_en_source = optional_text(
+        let description_en_source = optional_text_any(
             raw,
-            if raw
-                .get("descriptionEn")
-                .filter(|value| !value.is_null())
-                .is_some()
-            {
-                "descriptionEn"
-            } else {
-                "description_en"
-            },
+            &[
+                "descriptionEn",
+                "description_en",
+                "descriptionEnglish",
+                "description_english",
+            ],
             16000,
         )?
         .map(|value| excerpt(&value));
@@ -507,17 +616,14 @@ pub(super) fn normalize_feed(
                 BTreeMap::from(PRIVACY_REPLACEMENTS.map(|(key, _)| (key.into(), 0usize))),
             ),
         };
-        let description_zh_source = optional_text(
+        let description_zh_source = optional_text_any(
             raw,
-            if raw
-                .get("descriptionZh")
-                .filter(|value| !value.is_null())
-                .is_some()
-            {
-                "descriptionZh"
-            } else {
-                "description_zh"
-            },
+            &[
+                "descriptionZh",
+                "description_zh",
+                "descriptionChinese",
+                "description_chinese",
+            ],
             16000,
         )?
         .map(|value| excerpt(&value));
@@ -564,7 +670,7 @@ pub(super) fn normalize_feed(
         if entry_modified {
             privacy_modified_entries += 1;
         }
-        let updated_at = optional_text(raw, "updatedAt", 64)?;
+        let updated_at = optional_text_any(raw, &["updatedAt", "updated_at"], 64)?;
         if updated_at
             .as_ref()
             .map(|value| !valid_timestamp(value))
@@ -572,8 +678,18 @@ pub(super) fn normalize_feed(
         {
             return Err(failure("invalid_timestamp"));
         }
-        let (categories, use_cases, modules) =
-            classify(full_name, package_name.as_deref(), &description, &topics);
+        let classification_description = format!(
+            "{} {} {}",
+            description,
+            description_en.as_deref().unwrap_or_default(),
+            description_zh.as_deref().unwrap_or_default()
+        );
+        let (categories, use_cases, modules) = classify(
+            full_name,
+            package_name.as_deref(),
+            &classification_description,
+            &topics,
+        );
         let (author, name) = full_name
             .split_once('/')
             .ok_or_else(|| failure("invalid_repository"))?;
@@ -612,14 +728,29 @@ pub(super) fn normalize_feed(
         schema_version: 1,
         fetched_at: fetched_at.into(),
         registry_generated_at,
-        source_registry: SOURCE_REGISTRY.into(),
-        registry_commit: registry_commit.into(),
-        registry_url: format!(
-            "https://github.com/{SOURCE_REGISTRY}/blob/{registry_commit}/registry/plugins.json"
-        ),
-        collector_url: format!(
-            "https://github.com/{SOURCE_REGISTRY}/blob/{registry_commit}/scripts/registry-scan.mjs"
-        ),
+        source_registry: if is_site_feed {
+            "dsh.market"
+        } else {
+            SOURCE_REGISTRY
+        }
+        .into(),
+        registry_commit: registry_commit.unwrap_or_default().into(),
+        registry_url: if is_site_feed {
+            "https://dsh.market/plugins.json".into()
+        } else {
+            format!(
+                "https://github.com/{SOURCE_REGISTRY}/blob/{}/registry/plugins.json",
+                registry_commit.unwrap()
+            )
+        },
+        collector_url: if is_site_feed {
+            String::new()
+        } else {
+            format!(
+                "https://github.com/{SOURCE_REGISTRY}/blob/{}/scripts/registry-scan.mjs",
+                registry_commit.unwrap()
+            )
+        },
         entry_count: entries.len(),
         privacy_scrub: Market_privacy_scrub {
             schema_version: 1,
@@ -633,7 +764,7 @@ pub(super) fn normalize_feed(
             replacements: privacy_replacements,
         },
         entries,
-        cache_status: "bundled".into(),
+        cache_status: "refreshed".into(),
         warning: None,
     };
     validate_catalog(&catalog)?;
@@ -678,21 +809,27 @@ pub(super) fn validate_catalog(catalog: &Market_catalog) -> Result<(), AppError>
     {
         return Err(failure("invalid_privacy_scrub"));
     }
-    if catalog.source_registry != SOURCE_REGISTRY
-        || !valid_sha(&catalog.registry_commit)
+    if ![SOURCE_REGISTRY, "dsh.market"].contains(&catalog.source_registry.as_str())
+        || (catalog.source_registry == SOURCE_REGISTRY && !valid_sha(&catalog.registry_commit))
+        || (catalog.source_registry == "dsh.market"
+            && (!catalog.registry_commit.is_empty()
+                || catalog.registry_url != "https://dsh.market/plugins.json"
+                || !catalog.collector_url.is_empty()))
         || !valid_timestamp(&catalog.fetched_at)
         || !valid_timestamp(&catalog.registry_generated_at)
-        || catalog.registry_url
-            != format!(
-                "https://github.com/{SOURCE_REGISTRY}/blob/{}/registry/plugins.json",
-                catalog.registry_commit
-            )
-        || catalog.collector_url
-            != format!(
-                "https://github.com/{SOURCE_REGISTRY}/blob/{}/scripts/registry-scan.mjs",
-                catalog.registry_commit
-            )
-        || !["bundled", "cached", "refreshed"].contains(&catalog.cache_status.as_str())
+        || (catalog.source_registry == SOURCE_REGISTRY
+            && catalog.registry_url
+                != format!(
+                    "https://github.com/{SOURCE_REGISTRY}/blob/{}/registry/plugins.json",
+                    catalog.registry_commit
+                ))
+        || (catalog.source_registry == SOURCE_REGISTRY
+            && catalog.collector_url
+                != format!(
+                    "https://github.com/{SOURCE_REGISTRY}/blob/{}/scripts/registry-scan.mjs",
+                    catalog.registry_commit
+                ))
+        || !["cached", "refreshed"].contains(&catalog.cache_status.as_str())
     {
         return Err(failure("invalid_provenance"));
     }

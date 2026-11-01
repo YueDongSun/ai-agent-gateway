@@ -11,6 +11,17 @@ answers a specific question.
   open first when you need to know who owns a slice of behavior.
 - [`development.md`](development.md) — setup, npm scripts, the complete
   verification gate, and the release boundary.
+- [`interface_qa.md`](interface_qa.md) — workspace navigation, header surface,
+  provider search / disclosure, dialog behavior, and the visual QA checklist.
+- [`cli_provider_boundary.md`](cli_provider_boundary.md) — separation between
+  model-only client views and supplier-owned client management.
+- [`unified_suppliers.md`](unified_suppliers.md) — normalized supplier and
+  endpoint models, per-source dual-document URL discovery with EN/CN explanations, capability routing,
+  cc-switch import, and hot-apply behavior.
+- [`codex_session_authority.md`](codex_session_authority.md) — Codex CLI session
+  authority, home isolation, and protected credential boundaries.
+- [`tailnet_publication.md`](tailnet_publication.md) — Tailscale Serve
+  publication contracts, local port forwarding, and lifecycle management.
 - [`desktop_release.md`](desktop_release.md) — desktop build pipeline,
   CI build matrix, signing / notarization, manual acceptance, preview
   publication, and rollback.
@@ -20,6 +31,15 @@ answers a specific question.
 - [`project_structure.md`](project_structure.md) — directory map,
   ownership rules, UI state boundaries, build boundaries, and test
   boundaries.
+- [`platform_launchers.md`](platform_launchers.md) — platform discovery,
+  terminal/editor launch contracts, isolated profiles, and native acceptance
+  boundaries.
+- [`prompt_enhance.md`](prompt_enhance.md) — two-stage prompt enhancement,
+  backend selection, local history, and IPC error contracts.
+- [`mcp_management.md`](mcp_management.md) — registry validation, redacted
+  previews, and reviewed client synchronization.
+- [`mcp_companion.md`](mcp_companion.md) — read-only stdio companion,
+  feature-aware verification plans, and the isolated foreground runner.
 - [`releases/`](releases/README.md) — per-release notes. Today:
   [`v0_2_0.md`](releases/v0_2_0.md).
 
@@ -38,6 +58,10 @@ answers a specific question.
   current-provider setup, deterministic dispatch and thinking/stream fixes.
 - [Plug-and-play validation](dsh_plug_and_play_validation.md) — fresh native,
   browser, real-DSH and protocol evidence.
+
+- [Workflow management](workflow_management.md) — read-only capability
+  registry, route-preview contract, private configuration, and the local read
+  facade.
 
 ## Key contracts
 

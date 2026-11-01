@@ -9,6 +9,7 @@ export type AppType =
   | 'pi'
   | 'antigravity'
   | 'kilo_cli'
+  | 'cline_cli'
   | 'claude_vscode'
   | 'kilo_vscode';
 
@@ -35,6 +36,14 @@ export interface LiveWriteResult {
   backup: string | null;
 }
 
+/** Per-client outcome of the bulk "apply current provider" command. */
+export interface Provider_switch_all_entry {
+  app_type: string;
+  provider_id: string | null;
+  outcome: 'applied' | 'no_current' | 'error';
+  detail: string | null;
+}
+
 /** Read-only discovery of the configuration used by provider switching. */
 export interface Provider_config_status {
   appType: string;
@@ -45,6 +54,15 @@ export interface Provider_config_status {
   configPaths: string[];
   existing: boolean;
   reason: string | null;
+}
+
+/** Live config file target for the direct JSON editor (Kilo family). */
+export interface Config_edit_target {
+  appType: string;
+  path: string;
+  /** Verbatim file contents ('' when the file does not exist yet). */
+  contents: string;
+  existing: boolean;
 }
 
 /// One row of feedback from `import_cc_switch_providers`.

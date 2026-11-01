@@ -237,6 +237,32 @@ fn existing_settings_are_preserved_and_conflicting_request_is_blocked() {
 }
 
 #[test]
+fn windows_path_case_differences_do_not_invalidate_a_discovered_runtime() {
+    let fixture = Fixture::new();
+    let sources = vec![upstream("claude:current")];
+    let mut settings = fixture.preview(&sources, None, None).settings;
+    if !cfg!(windows) {
+        // Case-sensitive filesystems: a different case IS a different file.
+        return;
+    }
+    settings.node_path = settings.node_path.to_uppercase();
+    let plan = build_plan(
+        settings.clone(),
+        fixture.request(),
+        fixture.discovery.clone(),
+        &sources,
+        None,
+        None,
+        false,
+    );
+    assert_eq!(plan.settings.node_path, settings.node_path);
+    assert!(!plan
+        .blockers
+        .iter()
+        .any(|code| code == "runtime_node_invalid"));
+}
+
+#[test]
 fn expired_stale_and_changed_upstream_plans_fail_without_settings_writes() {
     let fixture = Fixture::new();
     let sources = vec![upstream("claude:saved")];

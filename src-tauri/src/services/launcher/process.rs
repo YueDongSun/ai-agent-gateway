@@ -22,20 +22,42 @@ impl Drop for child_guard {
     }
 }
 
-pub(super) fn private_temp_dir() -> Result<tempfile::TempDir, String> {
+pub(super) fn private_temp_dir() -> Result<crate::config::private_fs::PrivateTempDir, String> {
     // macOS's system TMPDIR commonly passes through the /var symlink.
     let parent = std::fs::canonicalize(std::env::temp_dir())
         .map_err(|_| "launcher_temp_directory_unavailable".to_string())?;
-    let directory = tempfile::Builder::new()
-        .prefix("aag_launcher_")
-        .tempdir_in(parent)
-        .map_err(|_| "launcher_temp_directory_unavailable".to_string())?;
-    crate::config::private_fs::prepare_managed_private_dir(directory.path())
-        .map_err(String::from)?;
-    Ok(directory)
+    crate::config::private_fs::private_temp_dir(&parent).map_err(String::from)
+}
+
+/// Preserve an unusable foreign-owned historical profile. A fresh sibling
+/// profile can reuse the same AAG mirror home without taking over its data.
+pub(super) fn desktop_profile_directory(
+    home: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let existing = home.join("electron");
+    match crate::config::private_fs::prepare_managed_private_dir(&existing) {
+        Ok(()) => Ok(existing),
+        Err(crate::error::AppError::Config(code)) if code == "private_storage:owner_mismatch" => {
+            let fresh = home.join("electron_aag");
+            crate::config::private_fs::prepare_managed_private_dir(&fresh).map_err(String::from)?;
+            Ok(fresh)
+        }
+        Err(error) => Err(String::from(error)),
+    }
 }
 
 pub(super) fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    // cmd.exe parses its own command line differently when argv[0] contains
+    // forward slashes. Normalize executable spelling at this Windows boundary.
+    #[cfg(windows)]
+    let program: std::path::PathBuf = {
+        let path = std::path::Path::new(program.as_ref());
+        if path.is_absolute() {
+            path.components().collect()
+        } else {
+            path.to_path_buf()
+        }
+    };
     #[allow(unused_mut)]
     let mut command = Command::new(program);
     #[cfg(windows)]

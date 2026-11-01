@@ -1,9 +1,14 @@
 //! Platform-aware launcher services; IPC scheduling lives in commands/launcher.rs.
 
 mod claude;
-#[cfg(windows)]
-mod codex_catalog;
+pub(crate) mod codex_catalog;
+pub(crate) mod codex_reasoning;
+#[cfg(all(test, windows))]
+mod desktop_acceptance;
+#[cfg(any(windows, test))]
+mod desktop_reload;
 mod discovery;
+mod managed_cli;
 #[cfg(any(windows, test))]
 mod mirror_seed;
 mod process;
@@ -13,21 +18,99 @@ mod tests;
 mod vscode;
 
 use crate::database::Database;
+use crate::services::session_authority::client_config::{self, ClientKind, ManagedClientContract};
 pub(crate) use claude::{
     claude_mirror_set_mode, claude_mirror_status, claude_open_cli_terminal, claude_open_desktop,
     ClaudeMirrorStatusDto,
 };
 #[cfg(windows)]
-use codex_catalog::write_codex_model_catalog;
-#[cfg(windows)]
 use discovery::find_codex_desktop_exe;
-use discovery::{find_codex_cli_binary, find_copilot_cli_binary};
+use discovery::{find_codex_cli_binary, find_copilot_cli_binary, find_gemini_cli_binary};
+pub(crate) use managed_cli::{managed_cli_open_terminal, managed_cli_status, Managed_cli_status};
 use serde::Serialize;
 pub(crate) use vscode::{
     vscode_extension_status, vscode_open_with_extension, VsCodeExtensionStatusDto,
 };
 
 // ----- Codex CLI isolation -----
+
+fn codex_managed_cli_terminal(
+    db: &Database,
+    cwd: Option<String>,
+    contract: &ManagedClientContract,
+    models: &[String],
+) -> Result<serde_json::Value, String> {
+    contract.validate_launch_files()?;
+    process::working_directory(cwd.as_deref())?;
+    let plan = contract.prepare_metadata(db, ClientKind::Cli, models)?;
+    terminal::launch_terminal(
+        &plan.program,
+        &plan.arguments,
+        &plan.environment,
+        cwd.as_deref(),
+    )?;
+    Ok(serde_json::json!({
+        "codexHome":plan.home,
+        "codexBinary":plan.program,
+        "managedAuthority":true,
+        "env":redacted_environment(&plan.environment),
+    }))
+}
+
+#[cfg(windows)]
+fn codex_managed_desktop_window(
+    db: &Database,
+    contract: &ManagedClientContract,
+    models: &[String],
+) -> Result<serde_json::Value, String> {
+    contract.validate_launch_files()?;
+    let exe = find_codex_desktop_exe()?;
+    let plan = contract.prepare_metadata(db, ClientKind::Desktop, models)?;
+    let electron_dir = process::desktop_profile_directory(&plan.home)?;
+    // Consumed only by the exact-profile reload receipt. A changed endpoint,
+    // image or key must restart that profile before it inherits new values.
+    use sha2::Digest;
+    let config_bytes = std::fs::read(plan.home.join("config.toml"))
+        .map_err(|_| "session_client_metadata_read_failed".to_string())?;
+    let catalog_bytes = std::fs::read(plan.home.join(codex_catalog::CATALOG_FILENAME))
+        .map_err(|_| "session_client_metadata_read_failed".to_string())?;
+    let configuration = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&(&plan.environment, config_bytes, catalog_bytes))
+            .map_err(|_| "session_client_configuration_invalid".to_string())?,
+    ));
+    desktop_reload::prepare_reload_with_configuration(
+        &exe,
+        &electron_dir,
+        &[
+            plan.home.join("config.toml"),
+            plan.home.join(codex_catalog::CATALOG_FILENAME),
+        ],
+        &configuration,
+    )?;
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| "launcher_system_root_unavailable".to_string())?;
+    let mut command =
+        process::background_command(std::path::PathBuf::from(system_root).join("System32/cmd.exe"));
+    use std::os::windows::process::CommandExt;
+    command
+        .args(["/D", "/V:OFF", "/S", "/C"])
+        .raw_arg("start \"\" \"%AAG_LAUNCH_PROGRAM%\" --user-data-dir=\"%AAG_LAUNCH_PROFILE%\"")
+        .envs(plan.environment.iter().map(|(name, value)| (name, value)))
+        .env("CODEX_ELECTRON_USER_DATA_PATH", &electron_dir)
+        .env("AAG_LAUNCH_PROGRAM", &exe)
+        .env("AAG_LAUNCH_PROFILE", &electron_dir)
+        .current_dir(&plan.home);
+    process::launch(&mut command)?;
+    desktop_reload::remember_configuration(&exe, &electron_dir, &configuration)?;
+    Ok(serde_json::json!({
+        "codexHome":plan.home,
+        "codexBinary":exe,
+        "desktopProfile":electron_dir,
+        "mirror":true,
+        "managedAuthority":true,
+        "env":redacted_environment(&plan.environment),
+    }))
+}
 
 /// Codex CLI isolation status (for the frontend to render).
 #[derive(Serialize)]
@@ -101,6 +184,7 @@ pub(crate) fn codex_mirror_set_mode(
     db: &Database,
     mode: String,
 ) -> Result<serde_json::Value, String> {
+    client_config::require_contract(db, None)?;
     // Only the two known values are accepted — a typo'd mode is a client
     // error, not a silent flip to exclusive.
     let normalized = mode.trim();
@@ -118,7 +202,7 @@ pub(crate) fn codex_mirror_set_mode(
     .map_err(String::from)?;
     let result =
         crate::services::provider::codex::switch_codex_mirror(db, codex_cli_home.as_deref(), false)
-            .map_err(|e| e.to_string())?;
+            .map_err(String::from)?;
     Ok(serde_json::json!({
         "mode": normalized,
         "written": result.written,
@@ -130,7 +214,17 @@ pub(crate) fn codex_mirror_set_mode(
 pub(crate) fn codex_open_cli_terminal(
     db: &Database,
     cwd: Option<String>,
+    managed: Option<&ManagedClientContract>,
+    runtime_models: Option<&[String]>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(contract) = client_config::require_contract(db, managed)? {
+        return codex_managed_cli_terminal(
+            db,
+            cwd,
+            contract,
+            runtime_models.ok_or_else(|| "desktop_mirror_models_unavailable".to_string())?,
+        );
+    }
     process::working_directory(cwd.as_deref())?;
     let codex_bin = find_codex_cli_binary().ok_or_else(|| "codex_cli_not_found".to_string())?;
     let codex_bin = codex_bin.to_string_lossy().to_string();
@@ -161,7 +255,7 @@ pub(crate) fn codex_open_cli_terminal(
         "localhost,127.0.0.1,::1".to_string(),
     ));
 
-    terminal::launch_terminal(std::path::Path::new(&codex_bin), &env, cwd.as_deref())?;
+    terminal::launch_terminal(std::path::Path::new(&codex_bin), &[], &env, cwd.as_deref())?;
 
     Ok(serde_json::json!({
         "codexHome": codex_home,
@@ -174,37 +268,100 @@ pub(crate) fn codex_open_cli_terminal(
 /// Values are inherited as environment variables, with no credential-bearing
 /// launcher file. Native Codex configuration is never used as the mirror.
 #[cfg(target_os = "windows")]
-pub(crate) fn codex_open_desktop_window(db: &Database) -> Result<serde_json::Value, String> {
+pub(crate) fn codex_open_desktop_window(
+    db: &Database,
+    runtime_models: Option<&[String]>,
+    managed: Option<&ManagedClientContract>,
+) -> Result<serde_json::Value, String> {
+    if let Some(contract) = client_config::require_contract(db, managed)? {
+        return codex_managed_desktop_window(
+            db,
+            contract,
+            runtime_models.ok_or_else(|| "desktop_mirror_models_unavailable".to_string())?,
+        );
+    }
     let exe = find_codex_desktop_exe()?;
 
     let codex_cli_home = db
         .get_setting(crate::database::dao::settings::KEY_CODEX_CLI_HOME)
         .map_err(String::from)?;
     let config_dir = checked_mirror_directory(codex_cli_home.as_deref())?;
-    crate::config::private_fs::prepare_private_dir(&config_dir).map_err(String::from)?;
     let codex_home = config_dir.to_string_lossy().to_string();
-    let electron_dir = config_dir.join("electron");
-    // Preserve the existing mirror profile/login; destructive reset is explicit.
-    crate::config::private_fs::prepare_private_dir(&electron_dir).map_err(String::from)?;
-
-    // Auto-write the mirror contract (config.toml → AAG proxy) so the
-    // parasite routes through AAG's proxy. The mirror's OWN login (a spare
-    // account signed in inside the mirror) is PRESERVED across launches —
-    // `purge_auth = false`; AAG still never writes any credential. A
-    // stale/broken login is reset explicitly via `codex_mirror_session_reset`
-    // (the audit command detects that case and says so).
-    crate::services::provider::codex::switch_codex_mirror(&db, codex_cli_home.as_deref(), false)
+    let previous_mode = db
+        .get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)
         .map_err(String::from)?;
+    // Desktop does not expose the CLI profile flag. Selecting the AAG action
+    // activates AAG in this same isolated home and preserves its account state.
+    crate::services::provider::codex::prepare_codex_desktop_mirror(
+        db,
+        codex_cli_home.as_deref(),
+        runtime_models,
+    )
+    .map_err(|error| match error {
+        crate::error::AppError::Config(code) if code == "desktop_mirror_models_unavailable" => code,
+        error => String::from(error),
+    })?;
+    let electron_dir = process::desktop_profile_directory(&config_dir)?;
+
+    // Codex silently falls back to its built-in models for an empty catalog.
+    // Do not launch a misleading picker when AAG has no usable supply.
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(config_dir.join(codex_catalog::CATALOG_FILENAME))
+            .map_err(|_| "codex_model_catalog_read_failed".to_string())?,
+    )
+    .map_err(|_| "codex_model_catalog_invalid".to_string())?;
+    if catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("desktop_mirror_models_unavailable".into());
+    }
 
     let native_dir = crate::config::get_codex_config_dir();
-    mirror_seed::seed_mirror_from_native(&native_dir, &config_dir)?;
+    // Continuous sync owns instruction population when it is enabled (the
+    // default); seeding is the bootstrap path for opted-out mirrors.
+    if !crate::services::mirror_sync::instruction_sync_enabled(db).map_err(String::from)? {
+        mirror_seed::seed_mirror_from_native(crate::services::mirror_sync::Client::Codex, &native_dir, &config_dir)?;
+    }
     mirror_seed::sync_mirror_sandbox_credentials(&native_dir, &config_dir)?;
 
-    // Generate cc-switch-model-catalog.json from AAG's proxy providers +
-    // routes + official models. This tells Codex Desktop which models are
-    // actually available through AAG's gateway (instead of showing only the
-    // GPT defaults from the inherited models_cache.json).
-    write_codex_model_catalog(&db, &config_dir)?;
+    // Compare managed values, not native preference writes or TOML formatting.
+    // This digest is consumed by the process-bound reload receipt only.
+    let config_text = std::fs::read_to_string(config_dir.join("config.toml"))
+        .map_err(|_| "codex_model_catalog_read_failed".to_string())?;
+    let config: toml_edit::DocumentMut = config_text
+        .parse()
+        .map_err(|_| "codex_model_catalog_invalid".to_string())?;
+    let provider = config
+        .get("model_providers")
+        .and_then(|item| item.get("aag"));
+    let scalar = |key: &str| {
+        config
+            .get(key)
+            .and_then(toml_edit::Item::as_str)
+            .unwrap_or("")
+    };
+    let provider_scalar = |key: &str| {
+        provider
+            .and_then(|item| item.get(key))
+            .and_then(toml_edit::Item::as_str)
+            .unwrap_or("")
+    };
+    let managed = serde_json::json!({"model":scalar("model"),"provider":scalar("model_provider"),"web_search":scalar("web_search"),"url":provider_scalar("base_url"),"token":provider_scalar("experimental_bearer_token"),"wire":provider_scalar("wire_api"),"catalog":catalog});
+    use sha2::Digest;
+    let configuration = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&managed).map_err(|_| "codex_model_catalog_invalid".to_string())?,
+    ));
+    desktop_reload::prepare_reload_with_configuration(
+        &exe,
+        &electron_dir,
+        &[
+            config_dir.join("config.toml"),
+            config_dir.join(codex_catalog::CATALOG_FILENAME),
+        ],
+        &configuration,
+    )?;
 
     let exe_str = exe.to_string_lossy().to_string();
     let system_root = std::env::var_os("SystemRoot")
@@ -217,19 +374,30 @@ pub(crate) fn codex_open_desktop_window(db: &Database) -> Result<serde_json::Val
         .raw_arg("start \"\" \"%AAG_LAUNCH_PROGRAM%\" --user-data-dir=\"%AAG_LAUNCH_PROFILE%\"");
     command
         .env("CODEX_HOME", &config_dir)
+        .env("CODEX_ELECTRON_USER_DATA_PATH", &electron_dir)
         .env("AAG_LAUNCH_PROGRAM", &exe)
         .env("AAG_LAUNCH_PROFILE", &electron_dir);
-    process::capture_stdout(&mut command, process::PROBE_TIMEOUT)?;
+    process::launch(&mut command)?;
+    desktop_reload::remember_configuration(&exe, &electron_dir, &configuration)?;
 
     Ok(serde_json::json!({
         "codexHome": codex_home,
         "codexBinary": exe_str,
+        "desktopProfile": electron_dir,
         "mirror": true,
+        "mirrorMode": "exclusive",
+        "mirrorModeChanged": crate::services::provider::codex::Codex_mirror_mode::from_setting(previous_mode.as_deref())
+            != crate::services::provider::codex::Codex_mirror_mode::Exclusive,
     }))
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn codex_open_desktop_window(_db: &Database) -> Result<serde_json::Value, String> {
+pub(crate) fn codex_open_desktop_window(
+    db: &Database,
+    _runtime_models: Option<&[String]>,
+    managed: Option<&ManagedClientContract>,
+) -> Result<serde_json::Value, String> {
+    client_config::require_contract(db, managed)?;
     Err("codex_desktop_platform_unsupported".to_string())
 }
 
@@ -258,6 +426,12 @@ pub(crate) fn copilot_open_cli_terminal(
         .ok_or_else(|| {
             "no Copilot provider configured: add and switch to a Copilot provider on the Providers page (with baseUrl/apiKey/model)".to_string()
         })?;
+    // Discover the binary BEFORE any side effect (the gemini launcher
+    // contract): a missing CLI must not advance the current-provider marker
+    // on an error path the user only sees as a toast.
+    let copilot_bin =
+        find_copilot_cli_binary().ok_or_else(|| "copilot_cli_not_found".to_string())?;
+    let copilot_bin = copilot_bin.to_string_lossy().to_string();
     crate::services::provider::switching::switch_provider(db, &provider.id, "copilot")
         .map_err(String::from)?;
     let cfg_obj = provider
@@ -287,11 +461,6 @@ pub(crate) fn copilot_open_cli_terminal(
         .unwrap_or("openai");
     let model = cfg_obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Find the copilot CLI binary (prefer PATH; fall back to common install locations).
-    let copilot_bin =
-        find_copilot_cli_binary().ok_or_else(|| "copilot_cli_not_found".to_string())?;
-    let copilot_bin = copilot_bin.to_string_lossy().to_string();
-
     let mut env: Vec<(String, String)> = vec![
         (
             "COPILOT_PROVIDER_BASE_URL".to_string(),
@@ -318,10 +487,79 @@ pub(crate) fn copilot_open_cli_terminal(
         "localhost,127.0.0.1,::1".to_string(),
     ));
 
-    terminal::launch_terminal(std::path::Path::new(&copilot_bin), &env, cwd.as_deref())?;
+    terminal::launch_terminal(
+        std::path::Path::new(&copilot_bin),
+        &[],
+        &env,
+        cwd.as_deref(),
+    )?;
 
     Ok(serde_json::json!({
         "copilotBinary": copilot_bin,
+        "providerId": provider.id,
+        "env": redacted_environment(&env),
+    }))
+}
+
+/// Launch the Gemini CLI in an isolated terminal. Unlike the Copilot CLI
+/// (which is configured by environment variables at launch), the Gemini
+/// CLI reads its own `~/.gemini/.env` and ignores the credentials
+/// AAG might pass in the environment — so the launcher only needs to
+/// (1) apply the current provider to the mirror file (idempotent:
+/// reapplying the current row just refreshes the file), and
+/// (2) spawn the discovered `gemini` binary in a new terminal.
+///
+/// The outbound proxy environment variables are still passed through so
+/// the CLI (and any subprocess it spawns) honours the same routing as
+/// the rest of the gateway.
+pub(crate) fn gemini_open_cli_terminal(
+    db: &Database,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    process::working_directory(cwd.as_deref())?;
+    let outbound_proxy = db
+        .get_setting(crate::database::dao::settings::KEY_OUTBOUND_PROXY)
+        .map_err(String::from)?;
+
+    let provider_id = db.get_current_provider("gemini").map_err(String::from)?;
+    let provider = provider_id
+        .as_deref()
+        .map(|id| db.get_provider_by_id(id, "gemini"))
+        .transpose()
+        .map_err(String::from)?
+        .flatten()
+        .ok_or_else(|| {
+            "no Gemini provider configured: add and switch to a Gemini provider on the Providers page (with baseUrl/apiKey/model)".to_string()
+        })?;
+
+    // Discover the binary BEFORE any side effect: a missing CLI must not
+    // rewrite ~/.gemini/.env or advance the current-provider marker on an
+    // error path the user only sees as a toast.
+    let gemini_bin = find_gemini_cli_binary()
+        .ok_or_else(|| "gemini_cli_not_found".to_string())?
+        .to_string_lossy()
+        .into_owned();
+
+    // Reapply the current provider to write ~/.gemini/.env so the CLI
+    // reads the right baseUrl / apiKey / model on launch.
+    crate::services::provider::switching::switch_provider(db, &provider.id, "gemini")
+        .map_err(String::from)?;
+
+    let mut env: Vec<(String, String)> = Vec::new();
+    if let Some(proxy) = &outbound_proxy {
+        env.push(("HTTP_PROXY".to_string(), proxy.clone()));
+        env.push(("HTTPS_PROXY".to_string(), proxy.clone()));
+        env.push(("ALL_PROXY".to_string(), proxy.clone()));
+    }
+    env.push((
+        "NO_PROXY".to_string(),
+        "localhost,127.0.0.1,::1".to_string(),
+    ));
+
+    terminal::launch_terminal(std::path::Path::new(&gemini_bin), &[], &env, cwd.as_deref())?;
+
+    Ok(serde_json::json!({
+        "geminiBinary": gemini_bin,
         "providerId": provider.id,
         "env": redacted_environment(&env),
     }))
@@ -350,7 +588,7 @@ fn mirror_audit_hints(
     }
     if session_cache_present {
         hints.push(
-            "session_cache_present: cache/ or .codex-global-state.json from a previous logged-in session exists. Run codex_mirror_session_reset to clear it if the mirror is stuck on a dead login.".into(),
+            "session_cache_present: mirror cache or global login-state files exist. If login is stuck, codex_mirror_session_reset clears auth and known global login-state files while preserving cache, conversation history, and attachments.".into(),
         );
     }
     if let Some(age) = native_auth_age_hours {
@@ -364,10 +602,11 @@ fn mirror_audit_hints(
 }
 
 /// Explicitly reset the Codex mirror's login/session state (auth.json,
-/// global-state cache, cache/sessions carriers). On-demand only — neither
-/// switching nor opening the desktop resets a login the user created
+/// known global login-state files). Conversation and attachment storage survives.
+/// Switching and opening the desktop preserve a login the user created
 /// inside the mirror. The native `~/.codex` is never touched.
 pub(crate) fn codex_mirror_session_reset(db: &Database) -> Result<(), String> {
+    client_config::require_contract(db, None)?;
     let codex_cli_home = db
         .get_setting(crate::database::dao::settings::KEY_CODEX_CLI_HOME)
         .map_err(String::from)?;
@@ -402,11 +641,11 @@ fn mirror_chatgpt_process_count(mirror_dir: &std::path::Path) -> Result<u32, Str
             "(Get-CimInstance Win32_Process -Filter \"Name='ChatGPT.exe'\" -ErrorAction Stop | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:AAG_MIRROR_PROFILE) } | Measure-Object).Count"]);
         command.env("AAG_MIRROR_PROFILE", mirror_dir.join("electron"));
         let output = process::capture_stdout(&mut command, process::PROBE_TIMEOUT)?;
-        return String::from_utf8(output)
+        String::from_utf8(output)
             .map_err(|_| "codex_mirror_probe_invalid".to_string())?
             .trim()
             .parse::<u32>()
-            .map_err(|_| "codex_mirror_probe_invalid".to_string());
+            .map_err(|_| "codex_mirror_probe_invalid".to_string())
     }
     #[cfg(not(windows))]
     {

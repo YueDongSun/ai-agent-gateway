@@ -3,6 +3,8 @@
 //! Mirrors cc-switch's `database/dao/providers.rs` (lines 20-180), simplified
 //! to skip endpoint joins (endpoints land in a later phase with speedtest).
 
+use std::collections::HashSet;
+
 use crate::database::{lock_conn, to_json_string, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
@@ -42,6 +44,35 @@ macro_rules! provider_params {
     };
 }
 
+/// Column list shared by the provider read queries, so the two SELECT sites
+/// and the row mapper cannot drift apart when a column is added.
+const PROVIDER_COLUMNS: &str = "id, name, settings_config, website_url, category, created_at,
+        sort_index, notes, icon, icon_color, meta, in_failover_queue, sync_locked";
+
+/// Map a row of {@link PROVIDER_COLUMNS} in order into a `Provider`.
+fn map_provider_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
+    let settings_config_str: String = row.get(2)?;
+    let meta_str: String = row.get(10)?;
+    let settings_config =
+        serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
+    let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
+    Ok(Provider {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        settings_config,
+        website_url: row.get(3)?,
+        category: row.get(4)?,
+        created_at: row.get(5)?,
+        sort_index: row.get(6)?,
+        notes: row.get(7)?,
+        icon: row.get(8)?,
+        icon_color: row.get(9)?,
+        meta: Some(meta),
+        in_failover_queue: row.get(11)?,
+        sync_locked: row.get(12)?,
+    })
+}
+
 impl Database {
     /// List all providers for an app, ordered by sort_index then created_at.
     /// Returns an `IndexMap` keyed by provider id (insertion-ordered).
@@ -50,58 +81,20 @@ impl Database {
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id, name, settings_config, website_url, category, created_at,
-                    sort_index, notes, icon, icon_color, meta, in_failover_queue, sync_locked
+        let sql = format!(
+            "SELECT {PROVIDER_COLUMNS}
              FROM providers
              WHERE app_type = ?1
-             ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC",
-        )?;
+             ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(params![app_type], |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let settings_config_str: String = row.get(2)?;
-            let website_url: Option<String> = row.get(3)?;
-            let category: Option<String> = row.get(4)?;
-            let created_at: Option<i64> = row.get(5)?;
-            let sort_index: Option<usize> = row.get(6)?;
-            let notes: Option<String> = row.get(7)?;
-            let icon: Option<String> = row.get(8)?;
-            let icon_color: Option<String> = row.get(9)?;
-            let meta_str: String = row.get(10)?;
-            let in_failover_queue: bool = row.get(11)?;
-            let sync_locked: bool = row.get(12)?;
-
-            let settings_config =
-                serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-            let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
-            Ok((
-                id,
-                Provider {
-                    id: String::new(), // filled below
-                    name,
-                    settings_config,
-                    website_url,
-                    category,
-                    created_at,
-                    sort_index,
-                    notes,
-                    icon,
-                    icon_color,
-                    meta: Some(meta),
-                    in_failover_queue,
-                    sync_locked,
-                },
-            ))
-        })?;
+        let rows = stmt.query_map(params![app_type], map_provider_row)?;
 
         let mut providers = IndexMap::new();
-        for row in rows {
-            let (id, mut provider) = row?;
-            provider.id = id.clone();
-            providers.insert(id, provider);
+        for provider in rows {
+            let provider = provider?;
+            providers.insert(provider.id.clone(), provider);
         }
         Ok(providers)
     }
@@ -128,46 +121,11 @@ impl Database {
         app_type: &str,
     ) -> Result<Option<Provider>, AppError> {
         let conn = lock_conn!(self.conn);
-        let result = conn.query_row(
-            "SELECT name, settings_config, website_url, category, created_at,
-                    sort_index, notes, icon, icon_color, meta, in_failover_queue, sync_locked
-             FROM providers WHERE id = ?1 AND app_type = ?2",
-            params![id, app_type],
-            |row| {
-                let name: String = row.get(0)?;
-                let settings_config_str: String = row.get(1)?;
-                let website_url: Option<String> = row.get(2)?;
-                let category: Option<String> = row.get(3)?;
-                let created_at: Option<i64> = row.get(4)?;
-                let sort_index: Option<usize> = row.get(5)?;
-                let notes: Option<String> = row.get(6)?;
-                let icon: Option<String> = row.get(7)?;
-                let icon_color: Option<String> = row.get(8)?;
-                let meta_str: String = row.get(9)?;
-                let in_failover_queue: bool = row.get(10)?;
-                let sync_locked: bool = row.get(11)?;
-
-                let settings_config =
-                    serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-                let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
-                Ok(Provider {
-                    id: id.to_string(),
-                    name,
-                    settings_config,
-                    website_url,
-                    category,
-                    created_at,
-                    sort_index,
-                    notes,
-                    icon,
-                    icon_color,
-                    meta: Some(meta),
-                    in_failover_queue,
-                    sync_locked,
-                })
-            },
+        let sql = format!(
+            "SELECT {PROVIDER_COLUMNS}
+             FROM providers WHERE id = ?1 AND app_type = ?2"
         );
+        let result = conn.query_row(&sql, params![id, app_type], map_provider_row);
         match result {
             Ok(provider) => Ok(Some(provider)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -248,8 +206,9 @@ impl Database {
     }
 
     /// Reorder an app's providers by writing a new `sort_index` for each
-    /// row from the supplied id list. Ids not present in the list keep
-    /// their existing sort_index (and fall after the reordered ones).
+    /// supplied id. Supplied ids must be unique and exist for the app. Omitted
+    /// rows keep their existing `sort_index` and may interleave under normal
+    /// query ordering.
     pub fn reorder_providers(
         &self,
         app_type: &str,
@@ -257,11 +216,22 @@ impl Database {
     ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn.transaction()?;
+        let mut seen_ids = HashSet::with_capacity(ordered_ids.len());
         for (idx, id) in ordered_ids.iter().enumerate() {
-            tx.execute(
+            if !seen_ids.insert(id) {
+                return Err(AppError::InvalidInput(
+                    "AAG_PROVIDER_REORDER_DUPLICATE_ID".into(),
+                ));
+            }
+            let updated = tx.execute(
                 "UPDATE providers SET sort_index = ?3 WHERE id = ?1 AND app_type = ?2",
                 params![id, app_type, (idx as i64) + 1],
             )?;
+            if updated == 0 {
+                return Err(AppError::InvalidInput(
+                    "AAG_PROVIDER_REORDER_UNKNOWN_ID".into(),
+                ));
+            }
         }
         tx.commit()?;
         Ok(())
@@ -275,9 +245,7 @@ impl Database {
             params![id, app_type, locked as i64],
         )?;
         if updated == 0 {
-            return Err(AppError::InvalidInput(format!(
-                "provider \"{id}\" not found for app \"{app_type}\""
-            )));
+            return Err(AppError::InvalidInput("AAG_PROVIDER_NOT_FOUND".into()));
         }
         Ok(())
     }
@@ -297,9 +265,7 @@ impl Database {
             params![id, app_type, in_queue as i64],
         )?;
         if updated == 0 {
-            return Err(AppError::InvalidInput(format!(
-                "provider \"{id}\" not found for app \"{app_type}\""
-            )));
+            return Err(AppError::InvalidInput("AAG_PROVIDER_NOT_FOUND".into()));
         }
         Ok(())
     }
@@ -318,9 +284,7 @@ impl Database {
             params![id, app_type],
         )?;
         if updated == 0 {
-            return Err(AppError::InvalidInput(format!(
-                "provider \"{id}\" not found for app \"{app_type}\""
-            )));
+            return Err(AppError::InvalidInput("AAG_PROVIDER_NOT_FOUND".into()));
         }
         tx.commit()?;
         Ok(())
@@ -384,7 +348,32 @@ mod tests {
     fn set_current_nonexistent_fails() {
         let db = make_db();
         let err = db.set_current_provider("nope", "claude_code").unwrap_err();
-        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert_eq!(err.external_message(), "AAG_PROVIDER_NOT_FOUND");
+    }
+
+    #[test]
+    fn provider_row_toggles_surface_the_not_found_code_without_leaking_the_id() {
+        // The three single-UPDATE toggles share one not-found condition; the
+        // detail must stay a stable code because it crosses IPC verbatim.
+        let db = make_db();
+        for error in [
+            db.set_sync_locked("missing", "claude_code", true)
+                .unwrap_err(),
+            db.set_in_failover_queue("missing", "claude_code", true)
+                .unwrap_err(),
+            db.set_current_provider("missing", "claude_code")
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.external_message(), "AAG_PROVIDER_NOT_FOUND");
+            match error {
+                AppError::InvalidInput(detail) => {
+                    assert_eq!(detail, "AAG_PROVIDER_NOT_FOUND");
+                    assert!(!detail.contains("missing"));
+                    assert!(!detail.contains("claude_code"));
+                }
+                other => panic!("expected invalid-input error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -441,5 +430,195 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.name, "Original");
+    }
+
+    fn save_reorder_provider_fixture(
+        db: &Database,
+        app_type: &str,
+        id: &str,
+        sort_index: Option<usize>,
+        created_at: i64,
+    ) {
+        let mut provider = Provider::new(id.to_string(), id.to_string(), json!({}));
+        provider.sort_index = sort_index;
+        provider.created_at = Some(created_at);
+        db.save_provider(app_type, &provider).unwrap();
+    }
+
+    fn reorder_provider_sort_indexes(
+        db: &Database,
+        app_type: &str,
+    ) -> Vec<(String, Option<usize>)> {
+        db.get_all_providers(app_type)
+            .unwrap()
+            .into_iter()
+            .map(|(id, provider)| (id, provider.sort_index))
+            .collect()
+    }
+
+    fn assert_reorder_invalid_input(error: AppError, expected_code: &str, supplied_id: &str) {
+        assert_eq!(error.external_message(), expected_code);
+        match error {
+            AppError::InvalidInput(detail) => {
+                assert_eq!(detail, expected_code);
+                assert!(!detail.contains(supplied_id));
+            }
+            other => panic!("expected invalid-input error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reorder_providers_partial_list_preserves_omitted_absolute_indexes() {
+        let db = make_db();
+        let app_type = "claude_code";
+        save_reorder_provider_fixture(&db, app_type, "omitted_zero", Some(0), 5);
+        save_reorder_provider_fixture(&db, app_type, "omitted_tie_one", Some(1), 30);
+        save_reorder_provider_fixture(&db, app_type, "supplied_later", Some(7), 20);
+        save_reorder_provider_fixture(&db, app_type, "omitted_tie_two", Some(2), 5);
+        save_reorder_provider_fixture(&db, app_type, "supplied_earlier", Some(8), 10);
+        save_reorder_provider_fixture(&db, app_type, "omitted_after", Some(3), 0);
+        save_reorder_provider_fixture(&db, app_type, "omitted_null", None, -1);
+
+        db.reorder_providers(
+            app_type,
+            &["supplied_later".into(), "supplied_earlier".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            reorder_provider_sort_indexes(&db, app_type),
+            vec![
+                ("omitted_zero".into(), Some(0)),
+                ("supplied_later".into(), Some(1)),
+                ("omitted_tie_one".into(), Some(1)),
+                ("omitted_tie_two".into(), Some(2)),
+                ("supplied_earlier".into(), Some(2)),
+                ("omitted_after".into(), Some(3)),
+                ("omitted_null".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_providers_empty_list_is_no_op() {
+        let db = make_db();
+        let app_type = "claude_code";
+        save_reorder_provider_fixture(&db, app_type, "zero", Some(0), 1);
+        save_reorder_provider_fixture(&db, app_type, "indexed", Some(4), 2);
+        save_reorder_provider_fixture(&db, app_type, "unindexed", None, 3);
+        let before = reorder_provider_sort_indexes(&db, app_type);
+
+        db.reorder_providers(app_type, &[]).unwrap();
+
+        assert_eq!(reorder_provider_sort_indexes(&db, app_type), before);
+    }
+
+    #[test]
+    fn reorder_providers_full_list_and_repeated_same_list_succeed() {
+        let db = make_db();
+        let app_type = "claude_code";
+        save_reorder_provider_fixture(&db, app_type, "first", Some(9), 1);
+        save_reorder_provider_fixture(&db, app_type, "second", Some(2), 2);
+        save_reorder_provider_fixture(&db, app_type, "third", None, 3);
+        let ordered_ids = vec![
+            "third".to_string(),
+            "first".to_string(),
+            "second".to_string(),
+        ];
+
+        db.reorder_providers(app_type, &ordered_ids).unwrap();
+        db.reorder_providers(app_type, &ordered_ids).unwrap();
+
+        assert_eq!(
+            reorder_provider_sort_indexes(&db, app_type),
+            vec![
+                ("third".into(), Some(1)),
+                ("first".into(), Some(2)),
+                ("second".into(), Some(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_providers_late_duplicate_returns_code_without_partial_updates() {
+        let db = make_db();
+        let app_type = "claude_code";
+        save_reorder_provider_fixture(&db, app_type, "first", Some(4), 1);
+        save_reorder_provider_fixture(&db, app_type, "second", Some(5), 2);
+        let before = reorder_provider_sort_indexes(&db, app_type);
+
+        let error = db
+            .reorder_providers(app_type, &["first".into(), "second".into(), "first".into()])
+            .unwrap_err();
+
+        assert_reorder_invalid_input(error, "AAG_PROVIDER_REORDER_DUPLICATE_ID", "first");
+        assert_eq!(reorder_provider_sort_indexes(&db, app_type), before);
+    }
+
+    #[test]
+    fn reorder_providers_late_unknown_id_returns_code_without_partial_updates() {
+        let db = make_db();
+        let app_type = "claude_code";
+        save_reorder_provider_fixture(&db, app_type, "first", Some(4), 1);
+        save_reorder_provider_fixture(&db, app_type, "second", Some(5), 2);
+        let before = reorder_provider_sort_indexes(&db, app_type);
+        let unknown_id = "unknown_provider_fixture";
+
+        let error = db
+            .reorder_providers(app_type, &["first".into(), unknown_id.into()])
+            .unwrap_err();
+
+        assert_reorder_invalid_input(error, "AAG_PROVIDER_REORDER_UNKNOWN_ID", unknown_id);
+        assert_eq!(reorder_provider_sort_indexes(&db, app_type), before);
+    }
+
+    #[test]
+    fn reorder_providers_wrong_app_id_returns_code_without_partial_updates() {
+        let db = make_db();
+        let app_type = "claude_code";
+        let foreign_app = "codex";
+        save_reorder_provider_fixture(&db, app_type, "first", Some(4), 1);
+        save_reorder_provider_fixture(&db, foreign_app, "foreign_only", Some(7), 2);
+        let app_before = reorder_provider_sort_indexes(&db, app_type);
+        let foreign_before = reorder_provider_sort_indexes(&db, foreign_app);
+
+        let error = db
+            .reorder_providers(app_type, &["first".into(), "foreign_only".into()])
+            .unwrap_err();
+
+        assert_reorder_invalid_input(error, "AAG_PROVIDER_REORDER_UNKNOWN_ID", "foreign_only");
+        assert_eq!(reorder_provider_sort_indexes(&db, app_type), app_before);
+        assert_eq!(
+            reorder_provider_sort_indexes(&db, foreign_app),
+            foreign_before
+        );
+    }
+
+    #[test]
+    fn reorder_providers_isolated_by_composite_app_key() {
+        let db = make_db();
+        save_reorder_provider_fixture(&db, "claude_code", "shared_first", Some(1), 1);
+        save_reorder_provider_fixture(&db, "claude_code", "shared_second", Some(2), 2);
+        save_reorder_provider_fixture(&db, "codex", "shared_first", Some(8), 1);
+        save_reorder_provider_fixture(&db, "codex", "shared_second", Some(7), 2);
+        let other_app_before = reorder_provider_sort_indexes(&db, "codex");
+
+        db.reorder_providers(
+            "claude_code",
+            &["shared_second".into(), "shared_first".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            reorder_provider_sort_indexes(&db, "claude_code"),
+            vec![
+                ("shared_second".into(), Some(1)),
+                ("shared_first".into(), Some(2)),
+            ]
+        );
+        assert_eq!(
+            reorder_provider_sort_indexes(&db, "codex"),
+            other_app_before
+        );
     }
 }

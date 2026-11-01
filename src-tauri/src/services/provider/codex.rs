@@ -15,8 +15,30 @@ use crate::config::{
 };
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::services::provider::toml_merge::{Toml_table, Toml_top_entry, Toml_value};
 use crate::services::provider::LiveWriteResult;
 use serde_json::Value;
+
+/// Database-aware entrypoints also reject the unavailable enabled/uninstalled
+/// state. Low-level compatibility writers can inspect only the authority object;
+/// they must not open an ambient database to infer somebody else's settings.
+pub(crate) fn require_unmanaged_codex(db: &crate::database::Database) -> Result<(), AppError> {
+    if crate::services::session_authority::client_config::managed_launch_required(db)
+        .map_err(AppError::Config)?
+    {
+        return Err(AppError::SessionClientAuthorityUnavailable);
+    }
+    Ok(())
+}
+
+fn require_legacy_codex_write() -> Result<(), AppError> {
+    if crate::services::session_authority::client_config::authority_object_present()
+        .map_err(AppError::Config)?
+    {
+        return Err(AppError::SessionClientAuthorityUnavailable);
+    }
+    Ok(())
+}
 
 /// Is Codex installed? (config dir exists)
 #[allow(dead_code)]
@@ -58,6 +80,7 @@ pub fn write_live(
     provider: &Provider,
     codex_cli_home: Option<&str>,
 ) -> Result<LiveWriteResult, AppError> {
+    require_legacy_codex_write()?;
     // Resolve the mirror CODEX_HOME. `get_codex_mirror_dir` falls back to
     // `~/.codex-cli` when no override is set (never the native `~/.codex`),
     // but a user could still point the override directly at `~/.codex`.
@@ -118,14 +141,13 @@ pub fn write_live(
     })
 }
 
-/// Session-state carriers in a CODEX_HOME that keep a Codex mirror stuck
+/// Login-state files in a CODEX_HOME that keep a Codex mirror stuck
 /// on a dead login even after `auth.json` is emptied: the desktop's
-/// global-state cache at the CODEX_HOME root (OUTSIDE the Chromium profile
-/// the launcher wipes) and the `cache/` + `sessions/` trees written during
-/// a logged-in session.
+/// global-state cache at the CODEX_HOME root (outside the Chromium profile
+/// the launcher uses). Conversation, history and attachment directories must
+/// survive recovery, including native versions storing payloads under cache/.
 const MIRROR_SESSION_STATE_FILES: &[&str] =
     &[".codex-global-state.json", ".codex-global-state.json.bak"];
-const MIRROR_SESSION_CACHE_DIRS: &[&str] = &["cache", "sessions"];
 
 fn remove_mirror_path(mirror_dir: &std::path::Path, name: &str) -> Result<(), AppError> {
     let path = mirror_dir.join(name);
@@ -147,20 +169,25 @@ fn remove_mirror_path(mirror_dir: &std::path::Path, name: &str) -> Result<(), Ap
     Ok(())
 }
 
-/// Reset every session-state carrier of a mirror CODEX_HOME: `auth.json`
-/// becomes `{}` and the global-state / cache / sessions carriers from a
-/// previous logged-in session are removed. Without this the desktop keeps
-/// refreshing the dead cached session ("access token could not be
+/// Reset login state of a mirror CODEX_HOME: `auth.json`
+/// becomes `{}` and the known global login-state files from a
+/// previous login are removed. Native conversations and attachment storage are
+/// preserved. This clears a dead login ("access token could not be
 /// refreshed") instead of showing a clean login page. The fresh-mirror
 /// path (open-desktop) calls this; the switch path never does — a login
 /// session the user created inside the mirror must survive switches.
 fn reset_mirror_session_state(mirror_dir: &std::path::Path) -> Result<(), AppError> {
-    std::fs::write(mirror_dir.join("auth.json"), "{}")
-        .map_err(|e| AppError::io(&mirror_dir.join("auth.json"), e))?;
+    require_legacy_codex_write()?;
+    // Same atomic + linked-path discipline as every other mirror write: a
+    // crash mid-write must not leave a truncated auth.json behind. The
+    // mirror is AAG-managed, so harden it first — the switch path applies
+    // the same policy, and an auto-heal can run on a directory Codex
+    // Desktop recreated with inherited loose ACLs.
+    crate::config::private_fs::prepare_managed_private_dir(mirror_dir)?;
+    let auth_path = mirror_dir.join("auth.json");
+    crate::config::private_fs::validate_external_file_path(&auth_path)?;
+    crate::config::private_fs::atomic_write(&auth_path, b"{}")?;
     for name in MIRROR_SESSION_STATE_FILES {
-        remove_mirror_path(mirror_dir, name)?;
-    }
-    for name in MIRROR_SESSION_CACHE_DIRS {
         remove_mirror_path(mirror_dir, name)?;
     }
     Ok(())
@@ -184,6 +211,11 @@ pub(crate) fn classify_mirror_auth_json(mirror_dir: &std::path::Path) -> &'stati
 
 /// Escape a value for a TOML basic string literal (the only quoting the
 /// mirror config needs).
+///
+/// Retained for the mirror's manual-config read paths; the write path now
+/// goes through `toml_merge`, which spells values with `toml_edit` and so
+/// escapes control characters this function would have written raw.
+#[allow(dead_code)]
 pub(crate) fn escape_toml_basic_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -242,17 +274,13 @@ pub(crate) fn codex_mirror_mode_from_db(db: &crate::database::Database) -> Codex
 ///   "responses"`, `requires_openai_auth = false`, AAG's own
 ///   `experimental_bearer_token`) — Codex authenticates to AAG only, and
 ///   AAG holds the upstream keys.
-/// - `config.toml` points exclusively at AAG's proxy (`wire_api =
-///   "responses"`, `requires_openai_auth = false`, AAG's own
-///   `experimental_bearer_token`) — Codex authenticates to AAG only, and
-///   AAG holds the upstream keys.
 /// - `auth.json` is NEVER written by AAG with anything but `{}`. AAG never
 ///   puts login information into the mirror: not the native `~/.codex`
 ///   ChatGPT login, and not the provider row's stored credentials. With
 ///   `purge_auth = false` (the provider-switch path) auth.json is not
 ///   touched at all, so a login session the user created INSIDE the mirror
-///   survives switches. With `purge_auth = true` (the open-desktop path,
-///   which also wipes the mirror's Chromium profile) a stale auth.json —
+///   survives switches and desktop launches. With `purge_auth = true`
+///   (an explicit reset request) a stale auth.json —
 ///   including credential copies from older AAG versions — is purged
 ///   unconditionally, deliberately without a backup: the mirror must start
 ///   as a fresh, standalone, logged-out instance.
@@ -262,8 +290,8 @@ pub(crate) fn codex_mirror_mode_from_db(db: &crate::database::Database) -> Codex
 /// The mirror is an isolated AAG directory, hardened before any user
 /// configuration is read or changed.
 ///
-/// Called from both `provider_switch` (codex, `purge_auth = false`) and
-/// `codex_open_desktop_window` (`purge_auth = true`), so every mirror write
+/// Called from both provider switching and desktop launch with
+/// `purge_auth = false`, so every mirror write
 /// path enforces the same proxy contract and the same never-write-credentials rule.
 pub fn write_mirror_proxy_files(
     codex_cli_home: Option<&str>,
@@ -273,6 +301,34 @@ pub fn write_mirror_proxy_files(
     mode: Codex_mirror_mode,
     purge_auth: bool,
 ) -> Result<LiveWriteResult, AppError> {
+    write_mirror_proxy_files_with_effort(
+        codex_cli_home,
+        proxy_base_url,
+        proxy_auth_token,
+        model,
+        mode,
+        purge_auth,
+        None,
+        false,
+    )
+}
+
+fn write_mirror_proxy_files_with_effort(
+    codex_cli_home: Option<&str>,
+    proxy_base_url: &str,
+    proxy_auth_token: &str,
+    model: &str,
+    mode: Codex_mirror_mode,
+    purge_auth: bool,
+    reasoning_effort: Option<&str>,
+    manage_reasoning_effort: bool,
+) -> Result<LiveWriteResult, AppError> {
+    require_legacy_codex_write()?;
+    if reasoning_effort
+        .is_some_and(|value| !crate::services::launcher::codex_reasoning::valid_effort(value))
+    {
+        return Err(AppError::Config("codex_reasoning_effort_invalid".into()));
+    }
     let mirror_dir = crate::config::get_codex_mirror_dir(codex_cli_home);
     if crate::config::same_dir(&mirror_dir, &crate::config::get_codex_config_dir()) {
         return Err(AppError::Config(
@@ -286,57 +342,51 @@ pub fn write_mirror_proxy_files(
     for path in [&config_path, &auth_path] {
         crate::config::private_fs::validate_external_file_path(path)?;
     }
-
-    // Exclusive: today's contract byte-for-byte — the top-level provider is
-    // forced to `aag`, so every Codex request routes through AAG.
-    // Coexist: no top-level provider/model (Codex defaults to its builtin
-    // openai provider — the in-mirror ChatGPT login works for official
-    // models), AAG stays declared, and a `[profiles.aag]` profile switches
-    // to it manually. TOML ordering: table-free top-level keys must come
-    // before any table header, hence two full templates.
-    let mirror_config = match mode {
-        Codex_mirror_mode::Exclusive => format!(
-            "model = \"{model}\"\nmodel_provider = \"aag\"\n\n\
-             [model_providers.aag]\n\
-             name = \"AAG Gateway\"\n\
-             base_url = \"{url}\"\n\
-             wire_api = \"responses\"\n\
-             requires_openai_auth = false\n\
-             experimental_bearer_token = \"{auth}\"\n",
-            model = escape_toml_basic_string(model),
-            url = escape_toml_basic_string(proxy_base_url),
-            auth = escape_toml_basic_string(proxy_auth_token),
-        ),
-        Codex_mirror_mode::Coexist => format!(
-            "[model_providers.aag]\n\
-             name = \"AAG Gateway\"\n\
-             base_url = \"{url}\"\n\
-             wire_api = \"responses\"\n\
-             requires_openai_auth = false\n\
-             experimental_bearer_token = \"{auth}\"\n\n\
-             [profiles.aag]\n\
-             model_provider = \"aag\"\n\
-             model = \"{model}\"\n",
-            url = escape_toml_basic_string(proxy_base_url),
-            auth = escape_toml_basic_string(proxy_auth_token),
-            model = escape_toml_basic_string(model),
-        ),
+    // A normal launch/catalog refresh must retain a choice saved by Codex's
+    // own model picker. Only an explicit manager switch/save owns that value;
+    // a fresh mirror can still inherit the stored provider preference.
+    let previous = crate::config::private_fs::read_mirror_file(&config_path)?;
+    let existing = previous.contents.as_deref().unwrap_or_default();
+    let previous_text = std::str::from_utf8(existing)
+        .map_err(|_| AppError::Config("client_config_toml_not_utf8".into()))?;
+    let previous_document = previous_text
+        .trim_start_matches('\u{feff}')
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| AppError::Config("client_config_toml_invalid".into()))?;
+    let saved_effort = previous_document.get("model_reasoning_effort").is_some()
+        || previous_document
+            .get("profiles")
+            .and_then(|profiles| profiles.get("aag"))
+            .and_then(|profile| profile.get("model_reasoning_effort"))
+            .is_some();
+    let reasoning_effort = if manage_reasoning_effort || !saved_effort {
+        reasoning_effort
+    } else {
+        None
     };
 
-    let mut written = Vec::new();
-    let mut backups = Vec::new();
-    let (config_written, config_backups) =
-        super::config_writes::write_files(&[super::config_writes::ConfigFileUpdate {
+    let mirror_config = render_mirror_proxy_config(
+        &mirror_dir,
+        existing,
+        proxy_base_url,
+        proxy_auth_token,
+        model,
+        mode,
+        reasoning_effort,
+        manage_reasoning_effort,
+    )?;
+    let (mut written, backups) = super::config_writes::write_mirror_files(&[
+        super::config_writes::MirrorConfigFileUpdate {
             path: &config_path,
-            contents: mirror_config.as_bytes(),
+            contents: &mirror_config,
             app_type: "codex",
-        }])?;
-    written.extend(config_written);
-    backups.extend(config_backups);
+            previous: &previous,
+        },
+    ])?;
 
     if purge_auth {
-        // Fresh-mirror semantics (open-desktop): reset EVERY session-state
-        // carrier so the mirror starts logged out with a clean login page.
+        // Explicit reset clears mirror login and known global login-state
+        // markers while preserving conversation, history, and attachment data.
         reset_mirror_session_state_guarded(codex_cli_home)?;
         written.push(auth_path.to_string_lossy().into_owned());
     }
@@ -349,35 +399,169 @@ pub fn write_mirror_proxy_files(
     })
 }
 
+fn render_mirror_proxy_config(
+    mirror_dir: &std::path::Path,
+    existing: &[u8],
+    proxy_base_url: &str,
+    proxy_auth_token: &str,
+    model: &str,
+    mode: Codex_mirror_mode,
+    reasoning_effort: Option<&str>,
+    manage_reasoning_effort: bool,
+) -> Result<Vec<u8>, AppError> {
+    // The managed provider block, merged into whatever the file already
+    // holds rather than rendered over it: the mirror's `config.toml` is a
+    // user-owned file, and the previous full-template write destroyed every
+    // comment and unrelated key in it on each provider switch. `toml_merge`
+    // edits only the keys below and leaves the rest byte-identical.
+    let provider_entries = vec![
+        ("name".to_string(), Toml_value::Str("AAG Gateway".into())),
+        (
+            "base_url".to_string(),
+            Toml_value::Str(proxy_base_url.to_string()),
+        ),
+        ("wire_api".to_string(), Toml_value::Str("responses".into())),
+        ("requires_openai_auth".to_string(), Toml_value::Bool(false)),
+        (
+            "experimental_bearer_token".to_string(),
+            Toml_value::Str(proxy_auth_token.to_string()),
+        ),
+    ];
+
+    let catalog_path = mirror_dir
+        .join(crate::services::launcher::codex_catalog::CATALOG_FILENAME)
+        .to_string_lossy()
+        .into_owned();
+    let mut profile_entries = vec![
+        ("model_provider".to_string(), Toml_value::Str("aag".into())),
+        // Hosted Responses search is unavailable on translated AAG routes.
+        // Coexist mode applies this only inside the managed AAG profile.
+        ("web_search".to_string(), Toml_value::Str("disabled".into())),
+        (
+            "model_catalog_json".to_string(),
+            Toml_value::Str(catalog_path),
+        ),
+    ];
+    if !model.trim().is_empty() {
+        profile_entries.push(("model".to_string(), Toml_value::Str(model.to_string())));
+    }
+    if let Some(effort) = reasoning_effort {
+        profile_entries.push((
+            "model_reasoning_effort".into(),
+            Toml_value::Str(effort.into()),
+        ));
+    }
+    let top_keys: Vec<Toml_top_entry> = match mode {
+        Codex_mirror_mode::Exclusive => profile_entries.clone(),
+        Codex_mirror_mode::Coexist => Vec::new(),
+    };
+    let tables: Vec<Toml_table> = vec![
+        ("model_providers.aag".to_string(), provider_entries),
+        ("profiles.aag".to_string(), profile_entries),
+    ];
+
+    // Merge the exact previous bytes so unrelated keys and comments survive.
+    let mirror_config = super::toml_merge::merge(existing, &top_keys, &tables)?;
+    clear_inactive_mirror_selection(
+        mirror_config,
+        existing,
+        model,
+        mode,
+        manage_reasoning_effort && reasoning_effort.is_none(),
+    )
+}
+
 /// Keep launcher/native-home comparisons on the shared guarded path policy.
 pub(crate) fn same_codex_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
     crate::config::same_dir(a, b)
 }
 
-/// Default model for the mirror config. Priority:
-/// 1. the active Codex provider's stored model (`settings_config.model`),
-/// 2. the first `codex-*` route alias the router actually serves,
-/// 3. `gpt-5` as a last resort.
-fn mirror_model(db: &crate::database::Database) -> String {
-    db.get_current_provider("codex")
-        .ok()
-        .flatten()
-        .and_then(|id| db.get_provider_by_id(&id, "codex").ok().flatten())
-        .and_then(|p| {
-            p.settings_config
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .or_else(|| {
-            db.get_all_routes().ok().and_then(|routes| {
-                routes
-                    .into_iter()
-                    .find(|r| r.alias.starts_with("codex-"))
-                    .map(|r| r.alias)
-            })
-        })
-        .unwrap_or_else(|| "gpt-5".into())
+/// Remove stale managed selection and the legacy top-level profile selector.
+/// Current Codex rejects that legacy key and silently loads default settings;
+/// named profile tables and unrelated settings remain intact for older clients.
+fn clear_inactive_mirror_selection(
+    bytes: Vec<u8>,
+    previous: &[u8],
+    model: &str,
+    mode: Codex_mirror_mode,
+    clear_reasoning_effort: bool,
+) -> Result<Vec<u8>, AppError> {
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::Config("client_config_toml_not_utf8".into()))?;
+    let (bom, body) = text
+        .strip_prefix('\u{feff}')
+        .map_or(("", text), |body| ("\u{feff}", body));
+    let mut document = body
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| AppError::Config("client_config_toml_invalid".into()))?;
+    if clear_reasoning_effort {
+        if let Some(profile) = document
+            .get_mut("profiles")
+            .and_then(|profiles| profiles.get_mut("aag"))
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            profile.remove("model_reasoning_effort");
+        }
+        if mode == Codex_mirror_mode::Exclusive
+            && document
+                .get("model_provider")
+                .and_then(toml_edit::Item::as_str)
+                == Some("aag")
+        {
+            document.remove("model_reasoning_effort");
+        }
+    }
+    document.remove("profile");
+    if model.trim().is_empty() || mode == Codex_mirror_mode::Coexist {
+        document.remove("model");
+    }
+    if mode == Codex_mirror_mode::Coexist {
+        document.remove("model_provider");
+        document.remove("model_catalog_json");
+        // Remove our exclusive-mode search override when returning to native
+        // defaults. A standalone user search preference is not ours to clear.
+        let previous_text = std::str::from_utf8(previous)
+            .map_err(|_| AppError::Config("client_config_toml_not_utf8".into()))?;
+        let previous_document = previous_text
+            .trim_start_matches('\u{feff}')
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| AppError::Config("client_config_toml_invalid".into()))?;
+        let previous_aag_search = previous_document
+            .get("profiles")
+            .and_then(|profiles| profiles.get("aag"))
+            .and_then(|profile| profile.get("web_search"))
+            .and_then(toml_edit::Item::as_str);
+        let previous_aag_effort = previous_document
+            .get("profiles")
+            .and_then(|profiles| profiles.get("aag"))
+            .and_then(|profile| profile.get("model_reasoning_effort"))
+            .and_then(toml_edit::Item::as_str);
+        if previous_document
+            .get("model_provider")
+            .and_then(toml_edit::Item::as_str)
+            == Some("aag")
+            && previous_aag_effort.is_some()
+            && previous_document
+                .get("model_reasoning_effort")
+                .and_then(toml_edit::Item::as_str)
+                == previous_aag_effort
+        {
+            document.remove("model_reasoning_effort");
+        }
+        if previous_document
+            .get("model_provider")
+            .and_then(toml_edit::Item::as_str)
+            == Some("aag")
+            && previous_document
+                .get("web_search")
+                .and_then(toml_edit::Item::as_str)
+                == Some("disabled")
+            && previous_aag_search == Some("disabled")
+        {
+            document.remove("web_search");
+        }
+    }
+    Ok(format!("{bom}{document}").into_bytes())
 }
 
 /// Explicitly reset the mirror's login/session state (auth.json + global
@@ -387,6 +571,7 @@ fn mirror_model(db: &crate::database::Database) -> String {
 pub(crate) fn reset_mirror_session_state_guarded(
     codex_cli_home: Option<&str>,
 ) -> Result<(), AppError> {
+    require_legacy_codex_write()?;
     let mirror_dir = crate::config::get_codex_mirror_dir(codex_cli_home);
     if crate::config::same_dir(&mirror_dir, &crate::config::get_codex_config_dir()) {
         return Err(AppError::Config(
@@ -450,6 +635,9 @@ pub(crate) enum MirrorHealOutcome {
     /// The native `~/.codex` was targeted — refused for safety. Same guard
     /// as the manual `codex_mirror_session_reset` command.
     RefusedNativeTarget,
+    /// A protected authority object exists or cannot be safely inspected.
+    /// A legacy response-triggered repair has no authority to mutate it.
+    RefusedManagedAuthority,
     /// Heal ran: `auth.json` and the session carriers were reset.
     Healed,
 }
@@ -462,6 +650,9 @@ pub(crate) enum MirrorHealOutcome {
 /// Returns the outcome so the caller can log it; never panics, never writes
 /// outside the mirror dir, never touches the native `~/.codex`.
 pub(crate) fn maybe_heal_mirror_on_auth_expired(codex_cli_home: Option<&str>) -> MirrorHealOutcome {
+    if require_legacy_codex_write().is_err() {
+        return MirrorHealOutcome::RefusedManagedAuthority;
+    }
     let mirror_dir = crate::config::get_codex_mirror_dir(codex_cli_home);
     if crate::config::same_dir(&mirror_dir, &crate::config::get_codex_config_dir()) {
         return MirrorHealOutcome::RefusedNativeTarget;
@@ -503,10 +694,12 @@ pub(crate) fn maybe_heal_mirror_on_auth_expired(codex_cli_home: Option<&str>) ->
     }
 
     if let Err(error) = reset_mirror_session_state(&mirror_dir) {
+        // The stable external message keeps the log path-hashed like the
+        // mirror_dir reference; AppError's Display embeds raw local paths.
         log::warn!(
             "codex mirror auto-heal: reset failed mirror_dir={} error={}",
             crate::diagnostics::safe_reference(&mirror_dir.to_string_lossy()),
-            error
+            error.external_message()
         );
         // The gate is already set; surface the failure but don't roll it
         // back. A second hit this process is harmless either way.
@@ -524,6 +717,33 @@ mod auto_heal_tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn managed_authority_blocks_legacy_autoheal_without_consuming_its_gate() {
+        let home =
+            crate::services::provider::test_support::isolated_home("managed-legacy-autoheal");
+        let mirror = home.root.join("custom_mirror");
+        crate::config::private_fs::prepare_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("auth.json"),
+            b"{\"fixture_session\":true}",
+        )
+        .unwrap();
+        filetime_set(
+            &mirror.join("auth.json"),
+            std::time::SystemTime::now()
+                - std::time::Duration::from_secs(MIRROR_HEAL_MIN_AUTH_AGE_SECS + 60),
+        );
+        fs::create_dir_all(home.root.join(".codex-cli/.authority")).unwrap();
+        let gate_before = MIRROR_HEAL_FIRED.get().cloned();
+        let outcome = maybe_heal_mirror_on_auth_expired(mirror.to_str());
+        assert!(!matches!(outcome, MirrorHealOutcome::Healed));
+        assert_eq!(MIRROR_HEAL_FIRED.get().cloned(), gate_before);
+        assert_eq!(
+            fs::read(mirror.join("auth.json")).unwrap(),
+            b"{\"fixture_session\":true}"
+        );
+    }
 
     /// Build a temp mirror dir that is NOT the native `~/.codex`. The
     /// test process does not need to mutate the real mirror; each test
@@ -627,11 +847,10 @@ mod auto_heal_tests {
 }
 
 /// Gather the mirror-proxy inputs from the database and write the
-/// credential-free mirror contract. The single entry point for both
-/// `provider_switch` (codex, `purge_auth = false`) and
-/// `codex_open_desktop_window` (`purge_auth = true`).
+/// mirror contract and configured model catalogue. Desktop launch and
+/// provider switching preserve existing mirror account state.
 ///
-/// `purge_auth = false`: only config.toml is written — a login session the
+/// `purge_auth = false`: only configuration/catalogue files are written — a login session the
 /// user created inside the mirror survives switches, and AAG still never
 /// writes any credential.
 pub fn switch_codex_mirror(
@@ -639,21 +858,181 @@ pub fn switch_codex_mirror(
     codex_cli_home: Option<&str>,
     purge_auth: bool,
 ) -> Result<LiveWriteResult, AppError> {
-    let proxy_cfg = db.get_proxy_config().map_err(AppError::from)?;
-    let gateway_url = format!("http://{}:{}/v1", proxy_cfg.host, proxy_cfg.port);
-    let mut result = write_mirror_proxy_files(
+    apply_codex_mirror(db, codex_cli_home, purge_auth, None, None)
+}
+
+/// Final preparation from a captured Codex routing snapshot. The runtime owner
+/// supplies exact viable ids after evaluating routes, credentials and any pin.
+/// Preserve mirror account state while replacing both catalogue and default.
+pub(crate) fn apply_codex_runtime_models(
+    db: &crate::database::Database,
+    codex_cli_home: Option<&str>,
+    allowed_ids: &[String],
+) -> Result<LiveWriteResult, AppError> {
+    apply_codex_mirror(db, codex_cli_home, false, None, Some(allowed_ids))
+}
+
+/// Desktop has no supported profile-selection launch flag. An explicit AAG
+/// launch therefore selects AAG at the top level in the existing isolated home.
+/// Validate the complete catalogue and TOML before replacing either file; keep
+/// account/session files untouched and persist the mode only after preparation.
+pub(crate) fn prepare_codex_desktop_mirror(
+    db: &crate::database::Database,
+    codex_cli_home: Option<&str>,
+    allowed_ids: Option<&[String]>,
+) -> Result<LiveWriteResult, AppError> {
+    require_unmanaged_codex(db)?;
+    require_legacy_codex_write()?;
+    let mirror_dir = crate::config::get_codex_mirror_dir(codex_cli_home);
+    if crate::config::same_dir(&mirror_dir, &crate::config::get_codex_config_dir()) {
+        return Err(AppError::Config(
+            "codex_cli_home must not resolve to the native ~/.codex: refusing to write the Codex Desktop app's shared config".into(),
+        ));
+    }
+    let (model_ids, catalog) =
+        crate::services::launcher::codex_catalog::build_codex_model_catalog(db, None, allowed_ids)?;
+    if model_ids.is_empty() {
+        return Err(AppError::Config("desktop_mirror_models_unavailable".into()));
+    }
+    let model = crate::services::launcher::codex_catalog::default_model(db, &model_ids, None)?;
+    let provider_id = db.get_current_provider("codex")?.unwrap_or_default();
+    let proxy_cfg = db.get_proxy_config()?;
+    let gateway_url = format!(
+        "http://{}:{}/v1",
+        proxy_cfg.client_endpoint_host(),
+        proxy_cfg.port
+    );
+
+    crate::config::private_fs::prepare_managed_private_dir(&mirror_dir)?;
+    let config_path = mirror_dir.join("config.toml");
+    let catalog_path = mirror_dir.join(crate::services::launcher::codex_catalog::CATALOG_FILENAME);
+    let previous_config = crate::config::private_fs::read_mirror_file(&config_path)?;
+    let previous_catalog = crate::config::private_fs::read_mirror_file(&catalog_path)?;
+    let mirror_config = render_mirror_proxy_config(
+        &mirror_dir,
+        previous_config.contents.as_deref().unwrap_or_default(),
+        &gateway_url,
+        &proxy_cfg.auth_token,
+        &model,
+        Codex_mirror_mode::Exclusive,
+        // Desktop launch is a refresh path: a reasoning effort saved by
+        // Codex's own picker survives the merge untouched.
+        None,
+        false,
+    )?;
+    let (written, backups) = super::config_writes::write_mirror_files(&[
+        super::config_writes::MirrorConfigFileUpdate {
+            path: &catalog_path,
+            contents: &catalog,
+            app_type: "codex",
+            previous: &previous_catalog,
+        },
+        super::config_writes::MirrorConfigFileUpdate {
+            path: &config_path,
+            contents: &mirror_config,
+            app_type: "codex",
+            previous: &previous_config,
+        },
+    ])?;
+    db.set_setting(
+        crate::database::dao::settings::KEY_CODEX_MIRROR_MODE,
+        Codex_mirror_mode::Exclusive.as_str(),
+    )?;
+    Ok(LiveWriteResult {
+        app_type: "codex".into(),
+        provider_id,
+        written,
+        backup: backups.into_iter().next(),
+    })
+}
+
+fn apply_codex_mirror(
+    db: &crate::database::Database,
+    codex_cli_home: Option<&str>,
+    purge_auth: bool,
+    selected_provider: Option<&Provider>,
+    allowed_ids: Option<&[String]>,
+) -> Result<LiveWriteResult, AppError> {
+    require_unmanaged_codex(db)?;
+    let explicit_selection = selected_provider.is_some();
+    let current_provider = if selected_provider.is_none() {
+        db.get_current_provider("codex")?
+            .map(|id| db.get_provider_by_id(&id, "codex"))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let selected_provider = selected_provider.or(current_provider.as_ref());
+    let reasoning_effort = selected_provider
+        .and_then(|provider| provider.settings_config.get("model_reasoning_effort"))
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| AppError::Config("codex_reasoning_effort_invalid".into()))
+        })
+        .transpose()?;
+    if reasoning_effort
+        .is_some_and(|value| !crate::services::launcher::codex_reasoning::valid_effort(value))
+    {
+        return Err(AppError::Config("codex_reasoning_effort_invalid".into()));
+    }
+    let proxy_cfg = db.get_proxy_config()?;
+    // A wildcard or unset bind is not a client target — the Codex CLI dials
+    // this URL, so translate it to the loopback (same rule as the Claude and
+    // Gemini mirrors).
+    let gateway_url = format!(
+        "http://{}:{}/v1",
+        proxy_cfg.client_endpoint_host(),
+        proxy_cfg.port
+    );
+    let (model_ids, catalog_bytes) =
+        crate::services::launcher::codex_catalog::build_codex_model_catalog(
+            db,
+            selected_provider,
+            allowed_ids,
+        )?;
+    let model =
+        crate::services::launcher::codex_catalog::default_model(db, &model_ids, selected_provider)?;
+    if explicit_selection {
+        if let Some(effort) = reasoning_effort {
+            let capabilities =
+                crate::services::launcher::codex_reasoning::Reasoning_catalog::from_db(
+                    db,
+                    selected_provider,
+                )?;
+            if !capabilities
+                .for_model(&model)
+                .levels
+                .iter()
+                .any(|supported| supported == effort)
+            {
+                return Err(AppError::Config(
+                    "codex_reasoning_effort_unsupported".into(),
+                ));
+            }
+        }
+    }
+    crate::services::launcher::codex_catalog::write_prepared_codex_model_catalog(
+        db,
+        &crate::config::get_codex_mirror_dir(codex_cli_home),
+        &catalog_bytes,
+    )?;
+    let mode = db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)?;
+    let mut result = write_mirror_proxy_files_with_effort(
         codex_cli_home,
         &gateway_url,
         &proxy_cfg.auth_token,
-        &mirror_model(db),
-        codex_mirror_mode_from_db(db),
+        &model,
+        Codex_mirror_mode::from_setting(mode.as_deref()),
         purge_auth,
+        reasoning_effort,
+        explicit_selection,
     )?;
-    result.provider_id = db
-        .get_current_provider("codex")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    result.provider_id = match selected_provider {
+        Some(provider) => provider.id.clone(),
+        None => db.get_current_provider("codex")?.unwrap_or_default(),
+    };
     Ok(result)
 }
 
@@ -665,45 +1044,692 @@ pub fn switch_codex_mirror_for_provider(
     purge_auth: bool,
     provider: &Provider,
 ) -> Result<LiveWriteResult, AppError> {
-    let proxy_cfg = db.get_proxy_config()?;
-    let gateway_url = format!("http://{}:{}/v1", proxy_cfg.host, proxy_cfg.port);
-    let model = match provider
-        .settings_config
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .filter(|model| !model.trim().is_empty())
-    {
-        Some(model) => model.to_string(),
-        None => db
-            .get_all_routes()?
-            .into_iter()
-            .find(|route| route.alias.starts_with("codex-"))
-            .map(|route| route.alias)
-            .unwrap_or_else(|| "gpt-5".into()),
-    };
-    let mode = db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)?;
-    let mut result = write_mirror_proxy_files(
-        codex_cli_home,
-        &gateway_url,
-        &proxy_cfg.auth_token,
-        &model,
-        Codex_mirror_mode::from_setting(mode.as_deref()),
-        purge_auth,
-    )?;
-    result.provider_id = provider.id.clone();
-    Ok(result)
+    apply_codex_mirror(db, codex_cli_home, purge_auth, Some(provider), None)
 }
 
 #[cfg(test)]
 mod mirror_tests {
     use super::*;
 
+    fn desktop_fixture(db: &crate::database::Database) {
+        let input = serde_json::from_value(serde_json::json!({
+            "expectedGeneration":0, "name":"Desktop fixture", "baseUrl":"https://example.invalid",
+            "apiKey":"fixture_upstream_secret", "endpoints":[{"protocol":"openai-responses",
+            "models":[{"modelId":"Desktop_Model.V1"}]}]
+        }))
+        .unwrap();
+        crate::services::suppliers::save_supplier(db, input).unwrap();
+        db.set_setting(
+            crate::database::dao::settings::KEY_CODEX_MIRROR_MODE,
+            "coexist",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn desktop_launch_activates_aag_without_changing_auth_sessions_or_native_home() {
+        let home = crate::services::provider::test_support::isolated_home("desktop-aag-activation");
+        let db = crate::database::Database::memory().unwrap();
+        desktop_fixture(&db);
+        let native = home.root.join(".codex");
+        let mirror = home.root.join("mirror");
+        for directory in [&native, &mirror, &mirror.join("sessions")] {
+            crate::config::private_fs::prepare_managed_private_dir(directory).unwrap();
+        }
+        crate::config::private_fs::atomic_write(&native.join("config.toml"), b"# native fixture\n")
+            .unwrap();
+        crate::config::private_fs::atomic_write(&mirror.join("config.toml"), b"# keep mirror preferences\nmodel_provider = \"openai\"\n[features]\nfixture_flag = true\n").unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("auth.json"),
+            b"{\"fixture_session\":true}",
+        )
+        .unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("sessions/keep.jsonl"),
+            b"fixture session history\n",
+        )
+        .unwrap();
+        let result =
+            prepare_codex_desktop_mirror(&db, mirror.to_str(), Some(&["Desktop_Model.V1".into()]))
+                .unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let config: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some("aag"));
+        assert_eq!(config["model"].as_str(), Some("Desktop_Model.V1"));
+        assert!(config["model_catalog_json"]
+            .as_str()
+            .unwrap()
+            .ends_with("cc-switch-model-catalog.json"));
+        assert_eq!(
+            config["model_providers"]["aag"]["requires_openai_auth"].as_bool(),
+            Some(false)
+        );
+        assert!(text.contains("# keep mirror preferences"));
+        assert_eq!(config["features"]["fixture_flag"].as_bool(), Some(true));
+        assert_eq!(
+            db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)
+                .unwrap()
+                .as_deref(),
+            Some("exclusive")
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("auth.json")).unwrap(),
+            b"{\"fixture_session\":true}"
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("sessions/keep.jsonl")).unwrap(),
+            b"fixture session history\n"
+        );
+        assert_eq!(
+            std::fs::read(native.join("config.toml")).unwrap(),
+            b"# native fixture\n"
+        );
+        assert!(result.backup.is_some());
+    }
+
+    #[test]
+    fn desktop_launch_empty_or_unavailable_catalog_preserves_configuration_and_mode() {
+        let home = crate::services::provider::test_support::isolated_home("desktop-empty-catalog");
+        let db = crate::database::Database::memory().unwrap();
+        desktop_fixture(&db);
+        let mirror = home.root.join("mirror");
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        let config = b"# existing mirror\nmodel_provider = \"openai\"\n";
+        let catalog = br#"{"models":[{"slug":"preserved"}]}"#;
+        crate::config::private_fs::atomic_write(&mirror.join("config.toml"), config).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("cc-switch-model-catalog.json"),
+            catalog,
+        )
+        .unwrap();
+        for allowed in [Vec::new(), vec!["not-offered".to_string()]] {
+            let error =
+                prepare_codex_desktop_mirror(&db, mirror.to_str(), Some(&allowed)).unwrap_err();
+            assert!(
+                matches!(error, AppError::Config(code) if code == "desktop_mirror_models_unavailable")
+            );
+            assert_eq!(std::fs::read(mirror.join("config.toml")).unwrap(), config);
+            assert_eq!(
+                std::fs::read(mirror.join("cc-switch-model-catalog.json")).unwrap(),
+                catalog
+            );
+            assert_eq!(
+                db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)
+                    .unwrap()
+                    .as_deref(),
+                Some("coexist")
+            );
+        }
+        let absent = home.root.join("not_created");
+        assert!(prepare_codex_desktop_mirror(&db, absent.to_str(), Some(&[])).is_err());
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn desktop_launch_invalid_existing_config_does_not_replace_catalog_or_mode() {
+        let home = crate::services::provider::test_support::isolated_home("desktop-invalid-config");
+        let db = crate::database::Database::memory().unwrap();
+        desktop_fixture(&db);
+        let mirror = home.root.join("mirror");
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(&mirror.join("config.toml"), b"[invalid\n")
+            .unwrap();
+        let catalog = br#"{"models":[{"slug":"preserved"}]}"#;
+        crate::config::private_fs::atomic_write(
+            &mirror.join("cc-switch-model-catalog.json"),
+            catalog,
+        )
+        .unwrap();
+        assert!(prepare_codex_desktop_mirror(
+            &db,
+            mirror.to_str(),
+            Some(&["Desktop_Model.V1".into()])
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(mirror.join("config.toml")).unwrap(),
+            b"[invalid\n"
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("cc-switch-model-catalog.json")).unwrap(),
+            catalog
+        );
+        assert_eq!(
+            db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)
+                .unwrap()
+                .as_deref(),
+            Some("coexist")
+        );
+    }
+
+    #[test]
+    fn desktop_launch_change_does_not_change_ordinary_cli_coexist_preparation() {
+        let home = crate::services::provider::test_support::isolated_home("desktop-cli-coexist");
+        let db = crate::database::Database::memory().unwrap();
+        desktop_fixture(&db);
+        let mirror = home.root.join("mirror");
+        apply_codex_runtime_models(&db, mirror.to_str(), &["Desktop_Model.V1".into()]).unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let config: toml_edit::DocumentMut = text.parse().unwrap();
+        assert!(config.get("model_provider").is_none());
+        assert_eq!(
+            config["profiles"]["aag"]["model_provider"].as_str(),
+            Some("aag")
+        );
+        assert_eq!(
+            db.get_setting(crate::database::dao::settings::KEY_CODEX_MIRROR_MODE)
+                .unwrap()
+                .as_deref(),
+            Some("coexist")
+        );
+    }
+
+    #[test]
+    fn desktop_launch_managed_authority_rejection_precedes_every_write() {
+        let home =
+            crate::services::provider::test_support::isolated_home("desktop-authority-guard");
+        let db = crate::database::Database::memory().unwrap();
+        db.set_setting("codex_session_authority_enabled", "1")
+            .unwrap();
+        let mirror = home.root.join("mirror");
+        assert_eq!(
+            String::from(
+                prepare_codex_desktop_mirror(&db, mirror.to_str(), Some(&["fixture".into()]))
+                    .unwrap_err()
+            ),
+            "session_client_authority_unavailable"
+        );
+        assert!(!mirror.exists());
+    }
+
+    #[test]
+    fn runtime_refresh_preserves_native_picker_effort_until_explicit_manager_selection() {
+        let home = crate::services::provider::test_support::isolated_home("codex-native-effort");
+        let mirror = home.root.join("mirror");
+        let db = crate::database::Database::memory().unwrap();
+        let upstream = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","type":"openai","baseURL":"https://example.invalid/v1","apiKey":"fixture","models":["gpt-6-sol"],"enabled":true})).unwrap();
+        db.save_proxy_provider(&upstream).unwrap();
+        let provider = Provider::new(
+            "selected".into(),
+            "Codex".into(),
+            serde_json::json!({"model":"gpt-6-sol","model_reasoning_effort":"low"}),
+        );
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("selected", "codex").unwrap();
+        apply_codex_mirror(&db, mirror.to_str(), false, None, None).unwrap();
+        let config_path = mirror.join("config.toml");
+        let mut document = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(document["model_reasoning_effort"].as_str(), Some("low"));
+        document["model_reasoning_effort"] = toml_edit::value("high");
+        std::fs::write(&config_path, document.to_string()).unwrap();
+        apply_codex_runtime_models(&db, mirror.to_str(), &["gpt-6-sol".into()]).unwrap();
+        let document = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(document["model_reasoning_effort"].as_str(), Some("high"));
+        apply_codex_mirror(&db, mirror.to_str(), false, Some(&provider), None).unwrap();
+        let document = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(document["model_reasoning_effort"].as_str(), Some("low"));
+    }
+
+    #[test]
+    fn unsupported_effort_fails_before_any_catalog_or_config_write() {
+        let home =
+            crate::services::provider::test_support::isolated_home("codex-unsupported-effort");
+        let mirror = home.root.join("mirror");
+        let db = crate::database::Database::memory().unwrap();
+        let upstream = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","type":"openai","baseURL":"https://example.invalid/v1","apiKey":"fixture","models":["gpt-5-codex"],"enabled":true})).unwrap();
+        db.save_proxy_provider(&upstream).unwrap();
+        let provider = Provider::new(
+            "selected".into(),
+            "Codex".into(),
+            serde_json::json!({"model":"5.6sol","model_reasoning_effort":"max","modelCatalog":{"models":[{"display":"5.6sol","model":"gpt-5-codex","provider":"fixture"}]}}),
+        );
+        let error =
+            apply_codex_mirror(&db, mirror.to_str(), false, Some(&provider), None).unwrap_err();
+        assert_eq!(String::from(error), "codex_reasoning_effort_unsupported");
+        assert!(!mirror.exists());
+    }
+
+    #[test]
+    fn selected_provider_effort_is_persisted_in_the_managed_mirror_profile() {
+        let home =
+            crate::services::provider::test_support::isolated_home("codex-reasoning-selection");
+        let mirror = home.root.join("mirror");
+        let db = crate::database::Database::memory().unwrap();
+        let upstream = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","type":"openai","baseURL":"https://example.invalid/v1","apiKey":"fixture","models":["gpt-5.6-sol"],"enabled":true})).unwrap();
+        db.save_proxy_provider(&upstream).unwrap();
+        let provider = Provider::new(
+            "selected".into(),
+            "Codex".into(),
+            serde_json::json!({"model":"gpt-5.6-sol","model_reasoning_effort":"max"}),
+        );
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("selected", "codex").unwrap();
+        let saved = db.get_provider_by_id("selected", "codex").unwrap().unwrap();
+        assert_eq!(saved.settings_config["model_reasoning_effort"], "max");
+        // Supply an admitted model set just as the runtime owner does; no
+        // live inventory or upstream connection is necessary for this seam.
+        apply_codex_mirror(
+            &db,
+            mirror.to_str(),
+            false,
+            Some(&saved),
+            Some(&["gpt-5.6-sol".into()]),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(document["model_reasoning_effort"].as_str(), Some("max"));
+        assert_eq!(
+            document["profiles"]["aag"]["model_reasoning_effort"].as_str(),
+            Some("max")
+        );
+        let cleared = Provider::new(
+            "selected".into(),
+            "Codex".into(),
+            serde_json::json!({"model":"gpt-5.6-sol"}),
+        );
+        db.set_setting(
+            crate::database::dao::settings::KEY_CODEX_MIRROR_MODE,
+            "exclusive",
+        )
+        .unwrap();
+        apply_codex_mirror(
+            &db,
+            mirror.to_str(),
+            false,
+            Some(&cleared),
+            Some(&["gpt-5.6-sol".into()]),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(document.get("model_reasoning_effort").is_none());
+        assert!(document["profiles"]["aag"]
+            .get("model_reasoning_effort")
+            .is_none());
+        apply_codex_mirror(
+            &db,
+            mirror.to_str(),
+            false,
+            Some(&saved),
+            Some(&["gpt-5.6-sol".into()]),
+        )
+        .unwrap();
+        db.set_setting(
+            crate::database::dao::settings::KEY_CODEX_MIRROR_MODE,
+            "coexist",
+        )
+        .unwrap();
+        apply_codex_mirror(
+            &db,
+            mirror.to_str(),
+            false,
+            Some(&saved),
+            Some(&["gpt-5.6-sol".into()]),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(document.get("model_reasoning_effort").is_none());
+        assert_eq!(
+            document["profiles"]["aag"]["model_reasoning_effort"].as_str(),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn managed_authority_blocks_legacy_model_catalog_before_any_write() {
+        let home = crate::services::provider::test_support::isolated_home("managed-legacy-model");
+        let db = crate::database::Database::memory().unwrap();
+        db.set_setting("codex_session_authority_enabled", "1")
+            .unwrap();
+        let error = apply_codex_runtime_models(&db, None, &["fixture_model".into()]).unwrap_err();
+        assert_eq!(String::from(error), "session_client_authority_unavailable");
+        assert!(!home.root.join(".codex-cli").exists());
+    }
+
+    #[test]
+    fn managed_authority_blocks_direct_auth_write_and_reset_with_marker() {
+        let home = crate::services::provider::test_support::isolated_home("managed-legacy-auth");
+        let mirror = home.root.join("custom_mirror");
+        crate::config::private_fs::prepare_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("auth.json"),
+            b"{\"fixture_session\":true}",
+        )
+        .unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("config.toml"),
+            b"model = \"fixture_original\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.root.join(".codex-cli/.authority")).unwrap();
+        let provider = Provider::new(
+            "fixture".into(),
+            "Fixture".into(),
+            serde_json::json!({"auth":{"new":"fixture"},"config":"model = \"replaced\"\n"}),
+        );
+        assert_eq!(
+            String::from(write_live(&provider, mirror.to_str()).unwrap_err()),
+            "session_client_authority_unavailable"
+        );
+        assert_eq!(
+            String::from(reset_mirror_session_state_guarded(mirror.to_str()).unwrap_err()),
+            "session_client_authority_unavailable"
+        );
+        assert_eq!(
+            String::from(
+                write_mirror_proxy_files(
+                    mirror.to_str(),
+                    "http://127.0.0.1:8989/v1",
+                    "fixture_key",
+                    "fixture_model",
+                    Codex_mirror_mode::Exclusive,
+                    false
+                )
+                .unwrap_err()
+            ),
+            "session_client_authority_unavailable"
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("auth.json")).unwrap(),
+            b"{\"fixture_session\":true}"
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("config.toml")).unwrap(),
+            b"model = \"fixture_original\"\n"
+        );
+        assert!(!home.root.join("aag_state/backups").exists());
+    }
+
+    #[test]
+    fn login_reset_preserves_conversation_history_and_attachment_storage() {
+        let fixture = crate::config::private_fs::private_temp_dir(&std::env::temp_dir()).unwrap();
+        let mirror = fixture.path().join("mirror");
+        crate::config::private_fs::prepare_private_dir(&mirror).unwrap();
+        for directory in ["sessions", "cache"] {
+            crate::config::private_fs::prepare_private_dir(&mirror.join(directory)).unwrap();
+        }
+        let retained = [
+            (
+                "sessions/session.jsonl",
+                b"synthetic immutable conversation\n".as_slice(),
+            ),
+            (
+                "cache/attachment.bin",
+                b"synthetic attachment\0\x01".as_slice(),
+            ),
+            ("history.jsonl", b"synthetic ordered history\n".as_slice()),
+            (
+                "state_5.sqlite",
+                b"synthetic native state fixture".as_slice(),
+            ),
+        ];
+        for (name, bytes) in retained {
+            std::fs::write(mirror.join(name), bytes).unwrap();
+        }
+        crate::config::private_fs::atomic_write(
+            &mirror.join("auth.json"),
+            b"{\"fixtureLogin\":true}",
+        )
+        .unwrap();
+        reset_mirror_session_state(&mirror).unwrap();
+        assert_eq!(std::fs::read(mirror.join("auth.json")).unwrap(), b"{}");
+        for (name, bytes) in retained {
+            assert_eq!(std::fs::read(mirror.join(name)).unwrap(), bytes, "{name}");
+        }
+    }
+
+    #[test]
+    fn unified_switch_refreshes_catalog_and_selects_only_an_offered_default() {
+        let home = crate::services::provider::test_support::isolated_home("codex-catalog-switch");
+        let db = crate::database::Database::memory().unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "expectedGeneration":0, "name":"Fixture", "baseUrl":"https://example.invalid",
+            "apiKey":"fixture_upstream_secret", "endpoints":[{"protocol":"openai-responses",
+            "models":[{"modelId":"Vendor_Model.V1"}]}]
+        }))
+        .unwrap();
+        crate::services::suppliers::save_supplier(&db, input).unwrap();
+        db.set_setting(
+            crate::services::supplier_setup::KEY_UNIFIED_DEFAULT_MODEL,
+            "stale-model",
+        )
+        .unwrap();
+        let mirror = home.root.join("mirror");
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("config.toml"),
+            b"profile = \"old\"\n[profiles.old]\nmodel_provider = \"openai\"\n",
+        )
+        .unwrap();
+        switch_codex_mirror(&db, mirror.to_str(), false).unwrap();
+        let text = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        let config = text.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(config.get("profile").is_none());
+        assert_eq!(config["model"].as_str(), Some("Vendor_Model.V1"));
+        assert_eq!(
+            config["profiles"]["aag"]["model"].as_str(),
+            Some("Vendor_Model.V1")
+        );
+        let catalog_path = config["model_catalog_json"].as_str().unwrap();
+        assert!(std::path::Path::new(catalog_path).is_absolute());
+        let catalog: Value = serde_json::from_slice(&std::fs::read(catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "Vendor_Model.V1");
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            config["profiles"]["old"]["model_provider"].as_str(),
+            Some("openai")
+        );
+        assert!(!text.contains("fixture_upstream_secret"));
+    }
+
+    #[test]
+    fn empty_supply_removes_stale_model_and_writes_empty_catalog() {
+        let home = crate::services::provider::test_support::isolated_home("codex-cleared-catalog");
+        let db = crate::database::Database::memory().unwrap();
+        db.set_setting(
+            crate::services::supplier_setup::KEY_UNIFIED_DEFAULT_MODEL,
+            "",
+        )
+        .unwrap();
+        let mirror = home.root.join("mirror");
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("config.toml"),
+            b"model = \"stale-model\"\n",
+        )
+        .unwrap();
+        switch_codex_mirror(&db, mirror.to_str(), false).unwrap();
+        let config = std::fs::read_to_string(mirror.join("config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(config.get("model").is_none());
+        assert!(config["profiles"]["aag"].get("model").is_none());
+        let catalog: Value = serde_json::from_slice(
+            &std::fs::read(config["model_catalog_json"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog, serde_json::json!({"models":[]}));
+    }
+
+    #[test]
+    fn runtime_filter_replaces_blocked_default_and_is_idempotent() {
+        let home = crate::services::provider::test_support::isolated_home("codex-runtime-filter");
+        let db = crate::database::Database::memory().unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "expectedGeneration":0, "name":"Fixture", "baseUrl":"https://example.invalid",
+            "apiKey":"fixture", "endpoints":[{"protocol":"openai-responses", "models":[
+                {"modelId":"blocked-default"}, {"modelId":"Usable_Model"}
+            ]}]
+        }))
+        .unwrap();
+        crate::services::suppliers::save_supplier(&db, input).unwrap();
+        db.set_setting(
+            crate::services::supplier_setup::KEY_UNIFIED_DEFAULT_MODEL,
+            "blocked-default",
+        )
+        .unwrap();
+        let mirror = home.root.join("mirror");
+        switch_codex_mirror(&db, mirror.to_str(), false).unwrap();
+        let allowed_ids = vec!["Usable_Model".to_string(), "not-in-inventory".to_string()];
+        apply_codex_runtime_models(&db, mirror.to_str(), &allowed_ids).unwrap();
+        let config_path = mirror.join("config.toml");
+        let catalog_path = mirror.join(crate::services::launcher::codex_catalog::CATALOG_FILENAME);
+        let config = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(config["model"].as_str(), Some("Usable_Model"));
+        assert_eq!(
+            config["profiles"]["aag"]["model"].as_str(),
+            Some("Usable_Model")
+        );
+        let catalog: Value =
+            serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["models"][0]["slug"], "Usable_Model");
+
+        let past =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&config_path, &catalog_path] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+        apply_codex_runtime_models(&db, mirror.to_str(), &allowed_ids).unwrap();
+        for path in [&config_path, &catalog_path] {
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), past);
+        }
+    }
+
+    #[test]
+    fn empty_runtime_allowlist_clears_models_even_when_supply_is_configured() {
+        let home =
+            crate::services::provider::test_support::isolated_home("codex-empty-runtime-filter");
+        let db = crate::database::Database::memory().unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "expectedGeneration":0, "name":"Fixture", "baseUrl":"https://example.invalid",
+            "apiKey":"fixture", "endpoints":[{"protocol":"openai-responses",
+                "models":[{"modelId":"configured-but-unusable"}]}]
+        }))
+        .unwrap();
+        crate::services::suppliers::save_supplier(&db, input).unwrap();
+        let mirror = home.root.join("mirror");
+        switch_codex_mirror(&db, mirror.to_str(), false).unwrap();
+        apply_codex_runtime_models(&db, mirror.to_str(), &[]).unwrap();
+        let config = std::fs::read_to_string(mirror.join("config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(config.get("model").is_none());
+        assert!(config["profiles"]["aag"].get("model").is_none());
+        let catalog: Value = serde_json::from_slice(
+            &std::fs::read(mirror.join(crate::services::launcher::codex_catalog::CATALOG_FILENAME))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog, serde_json::json!({"models":[]}));
+    }
+
+    #[test]
+    fn switching_to_coexist_removes_only_managed_top_level_selection() {
+        let home =
+            crate::services::provider::test_support::isolated_home("codex-coexist-transition");
+        let mirror = home.root.join("mirror");
+        for mode in [Codex_mirror_mode::Exclusive, Codex_mirror_mode::Coexist] {
+            write_mirror_proxy_files(
+                mirror.to_str(),
+                "http://127.0.0.1:8989/v1",
+                "fixture",
+                "model",
+                mode,
+                false,
+            )
+            .unwrap();
+        }
+        let config = std::fs::read_to_string(mirror.join("config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(config.get("profile").is_none());
+        assert!(config.get("model").is_none());
+        assert!(config.get("model_provider").is_none());
+        assert!(config.get("model_catalog_json").is_none());
+        assert!(config.get("web_search").is_none());
+        assert_eq!(
+            config["profiles"]["aag"]["web_search"].as_str(),
+            Some("disabled")
+        );
+        assert_eq!(
+            config["profiles"]["aag"]["model_provider"].as_str(),
+            Some("aag")
+        );
+    }
+
+    #[test]
+    fn coexist_preserves_first_party_search_while_aag_profile_disables_hosted_search() {
+        let home = crate::services::provider::test_support::isolated_home("codex-coexist-search");
+        let mirror = home.root.join("mirror");
+        crate::config::private_fs::prepare_managed_private_dir(&mirror).unwrap();
+        crate::config::private_fs::atomic_write(
+            &mirror.join("config.toml"),
+            b"web_search = \"live\"\n",
+        )
+        .unwrap();
+        write_mirror_proxy_files(
+            mirror.to_str(),
+            "http://127.0.0.1:8989/v1",
+            "fixture",
+            "model",
+            Codex_mirror_mode::Coexist,
+            false,
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(mirror.join("config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(config["web_search"].as_str(), Some("live"));
+        assert_eq!(
+            config["profiles"]["aag"]["web_search"].as_str(),
+            Some("disabled")
+        );
+        write_mirror_proxy_files(
+            mirror.to_str(),
+            "http://127.0.0.1:8989/v1",
+            "fixture",
+            "model",
+            Codex_mirror_mode::Exclusive,
+            false,
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(mirror.join("config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(config["web_search"].as_str(), Some("disabled"));
+    }
+
     /// The mirror contract is credential-free: config.toml carries only
     /// AAG's proxy endpoint and token, never any provider credential. With
-    /// `purge_auth = true` (open-desktop fresh-mirror semantics) a stale
-    /// token-bearing auth.json is purged to `{}`; with `purge_auth = false`
-    /// (switch) auth.json is left untouched so the user's own mirror login
-    /// survives a switch.
+    /// `purge_auth = true` an explicit reset clears auth.json and known global
+    /// login-state markers while preserving cache/session/history data; with
+    /// `purge_auth = false` (switch) auth.json is left untouched so the user's
+    /// own mirror login survives a switch.
     #[test]
     fn mirror_proxy_files_are_credential_free_and_purge_is_explicit() {
         // IsolatedHome sets AAG_HOME_DIR/AAG_CONFIG_DIR so the backup path
@@ -720,19 +1746,21 @@ mod mirror_tests {
         )
         .unwrap();
         std::fs::write(mirror.join(".codex-global-state.json.bak"), "{}").unwrap();
+        let cached_tool_state = r#"{"tool":"preserved"}"#;
+        let session_history = "{\"conversation\":\"preserved\"}\n";
         std::fs::create_dir_all(mirror.join("cache").join("codex_apps_tools")).unwrap();
         std::fs::write(
             mirror
                 .join("cache")
                 .join("codex_apps_tools")
                 .join("app.json"),
-            r#"{"refresh_token":"stale"}"#,
+            cached_tool_state,
         )
         .unwrap();
         std::fs::create_dir_all(mirror.join("sessions").join("2026")).unwrap();
         std::fs::write(
             mirror.join("sessions").join("2026").join("rollout.jsonl"),
-            r#"{"account_id":"stale"}"#,
+            session_history,
         )
         .unwrap();
 
@@ -790,7 +1818,8 @@ mod mirror_tests {
             "no provider key may reach the mirror: {config}"
         );
 
-        // Desktop-launch semantics: the stale login is purged to `{}`.
+        // Explicit reset semantics: clear authentication and known global
+        // login state while preserving the mirror's cache and conversation data.
         let result = write_mirror_proxy_files(
             mirror.to_str(),
             "http://127.0.0.1:8989/v1",
@@ -816,18 +1845,30 @@ mod mirror_tests {
         assert_eq!(
             auth.trim(),
             "{}",
-            "open-desktop must start the mirror logged out"
+            "explicit reset must clear mirror login state"
         );
         assert!(
             !mirror.join(".codex-global-state.json").exists()
-                && !mirror.join(".codex-global-state.json.bak").exists()
-                && !mirror.join("cache").exists()
-                && !mirror.join("sessions").exists(),
-            "open-desktop must drop every session-state carrier so the login page is clean"
+                && !mirror.join(".codex-global-state.json.bak").exists(),
+            "explicit reset must remove known global login-state files"
+        );
+        assert_eq!(
+            std::fs::read_to_string(mirror.join("cache/codex_apps_tools/app.json")).unwrap(),
+            cached_tool_state,
+            "reset must preserve unrelated mirror cache data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(mirror.join("sessions/2026/rollout.jsonl")).unwrap(),
+            session_history,
+            "reset must preserve mirror conversation history"
         );
 
         // TOML escaping: quotes and backslashes in a token must not break
-        // the generated config.
+        // the generated config. The writer may spell the value as a basic
+        // string (`"tok\"ens\\x"`) or a literal string (`'tok"ens\x'`) — both
+        // are valid TOML — so assert what the value *reads back as*, which
+        // is the property Codex actually depends on, rather than one
+        // particular escape style.
         write_mirror_proxy_files(
             mirror.to_str(),
             "http://127.0.0.1:8989/v1",
@@ -838,9 +1879,18 @@ mod mirror_tests {
         )
         .unwrap();
         let config = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
-        assert!(
-            config.contains("experimental_bearer_token = \"tok\\\"ens\\\\x\""),
-            "token must be TOML-escaped, got: {config}"
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|e| panic!("generated config must be valid TOML: {e}\n{config}"));
+        let read_back = doc
+            .get("model_providers")
+            .and_then(|p| p.get("aag"))
+            .and_then(|a| a.get("experimental_bearer_token"))
+            .and_then(|v| v.as_str())
+            .expect("experimental_bearer_token must be present and a string");
+        assert_eq!(
+            read_back, "tok\"ens\\x",
+            "the token must survive TOML escaping byte-for-byte: {config}"
         );
     }
 
@@ -907,6 +1957,87 @@ mod mirror_tests {
             config.contains("experimental_bearer_token = \"aag-proxy-token\""),
             "{config}"
         );
+    }
+
+    /// The defect this port fixes: the mirror writer used to render
+    /// `config.toml` from a template, so switching providers destroyed every
+    /// comment and unrelated key the user had in it. The merge must leave
+    /// their file alone outside the managed keys — at the real call site, not
+    /// only in `toml_merge`'s unit tests.
+    #[test]
+    fn switching_preserves_the_users_comments_and_unrelated_keys() {
+        let home = crate::services::provider::test_support::isolated_home("codex-preserve");
+        let mirror = home.root.join("codex-mirror");
+        let _ = std::fs::remove_dir_all(&mirror);
+        std::fs::create_dir_all(&mirror).unwrap();
+        let hand_written = "# I tuned this by hand\n\
+                            \n\
+                            approval_policy = \"on-request\"\n\
+                            \n\
+                            [mcp_servers.my_tools]\n\
+                            command = \"npx\"\n\
+                            args = [\"-y\", \"my-tools\"]  # keep this too\n";
+        std::fs::write(mirror.join("config.toml"), hand_written).unwrap();
+
+        write_mirror_proxy_files(
+            mirror.to_str(),
+            "http://127.0.0.1:8989/v1",
+            "aag-proxy-token",
+            "gpt-5",
+            Codex_mirror_mode::Exclusive,
+            false,
+        )
+        .expect("switch must succeed against a hand-written config");
+
+        let config = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        assert!(
+            config.contains("# I tuned this by hand"),
+            "the user's leading comment must survive a switch: {config}"
+        );
+        assert!(
+            config.contains("# keep this too"),
+            "a trailing comment on an unrelated key must survive: {config}"
+        );
+        assert!(
+            config.contains("approval_policy = \"on-request\""),
+            "an unrelated top-level key must survive: {config}"
+        );
+        assert!(
+            config.contains("[mcp_servers.my_tools]"),
+            "an unrelated table must survive: {config}"
+        );
+        assert!(
+            config.contains("args = [\"-y\", \"my-tools\"]"),
+            "an unrelated array value must survive intact: {config}"
+        );
+        // The managed contract is still written.
+        assert!(config.contains("[model_providers.aag]"), "{config}");
+        assert!(
+            config.contains("experimental_bearer_token = \"aag-proxy-token\""),
+            "{config}"
+        );
+        assert!(config.contains("model_provider = \"aag\""), "{config}");
+
+        // A second switch onto an already-merged file must stay idempotent:
+        // the managed block is updated in place, not duplicated beside itself.
+        write_mirror_proxy_files(
+            mirror.to_str(),
+            "http://127.0.0.1:8989/v1",
+            "aag-proxy-token",
+            "gpt-5-codex",
+            Codex_mirror_mode::Exclusive,
+            false,
+        )
+        .expect("second switch must succeed");
+        let again = std::fs::read_to_string(mirror.join("config.toml")).unwrap();
+        assert_eq!(
+            again.matches("[model_providers.aag]").count(),
+            1,
+            "the managed table must not be defined twice: {again}"
+        );
+        assert!(again.contains("model = \"gpt-5-codex\""), "{again}");
+        assert!(again.contains("# I tuned this by hand"), "{again}");
+        assert!(again.parse::<toml_edit::DocumentMut>().is_ok());
     }
 
     /// Mode parsing fails safe to exclusive for unknown/absent values.

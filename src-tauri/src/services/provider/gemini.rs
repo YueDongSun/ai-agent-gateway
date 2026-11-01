@@ -35,46 +35,108 @@ use std::collections::BTreeMap;
 /// Is the Gemini CLI installed? (config dir exists)
 #[allow(dead_code)]
 pub fn detect() -> bool {
-    crate::config::get_gemini_config_dir().exists()
+    // Match the fill path's resolution: `GEMINI_CLI_HOME` replaces the home
+    // root (config_paths), so an overridden install must report detected
+    // too. Fall back to the plain config dir when resolution fails.
+    let resolved_dir = crate::services::provider::config_paths::resolve("gemini")
+        .ok()
+        .and_then(|paths| {
+            paths
+                .paths
+                .first()
+                .and_then(|path| path.parent())
+                .map(std::path::Path::to_path_buf)
+        });
+    match resolved_dir {
+        Some(dir) => dir.exists(),
+        None => crate::config::get_gemini_config_dir().exists(),
+    }
 }
 
-/// Keys AAG manages inside `~/.gemini/.env`. Everything else a user set
-/// (GOOGLE_CLOUD_PROJECT, proxy vars, …) is preserved verbatim.
+/// Keys AAG manages inside `~/.gemini/.env`. On every write each of them is
+/// either replaced with the caller's value or removed entirely — a previous
+/// provider's value must never leak into the next one. Everything else a
+/// user set (GOOGLE_CLOUD_PROJECT, proxy vars, comments, unparsable lines)
+/// is preserved verbatim.
 const MANAGED_ENV_KEYS: [&str; 3] = ["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", "GEMINI_MODEL"];
 
-/// Parse a `.env` file into ordered KEY=VALUE pairs (lax: comments and blank
-/// lines are skipped; `export ` prefixes tolerated).
-fn parse_env_file(raw: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for line in raw.lines() {
-        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            out.insert(
-                key.trim().to_string(),
-                value.trim().trim_matches('"').to_string(),
-            );
-        }
-    }
-    out
+/// One parsed line of a `.env` file.
+#[allow(non_camel_case_types)]
+#[derive(Debug, PartialEq, Eq)]
+enum Env_line {
+    /// `KEY=VALUE` (an optional `export ` prefix is tolerated). `raw` keeps
+    /// the original spelling so unmanaged assignments are preserved exactly.
+    Assignment { key: String, raw: String },
+    /// Comment, blank line, or text without `=` — preserved verbatim.
+    Verbatim(String),
 }
 
-fn serialize_env_file(entries: &BTreeMap<String, String>) -> String {
+/// Parse a `.env` file into ordered lines plus the effective KEY=VALUE map
+/// (lax: comments and unparsable lines are kept verbatim; `export ` prefixes
+/// tolerated; the last assignment for a key wins in the map).
+fn parse_env_file(raw: &str) -> (Vec<Env_line>, BTreeMap<String, String>) {
+    let mut lines = Vec::new();
+    let mut entries = BTreeMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let without_export = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        if let Some((key, value)) = without_export.split_once('=') {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                entries.insert(key.clone(), value.trim().trim_matches('"').to_string());
+                lines.push(Env_line::Assignment {
+                    key,
+                    raw: line.to_string(),
+                });
+                continue;
+            }
+        }
+        lines.push(Env_line::Verbatim(line.to_string()));
+    }
+    (lines, entries)
+}
+
+/// Rebuild the file: managed assignments are replaced (first occurrence wins,
+/// later duplicates are dropped), `cleared` managed keys are dropped, every
+/// other line is preserved verbatim in its original order, and managed keys
+/// absent from the file are appended.
+fn serialize_env_file(
+    lines: &[Env_line],
+    managed: &BTreeMap<String, String>,
+    cleared: &[&str],
+) -> String {
     let mut out = String::new();
-    for (key, value) in entries {
-        out.push_str(&format!("{key}={value}\n"));
+    let mut emitted = std::collections::BTreeSet::new();
+    for line in lines {
+        match line {
+            Env_line::Assignment { key, .. } if managed.contains_key(key) => {
+                if emitted.insert(key.as_str()) {
+                    out.push_str(&format!("{key}={}\n", managed[key.as_str()]));
+                }
+            }
+            Env_line::Assignment { key, .. } if cleared.contains(&key.as_str()) => {}
+            Env_line::Assignment { raw, .. } | Env_line::Verbatim(raw) => {
+                out.push_str(raw);
+                out.push('\n');
+            }
+        }
+    }
+    for (key, value) in managed {
+        if !emitted.contains(key.as_str()) {
+            out.push_str(&format!("{key}={value}\n"));
+        }
     }
     out
 }
 
 /// Read `~/.gemini/.env`, refusing symlink/reparse targets (the mirror
 /// precedent: the directory is owned by the CLI, not AAG-managed storage).
-fn read_env_file(path: &std::path::Path) -> Result<BTreeMap<String, String>, AppError> {
+fn read_env_file(
+    path: &std::path::Path,
+) -> Result<(Vec<Env_line>, BTreeMap<String, String>), AppError> {
     crate::config::private_fs::validate_external_file_path(path)?;
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok((Vec::new(), BTreeMap::new()));
     }
     if std::fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_symlink())
@@ -135,15 +197,11 @@ pub fn switch_gemini_mirror_for_provider(
     db: &crate::database::Database,
     provider: &Provider,
 ) -> Result<LiveWriteResult, AppError> {
-    let proxy_cfg = db.get_proxy_config().map_err(AppError::from)?;
-    // 0.0.0.0 means "listen everywhere" but is not a valid client target.
-    let host = if proxy_cfg.host == "0.0.0.0" {
-        "127.0.0.1".to_string()
-    } else if proxy_cfg.host.is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        proxy_cfg.host.clone()
-    };
+    let proxy_cfg = db.get_proxy_config()?;
+    // A wildcard or unset bind is not a client target — `ProxyConfig`
+    // translates it to the loopback the CLI can dial; a routable host the
+    // user configured is kept as-is.
+    let host = proxy_cfg.client_endpoint_host();
     // No trailing /v1 — the CLI appends /v1beta/models/{model}:method itself.
     let base_url = format!("http://{host}:{}", proxy_cfg.port);
     // When auth is disabled any value passes the check; the placeholder keeps
@@ -195,15 +253,14 @@ fn write_gemini_files(
     }
     crate::config::private_fs::validate_external_file_path(env_path)?;
     crate::config::private_fs::validate_external_file_path(settings_path)?;
-    // ── .env: managed keys replaced, everything else preserved ──
-    let mut entries = read_env_file(env_path)?;
-    for key in MANAGED_ENV_KEYS {
-        entries.remove(key);
-    }
-    for (key, value) in managed {
-        entries.insert(key.clone(), value.clone());
-    }
-    let env_contents = serialize_env_file(&entries);
+    // ── .env: managed keys replaced or cleared, everything else preserved verbatim ──
+    let (lines, _existing) = read_env_file(env_path)?;
+    let cleared: Vec<&str> = MANAGED_ENV_KEYS
+        .iter()
+        .copied()
+        .filter(|key| !managed.contains_key(*key))
+        .collect();
+    let env_contents = serialize_env_file(&lines, managed, &cleared);
 
     // ── settings.json: shallow merge of settings_config.config ──
     let settings_contents = if let Some(config) = provider
@@ -212,8 +269,22 @@ fn write_gemini_files(
         .filter(|c| c.is_object())
     {
         let mut settings: serde_json::Value = if settings_path.exists() {
+            // The earlier validation ran before the .env read; a link swapped
+            // in between must not be followed (read_env_file parity).
+            if std::fs::symlink_metadata(settings_path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(AppError::Config(format!(
+                    "refusing to write {}: target is a symlink or reparse point",
+                    settings_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )));
+            }
             let raw = std::fs::read_to_string(settings_path)
-                .map_err(|e| AppError::io(&settings_path, e))?;
+                .map_err(|e| AppError::io(settings_path, e))?;
             serde_json::from_str(&raw).map_err(AppError::Json)?
         } else {
             serde_json::json!({})
@@ -260,9 +331,9 @@ mod tests {
     use crate::services::provider::test_support::isolated_home;
 
     #[test]
-    fn env_file_round_trip_preserves_unmanaged_keys() {
-        let raw = "# comment\nGOOGLE_GEMINI_BASE_URL=https://old.example.com\nexport GEMINI_API_KEY=\"old-key\"\nGOOGLE_CLOUD_PROJECT=my-project\n";
-        let entries = parse_env_file(raw);
+    fn env_file_round_trip_preserves_unmanaged_keys_and_verbatim_lines() {
+        let raw = "# comment\nGOOGLE_GEMINI_BASE_URL=https://old.example.com\nexport GEMINI_API_KEY=\"old-key\"\nGOOGLE_CLOUD_PROJECT=my-project\nMY_FLAG\n\n";
+        let (lines, entries) = parse_env_file(raw);
         assert_eq!(
             entries.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
             Some("https://old.example.com")
@@ -275,13 +346,34 @@ mod tests {
             entries.get("GOOGLE_CLOUD_PROJECT").map(String::as_str),
             Some("my-project")
         );
-        let serialized = serialize_env_file(&entries);
-        let reparsed = parse_env_file(&serialized);
-        assert_eq!(reparsed, entries);
+        // Comments, unparsable lines, and blanks are kept verbatim in order.
+        let serialized = serialize_env_file(&lines, &BTreeMap::new(), &[]);
+        assert_eq!(serialized, raw);
+        let (reparsed_lines, reparsed_entries) = parse_env_file(&serialized);
+        assert_eq!(reparsed_entries, entries);
+        assert_eq!(reparsed_lines, lines);
+    }
+
+    #[test]
+    fn env_file_managed_keys_are_replaced_without_touching_user_lines() {
+        let raw = "# provider block\nexport GEMINI_API_KEY=\"old\"\nGOOGLE_CLOUD_PROJECT=keep\nGEMINI_API_KEY=dup\nSTALE_MODEL=x\n";
+        let (lines, _entries) = parse_env_file(raw);
+        let mut managed = BTreeMap::new();
+        managed.insert("GEMINI_API_KEY".to_string(), "new".to_string());
+        managed.insert("GEMINI_MODEL".to_string(), "gemini-2.5-pro".to_string());
+        let serialized = serialize_env_file(&lines, &managed, &["STALE_MODEL"]);
+        assert_eq!(
+            serialized,
+            "# provider block\nGEMINI_API_KEY=new\nGOOGLE_CLOUD_PROJECT=keep\nGEMINI_MODEL=gemini-2.5-pro\n"
+        );
     }
 
     #[test]
     fn write_live_writes_env_and_merges_settings() {
+        // The WIP fixture built its own temp root and hardened it to
+        // owner-only; `isolated_home` does both (temp root + owner-only DACL
+        // via `prepare_managed_private_dir`) and also captures/restores the
+        // AAG_* env overrides on Drop.
         let home = isolated_home("gemini");
 
         let provider = Provider::new(
@@ -311,7 +403,8 @@ mod tests {
         .unwrap();
         assert_eq!(settings["theme"], "dark");
 
-        // A second write with different managed keys preserves unmanaged ones.
+        // A second write with different managed keys preserves unmanaged
+        // assignments, comments, and unparsable lines verbatim.
         let provider2 = Provider::new(
             "prov-2".into(),
             "Relay".into(),
@@ -319,16 +412,27 @@ mod tests {
                 "env": { "GOOGLE_GEMINI_BASE_URL": "https://relay.example.com", "GEMINI_API_KEY": "k2" }
             }),
         );
-        // Seed an unmanaged key first.
         std::fs::write(
             home.root.join(".gemini").join(".env"),
-            "GOOGLE_CLOUD_PROJECT=keep-me\n",
+            "# user header\nGOOGLE_CLOUD_PROJECT=keep-me\nMY_FLAG\nexport GOOGLE_GEMINI_BASE_URL=https://old\nGEMINI_MODEL=old-model\n",
         )
         .unwrap();
         write_live(&provider2).expect("second write_live");
         let env_raw = std::fs::read_to_string(home.root.join(".gemini").join(".env")).unwrap();
+        assert!(env_raw.contains("# user header"));
         assert!(env_raw.contains("GOOGLE_CLOUD_PROJECT=keep-me"));
+        assert!(
+            env_raw.contains("\nMY_FLAG\n"),
+            "unparsable line preserved: {env_raw}"
+        );
         assert!(env_raw.contains("GOOGLE_GEMINI_BASE_URL=https://relay.example.com"));
+        // Managed keys are replaced; later duplicates of a managed key are
+        // dropped instead of shadowing the new value.
+        assert_eq!(
+            env_raw.matches("GOOGLE_GEMINI_BASE_URL=").count(),
+            1,
+            "managed key duplicates must be dropped: {env_raw}"
+        );
         // GEMINI_MODEL from the first provider is a managed key and was replaced.
         assert!(!env_raw.contains("GEMINI_MODEL"));
     }

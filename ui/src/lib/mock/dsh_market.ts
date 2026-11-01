@@ -1,15 +1,12 @@
 import type { Market_catalog } from '../api/dsh_market.js';
+import { fetch_market_catalog } from '../api/dsh_market_feed.js';
 
-let bundled_catalog: Promise<Market_catalog> | null = null;
+let pending_catalog: Promise<Market_catalog> | null = null;
 
-/** Load the actual checked-in GitHub snapshot only when the market is opened. */
+/** Browser marketplace uses the same public feed as the native adapter. */
 function load_catalog(): Promise<Market_catalog> {
-  bundled_catalog ??= import('../../../../shared/dsh_market_catalog.json').then((module) => ({
-    ...module.default,
-    cache_status: 'bundled',
-    warning: null,
-  }) as Market_catalog);
-  return bundled_catalog;
+  pending_catalog ??= fetch_market_catalog().finally(() => { pending_catalog = null; });
+  return pending_catalog;
 }
 
 export async function mock_dsh_market_command(command: string): Promise<unknown> {

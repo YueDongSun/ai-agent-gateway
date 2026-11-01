@@ -173,7 +173,7 @@ fn reject_gateway_endpoint(
     Ok(())
 }
 
-fn native_env<'a>(provider: &'a Provider) -> Result<&'a serde_json::Map<String, Value>, AppError> {
+fn native_env(provider: &Provider) -> Result<&serde_json::Map<String, Value>, AppError> {
     provider
         .settings_config
         .get("env")
@@ -356,9 +356,10 @@ pub fn list_upstreams(
     gateway: Option<&Gateway_snapshot>,
 ) -> Result<Vec<Upstream_option>, AppError> {
     let mut options = Vec::new();
+    let gateway_required = crate::services::provider_admission::enforcement_enabled(db);
     for (_, provider) in db.get_all_providers("claude_code")? {
         let details = native_details(&provider);
-        let reason = availability(&details, gateway);
+        let reason = if gateway_required { Some("dsh:provider_admission_gateway_required".into()) } else { availability(&details, gateway) };
         let env = provider.settings_config.get("env");
         let key = env
             .and_then(|value| value.get("ANTHROPIC_API_KEY"))
@@ -382,7 +383,7 @@ pub fn list_upstreams(
     }
     for provider in db.get_all_proxy_providers()? {
         let details = proxy_details(&provider);
-        let reason = availability(&details, gateway);
+        let reason = if gateway_required { Some("dsh:provider_admission_gateway_required".into()) } else { availability(&details, gateway) };
         options.push(Upstream_option {
             id: format!("proxy:{}", provider.id),
             name: safe_label(&provider.name, &provider.api_key),
@@ -466,6 +467,11 @@ pub fn resolve_upstream(
     if !valid_identifier(source_id) || !valid_model(model) {
         return Err(invalid("DSH_SELECTION_INVALID"));
     }
+    // Exported credentials cannot be revoked at subscription expiry. Keep
+    // enforced sources behind the gateway's per-request admission boundary.
+    if source_id != "gateway" && crate::services::provider_admission::enforcement_enabled(db) {
+        return Err(invalid("dsh:provider_admission_gateway_required"));
+    }
     let details = if source_id == "gateway" {
         gateway_details(gateway)?
     } else if let Some(id) = source_id.strip_prefix("claude:") {
@@ -539,6 +545,26 @@ mod tests {
     use crate::database::dao::proxy_providers::CircuitBreakerConfig;
     use crate::database::dao::routes::{Route, RouteHop};
 
+    #[test]
+    fn enforced_admission_refuses_direct_credential_export_before_source_resolution() {
+        let db = Database::memory().unwrap();
+        db.set_setting(crate::database::dao::provider_admission::ENFORCEMENT_KEY, "1").unwrap();
+        db.save_proxy_provider(&pool_provider()).unwrap();
+        let options = list_upstreams(&db, None).unwrap();
+        let direct = options.iter().find(|option| option.id == "proxy:native").unwrap();
+        assert!(!direct.available);
+        assert_eq!(direct.reason.as_deref(), Some("dsh:provider_admission_gateway_required"));
+        for source in ["claude:missing", "proxy:missing"] {
+            let result = resolve_upstream(&db, source, "fixture-model", None);
+            assert!(matches!(result, Err(AppError::InvalidInput(code)) if code == "dsh:provider_admission_gateway_required"));
+        }
+        assert_eq!(String::from(resolve_upstream(&db, "proxy:native", "pool_fixture", None).err().unwrap()),
+            "dsh:provider_admission_gateway_required");
+        // A gateway selection still reaches its existing gateway validation.
+        assert!(matches!(resolve_upstream(&db, "gateway", "fixture-model", None),
+            Err(AppError::InvalidInput(code)) if code == "DSH_GATEWAY_UNAVAILABLE"));
+    }
+
     fn native_provider() -> Provider {
         Provider::new(
             "native".into(),
@@ -568,6 +594,9 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             model_mapping: Default::default(),
             extra_headers: Default::default(),
+            auto_track_models: true,
+            icon: None,
+            icon_color: None,
         }
     }
 

@@ -14,6 +14,9 @@ pub(crate) fn settings_get(
     db: tauri::State<'_, Database>,
     key: String,
 ) -> Result<Option<String>, String> {
+    if crate::database::dao::provider_admission::is_private_admission_setting(&key) {
+        return Err("provider_admission_private_setting".into());
+    }
     db.get_setting(&key).map_err(String::from)
 }
 
@@ -24,5 +27,14 @@ pub(crate) fn settings_set(
     key: String,
     value: String,
 ) -> Result<(), String> {
+    if crate::database::dao::provider_admission::is_private_admission_setting(&key) {
+        return Err("provider_admission_private_setting".into());
+    }
+    if key == crate::services::provider_screening::SCREENING_CONFIG_KEY && !value.trim().is_empty() {
+        crate::services::provider_screening::ScreeningConfig::parse(&value)?;
+    }
+    if key == crate::services::model_catalog::utility::POLICY_SETTING && !value.trim().is_empty() {
+        crate::services::model_catalog::utility::Utility_policy::parse(&value).map_err(str::to_string)?;
+    }
     db.set_setting(&key, &value).map_err(String::from)
 }

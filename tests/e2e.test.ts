@@ -10,13 +10,31 @@
  *   7. Failover: request "mock-fail" -> should fall back to mock-fallback
  *   8. Circuit-breaker: after N failures, breaker opens and skips primary
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadConfig, saveConfig } from '../src/config/store.js';
 import { createGatewayApp } from '../src/gateway/server.js';
+
+// The private-storage layer refuses to widen a pre-existing config directory
+// that is not already owner-only, and the OS temp root inherits SYSTEM and
+// Administrators ACEs on Windows. Point the store at a not-yet-created child of
+// a disposable root so loadConfig() creates and hardens its own private
+// directory, rather than depending on the caller's override already being
+// private (or silently falling back to the real ~/.ai-agent-gateway when the
+// override is absent). realpathSync keeps macOS tmpdir() from traversing the
+// /var symlink, which the store rejects as a linked path.
+const disposable_root = mkdtempSync(join(realpathSync(tmpdir()), 'aag_node_e2e_'));
+process.env.AAG_CONFIG_DIR = join(disposable_root, 'config');
 
 const cfg = loadConfig();
 saveConfig(cfg);
 const { app } = createGatewayApp(cfg);
+
+afterAll(() => {
+  rmSync(disposable_root, { recursive: true, force: true });
+});
 
 const BASE = `http://${cfg.gateway.host}:${cfg.gateway.port}`;
 

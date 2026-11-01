@@ -180,12 +180,7 @@ fn claude_preview_is_read_only_and_apply_preserves_unrelated_data_with_exact_bac
         "private_env_sentinel"
     );
     assert_eq!(
-        fs::read(
-            fixture
-                .home
-                .join(format!(".claude.json.aag_backup_{token}"))
-        )
-        .unwrap(),
+        fs::read(fixture.home.join(".claude.json.aag_backup")).unwrap(),
         original
     );
     assert!(!fixture
@@ -460,22 +455,61 @@ fn simultaneous_duplicate_apply_has_exactly_one_winner() {
 }
 
 #[test]
-fn backup_collision_preserves_original_and_cleans_owned_temporary_files() {
+fn an_unremovable_recovery_copy_fails_closed_before_the_live_file_changes() {
     let fixture = Fixture::new();
     fixture.save();
     fs::write(fixture.path(), b"{}").unwrap();
     let token = fixture.preview().review_token.unwrap();
-    let backup = fixture
-        .home
-        .join(format!(".claude.json.aag_backup_{token}"));
-    fs::write(&backup, "existing backup").unwrap();
+    // A directory at the stable recovery-copy name cannot be removed as a
+    // file, so the apply must fail with the live config untouched.
+    let backup = fixture.home.join(".claude.json.aag_backup");
+    fs::create_dir(&backup).unwrap();
     assert!(fixture.service.apply(&fixture.db, &token).is_err());
     assert_eq!(fs::read(fixture.path()).unwrap(), b"{}");
-    assert_eq!(fs::read_to_string(backup).unwrap(), "existing backup");
+    assert!(backup.is_dir());
     assert!(!fixture
         .entries()
         .iter()
         .any(|name| name.contains("pending") || name.contains("lock")));
+}
+
+#[test]
+fn crashed_apply_sidecars_are_pruned_under_the_exclusive_lock() {
+    let fixture = Fixture::new();
+    fixture.save();
+    let first_generation = br#"{"private":"old_secret"}"#;
+    fs::write(fixture.path(), first_generation).unwrap();
+    // Orphans a hard-crashed apply would leave behind, plus a directory that
+    // the pruning must never touch.
+    let stale_pending = fixture.home.join(".claude.json.aag_pending_stale");
+    fs::write(&stale_pending, br#"{"token":"crashed"}"#).unwrap();
+    let legacy_backups = [
+        fixture.home.join(".claude.json.aag_backup_aaa"),
+        fixture.home.join(".claude.json.aag_backup_bbb"),
+    ];
+    for legacy in &legacy_backups {
+        fs::write(legacy, br#"{"old_secret":true}"#).unwrap();
+    }
+    let protected = fixture.home.join(".claude.json.aag_pending_directory");
+    fs::create_dir(&protected).unwrap();
+    // An earlier recovery copy must be superseded in place, never duplicated.
+    let backup = fixture.home.join(".claude.json.aag_backup");
+    fs::write(&backup, b"stale copy").unwrap();
+
+    let token = fixture.preview().review_token.unwrap();
+    fixture.service.apply(&fixture.db, &token).unwrap();
+    assert!(!stale_pending.exists());
+    assert!(legacy_backups.iter().all(|legacy| !legacy.exists()));
+    assert!(protected.is_dir());
+    assert_eq!(fs::read(&backup).unwrap(), first_generation);
+    assert_eq!(
+        fixture
+            .entries()
+            .iter()
+            .filter(|name| name.contains("aag_backup"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -589,11 +623,68 @@ fn restrictive_windows_owner_group_and_dacl_survive_replacement_and_backup() {
     let token = fixture.preview().review_token.unwrap();
     fixture.service.apply(&fixture.db, &token).unwrap();
     assert!(permissions.matches(&Windows_permissions::read(&fixture.path()).unwrap()));
-    let backup = fixture
-        .home
-        .join(format!(".claude.json.aag_backup_{token}"));
+    let backup = fixture.home.join(".claude.json.aag_backup");
     assert!(permissions.matches(&Windows_permissions::read(&backup).unwrap()));
     assert_eq!(fs::read(backup).unwrap(), br#"{"private":"old_secret"}"#);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_long_home_paths_preserve_sync_replacement_and_backup() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let root = std::env::temp_dir().join(format!("aag_mcp_long_test_{}", hex::encode(nonce)));
+    fs::create_dir(&root).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let mut home = root.join("nested");
+    while home.as_os_str().encode_wide().count() <= 320 {
+        home = home.join("nested_component_with_a_bounded_name");
+    }
+    fs::create_dir_all(&home).unwrap();
+
+    let db = Database::memory().unwrap();
+    let service = Mcp_service::new(home.clone());
+    let mut request = input();
+    if let Some(existing) = db.get_mcp_server(&request.id).unwrap() {
+        request.expected_revision = Some(server_revision(&existing).unwrap());
+    }
+    service.save(&db, request).unwrap();
+    let config_path = home.join(".claude.json");
+    fs::write(&config_path, br#"{"private":"old_secret"}"#).unwrap();
+    super::windows_permissions::restrict_to_owner(&config_path).unwrap();
+    let expected = super::windows_permissions::Windows_permissions::read(&config_path).unwrap();
+
+    let token = service
+        .preview(&db, Mcp_client::Claude)
+        .unwrap()
+        .review_token
+        .unwrap();
+    service.apply(&db, &token).unwrap();
+
+    let applied = fs::read_to_string(&config_path).unwrap();
+    assert!(applied.contains("local_tools"));
+    assert!(applied.contains("old_secret"));
+    let backup = home.join(".claude.json.aag_backup");
+    assert_eq!(fs::read(&backup).unwrap(), br#"{"private":"old_secret"}"#);
+    assert!(expected
+        .matches(&super::windows_permissions::Windows_permissions::read(&config_path).unwrap()));
+    assert!(
+        expected.matches(&super::windows_permissions::Windows_permissions::read(&backup).unwrap())
+    );
+    let mut entries = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, vec![".claude.json", ".claude.json.aag_backup"]);
 }
 
 #[test]

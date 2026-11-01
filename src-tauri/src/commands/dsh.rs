@@ -10,27 +10,39 @@ use std::collections::BTreeMap;
 use tokio::sync::Mutex;
 
 #[tauri::command(rename_all = "snake_case")]
-pub(crate) fn dsh_get_snapshot(
+pub(crate) async fn dsh_get_snapshot(
     service: tauri::State<'_, Dsh_service>,
 ) -> Result<Dsh_snapshot, String> {
-    service.snapshot().map_err(String::from)
+    let owned_service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || owned_service.snapshot())
+        .await
+        .map_err(|_| "dsh:operation_worker_failed".to_string())?
+        .map_err(String::from)
 }
 #[tauri::command(rename_all = "snake_case")]
-pub(crate) fn dsh_save_settings(
+pub(crate) async fn dsh_save_settings(
     service: tauri::State<'_, Dsh_service>,
     settings: Dsh_settings,
     expected_digest: String,
 ) -> Result<Dsh_snapshot, String> {
-    service
-        .save_settings(settings, expected_digest)
-        .map_err(String::from)
+    let owned_service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        owned_service.save_settings(settings, expected_digest)
+    })
+    .await
+    .map_err(|_| "dsh:operation_worker_failed".to_string())?
+    .map_err(String::from)
 }
 #[tauri::command(rename_all = "snake_case")]
-pub(crate) fn dsh_preview_operation(
+pub(crate) async fn dsh_preview_operation(
     service: tauri::State<'_, Dsh_service>,
     request: Dsh_operation_request,
 ) -> Result<Dsh_operation_preview, String> {
-    service.preview(request).map_err(String::from)
+    let owned_service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || owned_service.preview(request))
+        .await
+        .map_err(|_| "dsh:operation_worker_failed".to_string())?
+        .map_err(String::from)
 }
 #[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn dsh_execute_operation(

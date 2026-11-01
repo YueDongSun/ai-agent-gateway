@@ -5,6 +5,7 @@
 //! three routes (`claude-sonnet-4`, `gpt-4o`, `mock-fail`).
 
 use crate::database::dao::proxy_providers::{CircuitBreakerConfig, ProxyProvider};
+use crate::database::dao::provider_reset::KEY_PROVIDER_SEED_DISABLED;
 use crate::database::dao::routes::{Route, RouteHop};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -17,6 +18,11 @@ impl Database {
     /// Seed mock providers + routes + proxy config on first run. Idempotent —
     /// only inserts when the tables are empty.
     pub fn seed_proxy_if_empty(&self) -> Result<(), AppError> {
+        // A deliberate clean start must survive every reopen, including the
+        // default alias seeds below. The marker is only set by explicit reset.
+        if self.get_setting(KEY_PROVIDER_SEED_DISABLED)?.as_deref() == Some("1") {
+            return Ok(());
+        }
         // Seed proxy config (singleton row) if absent
         {
             let conn = lock_conn!(self.conn);
@@ -62,6 +68,9 @@ impl Database {
                 },
                 model_mapping: Default::default(),
                 extra_headers: Default::default(),
+                auto_track_models: false,
+                icon: None,
+                icon_color: None,
             })?;
             self.save_proxy_provider(&ProxyProvider {
                 id: MOCK_FALLBACK.into(),
@@ -85,6 +94,9 @@ impl Database {
                 },
                 model_mapping: Default::default(),
                 extra_headers: Default::default(),
+                auto_track_models: false,
+                icon: None,
+                icon_color: None,
             })?;
         }
 
